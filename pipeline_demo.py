@@ -1,8 +1,20 @@
-"""End-to-end demonstration run on real Alpha Vantage data.
+"""End-to-end demonstration of the morning pipeline.
 
 Executes the same sequence a live morning would: preflight self-audit, data
 validation, anomaly detection, volatility and indicator computation, stop and
 size derivation, portfolio concentration, then writes a run manifest.
+
+Data source, in order of preference:
+
+  1. `data/<SYM>.csv`     -- saved Alpha Vantage pulls, real market data, not
+                             committed (see .gitignore).
+  2. `fixtures/<SYM>.csv` -- deterministic SYNTHETIC series built from a known
+                             volatility by `make_fixtures.py`, committed so the
+                             demo runs on a fresh clone with no API key.
+
+Which one was used is printed in the header and recorded in the run manifest
+under `data_source`. Synthetic output is never presented as market data: the
+whole point of this system is that a number always says where it came from.
 """
 
 import json
@@ -25,8 +37,25 @@ RISK_BUDGET = 0.02
 DATA_ASOF = pd.Timestamp("2026-08-28")
 
 
-def load(sym: str) -> pd.DataFrame:
-    df = pd.read_csv(Path("data") / f"{sym}.csv", parse_dates=["timestamp"])
+REAL_DIR = Path("data")
+FIXTURE_DIR = Path("fixtures")
+
+
+def data_source() -> tuple[Path, str]:
+    """Pick the data directory and name it honestly."""
+    if all((REAL_DIR / f"{s}.csv").exists() for s in SYMBOLS):
+        return REAL_DIR, "real"
+    if all((FIXTURE_DIR / f"{s}.csv").exists() for s in SYMBOLS):
+        return FIXTURE_DIR, "synthetic"
+    raise SystemExit(
+        f"no complete series for {SYMBOLS} in ./{REAL_DIR} or ./{FIXTURE_DIR}. "
+        f"Run `python make_fixtures.py` to build the synthetic fallback."
+    )
+
+
+def load(sym: str, root: Path) -> pd.DataFrame:
+    # comment="#" so the fixture provenance header does not become a data row.
+    df = pd.read_csv(root / f"{sym}.csv", parse_dates=["timestamp"], comment="#")
     return df.set_index("timestamp").sort_index()
 
 
@@ -55,6 +84,12 @@ def run_self_test() -> dict:
 def main():
     log = R.RunLog(f"demo-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}", mode="dry_run")
 
+    root, kind = data_source()
+    log.metric("data_source", {"path": str(root), "kind": kind})
+    banner = ("REAL saved market data" if kind == "real" else
+              "SYNTHETIC fixtures -- illustrative only, NOT market data")
+    print(f"data source      : ./{root}  ({banner})")
+
     # ---------------- preflight ----------------
     with log.stage("preflight"):
         st = run_self_test()
@@ -80,7 +115,7 @@ def main():
     with log.stage("gather_and_validate") as s:
         for sym in SYMBOLS:
             t0 = time.monotonic()
-            df = load(sym)
+            df = load(sym, root)
             log.call("alphavantage", f"TIME_SERIES_DAILY:{sym}", True,
                      int((time.monotonic() - t0) * 1000), f"{len(df)} bars")
             anoms = q.detect_anomalies(sym, df, asof=DATA_ASOF)
@@ -164,6 +199,9 @@ def main():
 
     Path("run_manifest.json").write_text(log.to_json())
     print(f"\nmanifest written: {len(log.to_json())} bytes")
+    if kind == "synthetic":
+        print("\nNOTE: every figure above was computed from synthetic fixtures. "
+              "It demonstrates that the pipeline runs, not what any real security did.")
     return log
 
 
