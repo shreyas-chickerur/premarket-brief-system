@@ -320,3 +320,66 @@ def test_scoring_computes_dispersion():
     closed = [{"outcome_pct": v, "thesis_played_out": True} for v in (10, -5, 3, 8, -2)]
     s = R.score_closed_decisions(closed)
     assert s["return_stdev_pct"] > 0 and s["best_pct"] == 10 and s["worst_pct"] == -5
+
+
+# ------------------------------------------------- market calendar integrity
+
+# Cross-checked 28 Aug 2026 against the exchange's published calendar at
+# https://www.nyse.com/markets/hours-calendars. These are known-answer tests: the
+# table is a hand-maintained list, and the failure mode that matters is a date
+# that looks reasonable but is wrong, which only an authoritative comparison
+# catches.
+
+NYSE_CLOSURES_THROUGH_2027 = {
+    "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26",
+    "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06",
+    "2027-11-25", "2027-12-24",
+}
+NYSE_EARLY_CLOSES_THROUGH_2027 = {"2026-11-27", "2026-12-24", "2027-11-26"}
+
+
+def test_holiday_table_matches_the_published_exchange_calendar():
+    assert R.MARKET_HOLIDAYS_2026_2027 == NYSE_CLOSURES_THROUGH_2027
+
+
+def test_early_close_table_matches_the_published_exchange_calendar():
+    assert R.EARLY_CLOSE_2026_2027 == NYSE_EARLY_CLOSES_THROUGH_2027
+
+
+def test_new_years_eve_2027_is_a_trading_day():
+    """The rule that a Saturday holiday moves to the preceding Friday does NOT
+    apply to New Year's Day when the substitute would be the last trading day of
+    the year. 1 Jan 2028 is a Saturday; 31 Dec 2027 is a regular session.
+    Precedent: 31 Dec 2010 and 31 Dec 2021 both traded in full."""
+    assert "2027-12-31" not in R.MARKET_HOLIDAYS_2026_2027
+
+    log = R.preflight(base_log(), available_tools=TOOLS, required_tools=REQUIRED,
+                      local_time=datetime(2027, 12, 31, 6, 20),
+                      expected_local_hhmm=(6, 20), self_test=GOOD_TEST)
+    assert next(c for c in log.checks if c.name == "market_open_today").passed
+
+
+def test_no_holiday_falls_on_a_weekend():
+    """Every entry must be a date the market would otherwise have been open.
+    A weekend entry means an observance rule was applied without substitution."""
+    for iso in R.MARKET_HOLIDAYS_2026_2027 | R.EARLY_CLOSE_2026_2027:
+        d = datetime.strptime(iso, "%Y-%m-%d")
+        assert d.weekday() < 5, f"{iso} falls on a weekend"
+
+
+def test_holiday_table_reports_itself_current_inside_the_horizon():
+    log = R.preflight(base_log(), available_tools=TOOLS, required_tools=REQUIRED,
+                      local_time=NORMAL_TIME, expected_local_hhmm=(6, 20),
+                      self_test=GOOD_TEST)
+    assert next(c for c in log.checks if c.name == "holiday_table_current").passed
+
+
+def test_expired_holiday_table_is_flagged_rather_than_silently_trusted():
+    """Past the horizon an unlisted date is not evidence of a normal session,
+    it is evidence the table ran out."""
+    log = R.preflight(base_log(), available_tools=TOOLS, required_tools=REQUIRED,
+                      local_time=datetime(2028, 3, 15, 6, 20),
+                      expected_local_hhmm=(6, 20), self_test=GOOD_TEST)
+    c = next(c for c in log.checks if c.name == "holiday_table_current")
+    assert not c.passed and "expired" in c.detail

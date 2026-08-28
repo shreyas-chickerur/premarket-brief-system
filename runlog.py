@@ -193,17 +193,49 @@ class _StageCtx:
 # the morning self-audit
 # --------------------------------------------------------------------------
 
-# PROVENANCE: derived from the standard United States exchange holiday rules,
-# not yet cross-checked against the exchange's published calendar. Must be
-# verified before go-live; a wrong date here makes the system think a closed
-# market is open. Tracked as an open item.
+# PROVENANCE: cross-checked 28 Aug 2026 against the exchange's own published
+# holiday calendar at https://www.nyse.com/markets/hours-calendars, not merely
+# derived from the observance rules. A wrong date here makes the system think a
+# closed market is open, so the table is verified rather than computed.
+#
+# Table covers 28 Aug 2026 through 31 Dec 2027. `holiday_table_covers` below is
+# the expiry guard: once the run date passes the horizon the preflight fails
+# loudly instead of silently trusting an exhausted table.
+#
+# One subtlety the observance rules alone get wrong, and which cost this table a
+# bug: when a holiday falls on a Saturday the preceding Friday normally closes,
+# BUT the exchange does not apply that to New Year's Day when the substitute
+# Friday would be the last trading day of the year. 1 Jan 2028 is a Saturday and
+# 31 Dec 2027 is therefore a REGULAR SESSION, not a holiday. Precedent:
+# 31 Dec 2010 and 31 Dec 2021 were both full trading days.
 MARKET_HOLIDAYS_2026_2027 = {
-    "2026-09-07", "2026-11-26", "2026-12-25",
-    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26",
-    "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06",
-    "2027-11-25", "2027-12-24", "2027-12-31",
+    # 2026 (remaining after this system was written)
+    "2026-09-07",  # Labor Day
+    "2026-11-26",  # Thanksgiving
+    "2026-12-25",  # Christmas
+    # 2027
+    "2027-01-01",  # New Year's Day
+    "2027-01-18",  # Martin Luther King Jr. Day
+    "2027-02-15",  # Washington's Birthday
+    "2027-03-26",  # Good Friday
+    "2027-05-31",  # Memorial Day
+    "2027-06-18",  # Juneteenth (observed; 19 Jun falls on a Saturday)
+    "2027-07-05",  # Independence Day (observed; 4 Jul falls on a Sunday)
+    "2027-09-06",  # Labor Day
+    "2027-11-25",  # Thanksgiving
+    "2027-12-24",  # Christmas (observed; 25 Dec falls on a Saturday)
 }
-EARLY_CLOSE_2026_2027 = {"2026-11-27", "2026-12-24", "2027-11-26"}
+
+# 1:00 p.m. ET closes.
+EARLY_CLOSE_2026_2027 = {
+    "2026-11-27",  # day after Thanksgiving
+    "2026-12-24",  # Christmas Eve
+    "2027-11-26",  # day after Thanksgiving
+}
+
+# Last date the tables above are known-good for. Past this, the calendar check
+# must fail rather than assume an unlisted date is a normal trading day.
+HOLIDAY_TABLE_HORIZON = "2027-12-31"
 
 
 def preflight(log: RunLog, *,
@@ -260,7 +292,19 @@ def preflight(log: RunLog, *,
               f"(off by {delta} min)", value=delta)
 
     # 4. Is the market even open today?
+    #    The holiday table is a hand-verified list with a finite horizon. Once
+    #    the run date runs past that horizon an unlisted date is no longer
+    #    evidence of a normal session, it is evidence the table expired -- so
+    #    say so loudly rather than trading a closed market.
     iso = local_time.date().isoformat()
+    table_live = iso <= HOLIDAY_TABLE_HORIZON
+    log.check("holiday_table_current", table_live, "warn",
+              f"verified through {HOLIDAY_TABLE_HORIZON}"
+              if table_live else
+              f"table expired {HOLIDAY_TABLE_HORIZON}; extend it from the "
+              f"exchange's published calendar before trusting the session check",
+              value=HOLIDAY_TABLE_HORIZON)
+
     is_weekend = local_time.weekday() >= 5
     is_holiday = iso in MARKET_HOLIDAYS_2026_2027
     log.check("market_open_today", not (is_weekend or is_holiday), "info",
