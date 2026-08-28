@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Private state. Account numbers, balances, config values, the trade journal,
+# the wash-sale registry, and run manifests. Never commit these.
+state.json
+HANDOFF.private.md
+run_manifest.json
+
+# Saved market-data pulls. Real data is not committed; the demo falls back to
+# the deterministic synthetic series in fixtures/, which IS committed.
+data/
+
+# Rendered email drafts.
+*.html

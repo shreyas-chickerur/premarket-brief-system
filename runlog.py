@@ -1,0 +1,459 @@
+"""
+runlog — health logging, run manifests, and the morning self-audit.
+
+Every run writes one manifest. Every morning's first act is to read the last N
+manifests and audit itself against them before it looks at a single price.
+
+The ordering is deliberate: a system that researches first and checks itself
+afterwards has already wasted the run by the time it discovers it was broken.
+"""
+
+from __future__ import annotations
+
+import json
+import statistics
+import time
+import traceback
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, date, timezone
+from typing import Any, Optional, Sequence
+
+SCHEMA_VERSION = 3
+
+Severity = str  # info | warn | block
+
+
+# --------------------------------------------------------------------------
+# records
+# --------------------------------------------------------------------------
+
+@dataclass
+class Check:
+    name: str
+    passed: bool
+    severity: Severity          # severity IF it fails
+    detail: str = ""
+    value: Any = None
+
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class Stage:
+    name: str
+    started_at: str
+    duration_ms: int
+    ok: bool
+    error: str = ""
+    records: int = 0
+
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class ExternalCall:
+    service: str
+    operation: str
+    ok: bool
+    latency_ms: int
+    detail: str = ""
+
+    def to_dict(self): return asdict(self)
+
+
+@dataclass
+class Decision:
+    """Every action AND every deliberate non-action is recorded. A day with no
+    trades must leave the same audit trail as a day with three."""
+    symbol: str
+    action: str                 # buy | sell | trim | hold | reject | skip | none
+    account: str                # individual | agentic
+    executed: bool
+    reason: str
+    gate_failed: Optional[str] = None
+    inputs: dict = field(default_factory=dict)
+
+    def to_dict(self): return asdict(self)
+
+
+# --------------------------------------------------------------------------
+# the run log
+# --------------------------------------------------------------------------
+
+class RunLog:
+    def __init__(self, run_id: str, *, now: Optional[datetime] = None,
+                 mode: str = "live"):
+        self.schema = SCHEMA_VERSION
+        self.run_id = run_id
+        self.mode = mode                       # live | dry_run | verification
+        self.started_at = (now or datetime.now(timezone.utc)).isoformat()
+        self.checks: list[Check] = []
+        self.stages: list[Stage] = []
+        self.calls: list[ExternalCall] = []
+        self.anomalies: list[dict] = []
+        self.decisions: list[Decision] = []
+        self.metrics: dict[str, Any] = {}
+        self.errors: list[str] = []
+        self.aborted: bool = False
+        self.abort_reason: str = ""
+        self._t0 = time.monotonic()
+
+    # -- recording -------------------------------------------------------
+    def check(self, name: str, passed: bool, severity: Severity = "warn",
+              detail: str = "", value: Any = None) -> Check:
+        c = Check(name, passed, severity, detail, value)
+        self.checks.append(c)
+        return c
+
+    def call(self, service: str, operation: str, ok: bool,
+             latency_ms: int, detail: str = "") -> None:
+        self.calls.append(ExternalCall(service, operation, ok, latency_ms, detail))
+
+    def anomaly(self, a) -> None:
+        self.anomalies.append(a if isinstance(a, dict) else a.to_dict())
+
+    def decide(self, d: Decision) -> None:
+        self.decisions.append(d)
+
+    def metric(self, key: str, value: Any) -> None:
+        self.metrics[key] = value
+
+    def abort(self, reason: str) -> None:
+        self.aborted = True
+        self.abort_reason = reason
+
+    def stage(self, name: str):
+        return _StageCtx(self, name)
+
+    # -- derived ---------------------------------------------------------
+    @property
+    def blocking_failures(self) -> list[Check]:
+        return [c for c in self.checks if not c.passed and c.severity == "block"]
+
+    @property
+    def warnings(self) -> list[Check]:
+        return [c for c in self.checks if not c.passed and c.severity == "warn"]
+
+    @property
+    def may_trade(self) -> bool:
+        return not self.aborted and not self.blocking_failures and not self.errors
+
+    def health(self) -> str:
+        if self.aborted or self.blocking_failures or self.errors:
+            return "critical"
+        if self.warnings or any(not c.ok for c in self.stages) or any(not c.ok for c in self.calls):
+            return "degraded"
+        return "nominal"
+
+    def manifest(self) -> dict:
+        return {
+            "schema": self.schema,
+            "run_id": self.run_id,
+            "mode": self.mode,
+            "started_at": self.started_at,
+            "duration_ms": int((time.monotonic() - self._t0) * 1000),
+            "health": self.health(),
+            "may_trade": self.may_trade,
+            "aborted": self.aborted,
+            "abort_reason": self.abort_reason,
+            "checks": [c.to_dict() for c in self.checks],
+            "stages": [s.to_dict() for s in self.stages],
+            "calls": [c.to_dict() for c in self.calls],
+            "anomalies": self.anomalies,
+            "decisions": [d.to_dict() for d in self.decisions],
+            "metrics": self.metrics,
+            "errors": self.errors,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.manifest(), indent=2, sort_keys=True, default=str)
+
+
+class _StageCtx:
+    def __init__(self, log: RunLog, name: str):
+        self.log, self.name, self.records = log, name, 0
+
+    def __enter__(self):
+        self._start = time.monotonic()
+        self._started_at = datetime.now(timezone.utc).isoformat()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        dur = int((time.monotonic() - self._start) * 1000)
+        ok = exc_type is None
+        err = ""
+        if not ok:
+            err = f"{exc_type.__name__}: {exc}"
+            self.log.errors.append(f"[{self.name}] {err}")
+        self.log.stages.append(Stage(self.name, self._started_at, dur, ok, err, self.records))
+        return False        # never swallow
+
+
+# --------------------------------------------------------------------------
+# the morning self-audit
+# --------------------------------------------------------------------------
+
+# PROVENANCE: derived from the standard United States exchange holiday rules,
+# not yet cross-checked against the exchange's published calendar. Must be
+# verified before go-live; a wrong date here makes the system think a closed
+# market is open. Tracked as an open item.
+MARKET_HOLIDAYS_2026_2027 = {
+    "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26",
+    "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06",
+    "2027-11-25", "2027-12-24", "2027-12-31",
+}
+EARLY_CLOSE_2026_2027 = {"2026-11-27", "2026-12-24", "2027-11-26"}
+
+
+def preflight(log: RunLog, *,
+              available_tools: Sequence[str],
+              required_tools: Sequence[str],
+              local_time: datetime,
+              expected_local_hhmm: tuple[int, int],
+              tolerance_minutes: int = 30,
+              history: Sequence[dict] = (),
+              self_test: Optional[dict] = None,
+              ledger_positions: Optional[dict] = None,
+              broker_positions: Optional[dict] = None) -> RunLog:
+    """Run before any research. Fills `log` with checks and may abort the run.
+
+    Ordered cheapest-and-most-fatal first, so a broken run dies in milliseconds
+    rather than after twenty minutes of research it cannot act on.
+    """
+
+    # 1. Are the tools we need actually here? The documented cold-start defect
+    #    in scheduled runs makes this the single most important check.
+    missing = [t for t in required_tools if t not in set(available_tools)]
+    log.check("tools_available", not missing, "block",
+              f"missing: {missing}" if missing else f"all {len(required_tools)} present",
+              value=missing)
+    if missing:
+        log.abort(f"required tools not visible: {missing}")
+
+    # 2. Did our own code survive the night? Cheap, and it is literally the
+    #    "check for bugs first" requirement.
+    if self_test is not None:
+        passed = bool(self_test.get("passed"))
+        log.check("self_test", passed, "block",
+                  f"{self_test.get('n_passed', 0)} passed, "
+                  f"{self_test.get('n_failed', 0)} failed in "
+                  f"{self_test.get('duration_ms', 0)}ms",
+                  value=self_test)
+        if not passed:
+            log.abort(f"self test failed: {self_test.get('summary', 'unknown')}")
+
+    # 3. Did we fire when we meant to? This guards daylight-saving drift, so it
+    #    must compare against the exact intended minute and hold a tolerance
+    #    well under 60 — comparing to the top of the hour with a wide window
+    #    would let a full one-hour shift pass unnoticed, which is precisely the
+    #    failure this check exists to catch.
+    exp_h, exp_m = expected_local_hhmm
+    if not (0 <= exp_h < 24 and 0 <= exp_m < 60):
+        raise ValueError(f"invalid expected_local_hhmm: {expected_local_hhmm}")
+    if tolerance_minutes >= 60:
+        raise ValueError("tolerance_minutes must be under 60 to detect a DST shift")
+    delta = abs((local_time.hour * 60 + local_time.minute) - (exp_h * 60 + exp_m))
+    delta = min(delta, 1440 - delta)          # wrap around midnight
+    log.check("fired_on_schedule", delta <= tolerance_minutes, "warn",
+              f"fired {local_time:%H:%M} local, expected {exp_h:02d}:{exp_m:02d} "
+              f"(off by {delta} min)", value=delta)
+
+    # 4. Is the market even open today?
+    iso = local_time.date().isoformat()
+    is_weekend = local_time.weekday() >= 5
+    is_holiday = iso in MARKET_HOLIDAYS_2026_2027
+    log.check("market_open_today", not (is_weekend or is_holiday), "info",
+              "weekend" if is_weekend else ("holiday" if is_holiday else "regular session"),
+              value={"weekend": is_weekend, "holiday": is_holiday,
+                     "early_close": iso in EARLY_CLOSE_2026_2027})
+
+    # 5. Does the ledger agree with the broker? Disagreement means our memory of
+    #    the world is wrong, and every sizing decision downstream is wrong too.
+    if ledger_positions is not None and broker_positions is not None:
+        drift = _reconcile(ledger_positions, broker_positions)
+        log.check("ledger_reconciled", not drift, "block",
+                  "in agreement" if not drift else f"{len(drift)} discrepancy: {drift}",
+                  value=drift)
+        if drift:
+            log.abort(f"ledger and broker disagree on {list(drift)}")
+
+    # 6. Regression against recent runs.
+    for c in _regressions(history):
+        log.checks.append(c)
+
+    # 7. Standing improvement opportunities from the record.
+    log.metric("optimizations", find_optimizations(history))
+    return log
+
+
+def _reconcile(ledger: dict, broker: dict, tol: float = 1e-6) -> dict:
+    """Symbol -> (ledger_qty, broker_qty) for anything that disagrees."""
+    out = {}
+    for sym in set(ledger) | set(broker):
+        a, b = float(ledger.get(sym, 0)), float(broker.get(sym, 0))
+        if abs(a - b) > tol:
+            out[sym] = {"ledger": a, "broker": b}
+    return out
+
+
+def _regressions(history: Sequence[dict]) -> list[Check]:
+    """Compare the recent record against itself and flag what is trending wrong."""
+    checks: list[Check] = []
+    if len(history) < 3:
+        checks.append(Check("history_depth", True, "info",
+                            f"only {len(history)} prior run(s); "
+                            "regression checks need 3+", value=len(history)))
+        return checks
+
+    recent = list(history)[-10:]
+
+    healths = [h.get("health") for h in recent]
+    bad = sum(1 for h in healths if h in ("degraded", "critical"))
+    checks.append(Check("recent_health", bad <= len(recent) // 2, "warn",
+                        f"{bad} of {len(recent)} recent runs not nominal", value=healths))
+
+    durs = [h.get("duration_ms", 0) for h in recent if h.get("duration_ms")]
+    if len(durs) >= 3:
+        med = statistics.median(durs[:-1]) or 1
+        latest = durs[-1]
+        checks.append(Check("duration_stable", latest <= med * 2.5, "warn",
+                            f"last run {latest}ms vs median {med:.0f}ms",
+                            value={"latest": latest, "median": med}))
+
+    # A check that fails on most days is either a real standing problem or a
+    # badly written check. Either way it needs a human's attention, not silence.
+    tally: dict[str, int] = {}
+    for h in recent:
+        for c in h.get("checks", []):
+            if not c.get("passed"):
+                tally[c["name"]] = tally.get(c["name"], 0) + 1
+    chronic = {k: v for k, v in tally.items() if v >= max(3, len(recent) // 2)}
+    checks.append(Check("no_chronic_failures", not chronic, "warn",
+                        f"chronic: {chronic}" if chronic else "none", value=chronic))
+
+    # Repeated data anomalies on one symbol means the source is unreliable there.
+    sym_tally: dict[str, int] = {}
+    for h in recent:
+        for a in h.get("anomalies", []):
+            if a.get("severity") in ("block", "warn"):
+                sym_tally[a.get("symbol", "?")] = sym_tally.get(a.get("symbol", "?"), 0) + 1
+    repeat = {k: v for k, v in sym_tally.items() if v >= 3}
+    checks.append(Check("no_repeat_data_faults", not repeat, "warn",
+                        f"repeat offenders: {repeat}" if repeat else "none", value=repeat))
+
+    fail_calls = [c for h in recent for c in h.get("calls", []) if not c.get("ok")]
+    rate = len(fail_calls) / max(1, sum(len(h.get("calls", [])) for h in recent))
+    checks.append(Check("external_call_reliability", rate < 0.15, "warn",
+                        f"{rate:.0%} of recent external calls failed", value=round(rate, 4)))
+    return checks
+
+
+def find_optimizations(history: Sequence[dict]) -> list[dict]:
+    """Look for things worth changing. Proposals only — nothing self-modifies.
+
+    Each finding names the evidence and the sample size, so a pattern seen four
+    times is never dressed up as a validated conclusion.
+    """
+    out: list[dict] = []
+    if len(history) < 5:
+        return out
+    recent = list(history)[-30:]
+    n = len(recent)
+
+    # Stops that filled and then the name recovered promptly => stop too tight.
+    tight = [d for h in recent for d in h.get("decisions", [])
+             if d.get("action") == "stop_filled" and d.get("inputs", {}).get("recovered_within_5d")]
+    stops = [d for h in recent for d in h.get("decisions", []) if d.get("action") == "stop_filled"]
+    if len(stops) >= 5 and len(tight) / len(stops) > 0.5:
+        out.append({"kind": "stop_distance", "confidence": "tentative",
+                    "sample": len(stops),
+                    "finding": f"{len(tight)} of {len(stops)} stopped positions recovered "
+                               f"within five days — the volatility multiple may be too tight",
+                    "proposal": "raise k_daily_sigma from 2.5 to 3.0 and re-observe"})
+
+    # Which gate condition is doing the rejecting?
+    gates: dict[str, int] = {}
+    for h in recent:
+        for d in h.get("decisions", []):
+            g = d.get("gate_failed")
+            if g:
+                gates[g] = gates.get(g, 0) + 1
+    if gates:
+        top, cnt = max(gates.items(), key=lambda kv: kv[1])
+        total = sum(gates.values())
+        if cnt / total > 0.6 and total >= 10:
+            out.append({"kind": "gate_balance", "confidence": "observational",
+                        "sample": total,
+                        "finding": f"{cnt/total:.0%} of rejections come from '{top}' alone",
+                        "proposal": "confirm this gate is discriminating rather than "
+                                    "just hard to satisfy mechanically"})
+
+    # Are we producing anything at all?
+    idle = sum(1 for h in recent
+               if not any(d.get("executed") for d in h.get("decisions", [])))
+    if n >= 10 and idle / n > 0.85:
+        out.append({"kind": "throughput", "confidence": "observational", "sample": n,
+                    "finding": f"no action taken on {idle} of {n} runs",
+                    "proposal": "verify the gate is calibrated, not merely unreachable"})
+
+    # Slowest stage, if it dominates.
+    agg: dict[str, list[int]] = {}
+    for h in recent:
+        for s in h.get("stages", []):
+            agg.setdefault(s["name"], []).append(s.get("duration_ms", 0))
+    if agg:
+        means = {k: statistics.mean(v) for k, v in agg.items()}
+        slow = max(means, key=means.get)
+        total = sum(means.values()) or 1
+        if means[slow] / total > 0.5:
+            out.append({"kind": "performance", "confidence": "measured", "sample": n,
+                        "finding": f"stage '{slow}' is {means[slow]/total:.0%} of runtime "
+                                   f"({means[slow]:.0f}ms average)",
+                        "proposal": "narrow or cache this stage's inputs"})
+    return out
+
+
+# --------------------------------------------------------------------------
+# scoring past suggestions
+# --------------------------------------------------------------------------
+
+def score_closed_decisions(closed: Sequence[dict]) -> dict:
+    """Grade the record honestly, including refusing to grade a small sample.
+
+    `closed` items need: outcome_pct, thesis_played_out (bool), horizon_days.
+    """
+    n = len(closed)
+    if n == 0:
+        return {"n": 0, "verdict": "no closed positions yet"}
+
+    rets = [float(c["outcome_pct"]) for c in closed]
+    wins = [r for r in rets if r > 0]
+    played = sum(1 for c in closed if c.get("thesis_played_out"))
+
+    res = {
+        "n": n,
+        "hit_rate": len(wins) / n,
+        "mean_return_pct": statistics.mean(rets),
+        "median_return_pct": statistics.median(rets),
+        "best_pct": max(rets), "worst_pct": min(rets),
+        "thesis_accuracy": played / n,
+    }
+    if n >= 2:
+        sd = statistics.stdev(rets)
+        res["return_stdev_pct"] = sd
+        res["mean_over_sd"] = statistics.mean(rets) / sd if sd > 0 else None
+
+    # The honesty gate. Below roughly 30 closed trades, per-trade noise swamps
+    # any plausible edge, and reporting a Sharpe-like number would be theatre.
+    if n < 30:
+        res["verdict"] = (f"{n} closed trades is too few to distinguish skill from luck. "
+                          f"These figures describe what happened; they do not "
+                          f"establish that the process works.")
+        res["statistically_meaningful"] = False
+    else:
+        res["verdict"] = (f"{n} closed trades — still a small sample. Treat any edge "
+                          f"as provisional and check it against a deflated Sharpe ratio "
+                          f"before acting on it.")
+        res["statistically_meaningful"] = False if n < 100 else "provisional"
+    return res
