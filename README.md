@@ -4,8 +4,10 @@ Measurement and health layers for a daily pre-market research and trading brief
 running on a broker's agentic trading account.
 
 This repository holds **code only**. All state — the trade journal, the wash-sale
-registry, open theses, run manifests, and account identifiers — lives in a private
-Google Drive folder and is never committed here.
+registry, open theses, run manifests, configuration values, and account
+identifiers — lives in a private Google Drive folder and is never committed here.
+
+Start with [HANDOFF.md](HANDOFF.md), the operations guide.
 
 ## Modules
 
@@ -14,7 +16,8 @@ Google Drive folder and is never committed here.
 | `quantcore.py` | Volatility estimators, indicators, stop distance, position sizing, data-anomaly detection |
 | `runlog.py` | Run manifests, staged timing, the preflight self-audit, regression review, honest scoring |
 | `washsale.py` | Cross-account wash-sale registry (26 U.S.C. 1091 is taxpayer-level, not account-level) |
-| `pipeline_demo.py` | End-to-end demonstration run against saved market data |
+| `pipeline_demo.py` | End-to-end demonstration run |
+| `make_fixtures.py` | Regenerates the deterministic synthetic series the demo falls back to |
 
 ## Design rules
 
@@ -27,8 +30,10 @@ Google Drive folder and is never committed here.
 4. The morning run audits itself before it looks at a single price: run the test
    suite, verify the brokerage tools are visible, reconcile the ledger against the
    broker, check the clock and calendar, review the last ten runs.
-5. Stops are sized from each security's own volatility, floored at 6% and capped
-   at 15%. A flat percentage is wrong for every stock at once.
+5. Stops are sized from each security's own volatility, then floored and capped.
+   A flat percentage is wrong for every stock at once.
+6. The market calendar is a verified table, not derived from the observance
+   rules, and it fails loudly once past the horizon it was verified through.
 
 ## Broker constraints this code encodes
 
@@ -42,13 +47,27 @@ Google Drive folder and is never committed here.
   cancel tool — so stops are placed good-for-day and re-derived each morning rather
   than left resting.
 
-## Tests
+## Running it
+
+Python 3.11 or newer.
 
 ```
-pip install --break-system-packages arch statsmodels pytest
-python -m pytest -q
+python3.11 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python -m pytest -q          # 122 tests
+python pipeline_demo.py      # end-to-end run
 ```
+
+The demo prefers real saved pulls in `data/` and falls back to the committed
+synthetic fixtures in `fixtures/`, so a fresh clone runs with no API key. It
+prints which source it used, and says plainly when the numbers are synthetic.
+
+## Tests
 
 Known-answer tests simulate a price path with a *known* volatility and require each
 estimator to recover it. An estimator that returns a plausible number for the wrong
 reason is the failure mode that matters, and only a known-answer test catches it.
+
+The market-calendar tests are the same idea applied to a hand-maintained table:
+they compare it against the exchange's published calendar, because a holiday date
+that merely looks reasonable is exactly the kind of wrong that goes unnoticed.
