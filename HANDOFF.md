@@ -144,9 +144,20 @@ the circuit breaker is far away. It becomes meaningful as capital is deployed.
 | Code | this public repository | `git clone --depth 1` each morning: no credentials, no context cost |
 | State | private Google Drive folder | Account numbers, config, journal, registry, manifests |
 
-`state.json` is the single source of truth for everything private. Drive also
-holds a copy of each Python module as a fallback source if the repository is
-unreachable. The folder and file identifiers are in `HANDOFF.private.md`.
+`state.json` is the single source of truth for everything private. The folder
+and file identifiers are in `HANDOFF.private.md`.
+
+Two properties of the Drive connector shape how state is written:
+
+- **It can rewrite a file's metadata but not its contents.** Updating
+  `state.json` therefore means creating the new version and renaming the old to
+  `state.superseded-YYYY-MM-DD.json`. Run history accumulates as dated
+  `run-manifest-YYYY-MM-DD.json` files rather than by appending to one document.
+- **Drive is not a code fallback.** It briefly held copies of the Python
+  modules; they went stale the first time the code changed, and a stale copy of
+  the market calendar is exactly the failure this system is built to avoid. The
+  repository is the only source of truth for code, and a failed clone aborts the
+  run rather than reaching for a second copy.
 
 **Never commit `state.json`, `HANDOFF.private.md`, or anything from `data/`.**
 `.gitignore` covers all three; that is a backstop, not a substitute for care.
@@ -311,22 +322,34 @@ decisions.
    Done — one wrong date found and fixed, regression tests added, expiry guard
    added.
 3. ~~Make `pipeline_demo.py` runnable on a fresh clone.~~ Done via `fixtures/`.
-4. **Create the scheduled task** using section 8.
-5. **Run one cycle with zero orders** at the real fire time to prove the pipeline
-   — authentication, data retrieval, email rendering and delivery — before any
-   real order. This is the single most important remaining step.
-6. **First live run:** close the unstoppable directional position, and act on the
+4. ~~Create the scheduled task.~~ Done — it runs weekdays at 06:20 Central in
+   **dry-run mode**, where order placement is forbidden outright rather than
+   merely declined by a later stage.
+5. **Prove the dry run end to end.** The first fire confirmed the clone, the
+   dependency install, and all 122 tests passing in the cloud environment. What
+   still needs proving on a weekday, when the market is open, is the brokerage
+   read path, the market-data pulls, and email delivery.
+6. **Attach the brokerage connector to the scheduled run.** Until it is visible,
+   preflight aborts by design and no research happens. See section 11.
+7. **Only then, switch to live.** Replace the dry-run prompt with the standard
+   one from `TRIGGER_PROMPT.md`. This is a deliberate, reversible decision and
+   should be made by a person, not inherited by a routine.
+8. **First live run:** close the unstoppable directional position, and act on the
    concentration and cash-floor breaches if and only if they clear the gate.
-7. **Extend the holiday table** before `HOLIDAY_TABLE_HORIZON`.
+9. **Extend the holiday table** before `HOLIDAY_TABLE_HORIZON`.
 
 ## 11. Open and unverified
 
 - Whether the connector broker refreshes the brokerage token indefinitely without
   a fresh desktop-browser sign-in. The token expires roughly every four days;
   refresh is supported but unconfirmed for this server.
-- Whether a scheduled cloud run reliably sees the brokerage connector. There is a
-  documented cold-start defect, closed without a fix. **This is why Stage 0
-  aborts on a missing tool rather than proceeding.**
+- Whether a scheduled cloud run reliably sees the brokerage connector.
+  **Observed on the first scheduled fire: it did not.** The market-data, mail,
+  and storage connectors resolved; the brokerage connector was not present in
+  the run's tool set. Preflight caught it and refused to proceed, which is the
+  designed behaviour, but it means the routine cannot do useful work until the
+  connector is attached to the routine itself rather than only to the
+  interactive account. This is the top open item.
 
 ## 12. Standing honesty rules
 

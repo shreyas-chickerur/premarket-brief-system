@@ -9,7 +9,7 @@ and one source of truth:
 
 | Placeholder | Value |
 |---|---|
-| `{{DRIVE_FOLDER_ID}}` | Google Drive folder holding `state.json` and the module fallbacks |
+| `{{DRIVE_FOLDER_ID}}` | Google Drive folder holding `state.json` and the run manifests |
 | `{{STATE_FILE_ID}}` | Drive file id of `state.json` |
 
 Both are in `HANDOFF.private.md`.
@@ -24,7 +24,7 @@ the daylight-saving changeover dates.
 >
 > **STAGE 0 — PREFLIGHT. Do this before looking at a single price.**
 >
-> 1. `git clone --depth 1 https://github.com/shreyas-chickerur/premarket-brief-system /tmp/pbs` then `cd /tmp/pbs` and `pip install --break-system-packages -q -r requirements.txt`. If the clone fails, fall back to downloading the Python modules from the Google Drive folder `{{DRIVE_FOLDER_ID}}`.
+> 1. `git clone --depth 1 https://github.com/shreyas-chickerur/premarket-brief-system /tmp/pbs` then `cd /tmp/pbs` and `pip install --break-system-packages -q -r requirements.txt`. **If the clone fails, abort the run and report it.** Do not reconstruct the code from anywhere else: the repository is the only source of truth for it, and a second copy is a copy that can silently be a version behind. Stale trading code is more dangerous than a missed session.
 > 2. Run `python -m pytest -q`. **If any test fails, abort the run entirely, place no orders, and jump to STAGE 6 with the failure as the headline.**
 > 3. Confirm these tools are visible in this session: brokerage `get_accounts`, `get_equity_positions`, `get_portfolio`, `place_equity_order`, `review_equity_order`, `get_equity_quotes`; market data `TIME_SERIES_DAILY` and `MARKET_STATUS`; Gmail `send_message`; Google Drive `search_files`. **If any are missing, abort execution, place no orders, and report it.** This guards a known cold-start defect in scheduled runs.
 > 4. Read `state.json` (Drive file id `{{STATE_FILE_ID}}`). It holds `accounts` (the individual and agentic account numbers and roles), `config` (every threshold, cap, and dial), the trade journal, the wash-sale registry, and the last runs' manifests. **Take every account number, threshold, and limit from this file. Do not hardcode any of them, and do not carry a remembered value from a previous run.**
@@ -54,7 +54,7 @@ the daylight-saving changeover dates.
 > - Circuit breaker: agentic equity below `circuit_breaker_usd` → no new positions, drop to level 4, require review. Hard stop: below `hard_stop_usd` → liquidate to cash, halt, say so loudly.
 > - If an order is rejected, do not retry in a loop. Report the rejection verbatim.
 >
-> **STAGE 6 — RECORD AND SEND.** Append the run manifest, journal entries, and any loss sales to `state.json` in Drive. Then send the email to `state.json.config.email_to` via Gmail with this structure: system health at top (preflight results, test count, timings, anomalies, self-audit findings), then the research summary, then risk measurement, then individual-account suggestions, then agentic-account activity, then a footer with run metadata and the line "Not investment advice. Suggestions are research output; the decision is yours."
+> **STAGE 6 — RECORD AND SEND.** Record the run manifest, journal entries, and any loss sales in Drive. **The Drive connector can rewrite a file's metadata but not its contents**, so do not attempt to modify `state.json` in place: write a new dated file such as `run-manifest-YYYY-MM-DD.json` in folder `{{DRIVE_FOLDER_ID}}`, and treat `state.json` plus the dated manifests together as the ledger. When `state.json` itself must change, create the new version and rename the old one to `state.superseded-YYYY-MM-DD.json`. Then send the email to `state.json.config.email_to` via Gmail with this structure: system health at top (preflight results, test count, timings, anomalies, self-audit findings), then the research summary, then risk measurement, then individual-account suggestions, then agentic-account activity, then a footer with run metadata and the line "Not investment advice. Suggestions are research output; the decision is yours."
 >
 > **THE EMAIL ALWAYS SENDS.** If the run aborted, the email says so and explains why. Silence must never be the outcome.
 >
