@@ -24,6 +24,10 @@ the daylight-saving changeover dates.
 >
 > **STAGE 0 — PREFLIGHT. Do this before looking at a single price.**
 >
+> 0. **Create the run log first, before anything else:** `log = runlog.RunLog(run_id, mode=...)`. It timestamps itself on construction, so building it at the end of the run makes every stage timing read as zero and silently destroys the performance record the regression review depends on.
+> 
+> 0b. **Note how this run started.** If a human triggered it by hand rather than the schedule firing it, the `fired_on_schedule` check will fail by however far the manual run sits from 06:20. That is expected and is not a defect: say so plainly in the email rather than recommending a fix for a schedule that is not broken. Only treat that check as real when the run was started by the schedule.
+>
 > 1. `git clone --depth 1 https://github.com/shreyas-chickerur/premarket-brief-system /tmp/pbs` then `cd /tmp/pbs` and `pip install --break-system-packages -q -r requirements.txt`. **If the clone fails, abort the run and report it.** Do not reconstruct the code from anywhere else: the repository is the only source of truth for it, and a second copy is a copy that can silently be a version behind. Stale trading code is more dangerous than a missed session.
 > 2. Run `python -m pytest -q`. **If any test fails, abort the run entirely, place no orders, and jump to STAGE 6 with the failure as the headline.**
 > 3. Confirm these tools are visible in this session: brokerage `get_accounts`, `get_equity_positions`, `get_portfolio`, `place_equity_order`, `review_equity_order`, `get_equity_quotes`; market data `TIME_SERIES_DAILY` and `MARKET_STATUS`; Gmail `send_message`; Google Drive `search_files`. **If any are missing, abort execution, place no orders, and report it.** This guards a known cold-start defect in scheduled runs.
