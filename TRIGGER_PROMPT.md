@@ -54,7 +54,20 @@ the daylight-saving changeover dates.
 > - Circuit breaker: agentic equity below `circuit_breaker_usd` → no new positions, drop to level 4, require review. Hard stop: below `hard_stop_usd` → liquidate to cash, halt, say so loudly.
 > - If an order is rejected, do not retry in a loop. Report the rejection verbatim.
 >
-> **STAGE 6 — RECORD AND SEND.** Record the run manifest, journal entries, and any loss sales in Drive. **The Drive connector can rewrite a file's metadata but not its contents**, so do not attempt to modify `state.json` in place: write a new dated file such as `run-manifest-YYYY-MM-DD.json` in folder `{{DRIVE_FOLDER_ID}}`, and treat `state.json` plus the dated manifests together as the ledger. When `state.json` itself must change, create the new version and rename the old one to `state.superseded-YYYY-MM-DD.json`. Then send the email to `state.json.config.email_to` via Gmail with this structure: system health at top (preflight results, test count, timings, anomalies, self-audit findings), then the research summary, then risk measurement, then individual-account suggestions, then agentic-account activity, then a footer with run metadata and the line "Not investment advice. Suggestions are research output; the decision is yours."
+> **STAGE 6 — RECORD AND SEND.** Record the run manifest in Drive as a new dated file `run-manifest-YYYY-MM-DD.json` in folder `{{DRIVE_FOLDER_ID}}` — **the Drive connector rewrites metadata but not contents**, so never try to modify `state.json` in place; when it must change, create the new version and rename the old to `state.superseded-YYYY-MM-DD.json`.
+> 
+> Then render the email with the repo's own renderer and send it. **Do not hand-write the HTML** — the format is tested code so that it cannot drift, and so a failed run cannot send a worse-looking email than a good one:
+> 
+> ```python
+> import emailer
+> subject, html = emailer.render_email(
+>     manifest,                       # log.manifest()
+>     sections=[("Where things stand", html), ("What moved and why", html), ...],
+>     prefix="",                      # "[DRY RUN]" on a dry run
+> )
+> ```
+> 
+> Pass your research narrative as `sections`, each a `(title, html_fragment)` pair, ordered: where things stand, what moved and why, risk measurement, individual-account suggestions, agentic-account activity. Keep each section tight — a few sentences, every factual claim source-tagged and timestamped, single-source items marked unconfirmed. The renderer adds the verdict banner, the health line, the decisions table, and the footer; it drops `sections` entirely on an aborted run, and it escapes everything you pass, so write plain prose and let it handle the markup. Send with Gmail using the returned `subject` and `html` (`contentType: text/html`) to the address in `state.json.config.email_to`.
 >
 > **THE EMAIL ALWAYS SENDS.** If the run aborted, the email says so and explains why. Silence must never be the outcome.
 >

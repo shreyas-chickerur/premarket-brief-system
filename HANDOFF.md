@@ -13,7 +13,7 @@ to an agent or a person with no memory of the design conversation.
 > values. It is gitignored and lives alongside `state.json` in Drive.
 
 **Status:** measurement, health, and wash-sale layers are built and tested
-(122 tests passing). The market calendar is verified against the exchange's
+(148 tests passing). The market calendar is verified against the exchange's
 published table. Nothing is scheduled. No research pass has ever run. The agentic
 account has not been traded except for one deliberate throwaway test order.
 
@@ -171,11 +171,13 @@ Two properties of the Drive connector shape how state is written:
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, stop derivation, risk-parity sizing, eight anomaly classes |
 | `runlog.py` | Run manifests, staged timing, preflight self-audit, verified market calendar, regression review, optimization proposals, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
+| `emailer.py` | HTML brief rendering, failure diagnosis, subject lines |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
 | `test_quantcore.py` | 45 tests, including known-answer volatility recovery |
 | `test_runlog.py` | 45 tests, including daylight-saving drift and market-calendar integrity |
 | `test_washsale.py` | 32 tests, including the live overlapping-holding case |
+| `test_emailer.py` | 26 tests, including escaping and no-research-on-abort |
 
 Key API surface:
 
@@ -212,7 +214,7 @@ v2 = reg.check_loss_sale("XYZ", today)               # the reverse direction
 ```bash
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 122 tests
+python -m pytest -q          # 148 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
@@ -294,26 +296,47 @@ Silence must never be the outcome.
 
 ---
 
-## 9. Email structure
+## 9. The email
 
-Health first — it is the thing most likely to be wrong — then research, then
-decisions.
+The email is the only artefact a human reads, so it is rendered by tested code
+(`emailer.py`), not composed freehand each morning. That keeps the format from
+drifting between runs and stops a failed run from sending a worse email than a
+successful one.
 
-1. **System health** — preflight checks pass/fail with detail, test count, stage
-   timings, anomaly count, self-audit findings.
-2. **Where things stand** — index level, ten-year treasury, volatility percentile,
-   key movers. Every tile timestamped.
-3. **What moved and why** — three to five sentences, each factual claim
-   source-tagged; single-source items marked unconfirmed and not traded on.
-4. **Risk measurement** — per-symbol volatility, estimator spread, stop distance
-   in both percent and daily standard deviations, concentration.
-5. **Suggestions — individual account** — full cards; then considered-and-rejected
-   with the failing gate condition.
-6. **Agent activity — agentic account** — orders placed with fills, stops, account
-   state, and a review of any stop that filled since the last run.
-7. **Footer** — run id, mode, health, timings, sources, disclaimer.
+```python
+import emailer
+subject, html = emailer.render_email(log.manifest(),
+                                     sections=[("What moved and why", html)],
+                                     prefix="[DRY RUN]")
+```
 
----
+**It is always HTML**, inline-styled, table-laid-out, with no external assets —
+clients strip `<style>` blocks and block remote images by default.
+
+Rules the renderer enforces, each because the opposite is a real failure mode:
+
+- **The verdict comes first, in words.** Not a wall of checks to scan for a
+  "false".
+- **A failed run is short**: what failed, the likely cause, what to do, and one
+  line on what still worked so a connector problem does not read like a code
+  problem. The full manifest goes to storage for whoever wants it.
+- **`diagnose()` names a cause, not a symptom.** "9 required tools missing" is a
+  symptom; "the connectors are not attached to the routine" is actionable. It
+  reports the first blocking failure only — later ones are usually its
+  consequences, and listing them invites fixing the wrong thing.
+- **Passing checks collapse to a count.** Twenty green rows train the reader to
+  skim, and skimming is how a red one gets missed. Warnings are itemised.
+- **An aborted run prints no research headings.** Empty sections imply research
+  happened.
+- **Everything the model writes is escaped.** Narrative text is untrusted input
+  as far as the renderer is concerned.
+- **The subject carries the headline fact**, so the run can be triaged from a
+  lock screen: `Pre-Market Brief 2026-08-29 — ABORTED (connectors not attached)`
+  or `Pre-Market Brief 2026-09-02 — 2 ideas, 2 orders`.
+
+A completed run keeps the full brief: health line, the research narrative
+sections, then the decisions table with the failing gate named on every
+rejected idea.
 
 ## 10. Remaining work
 

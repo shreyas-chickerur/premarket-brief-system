@@ -16,6 +16,7 @@ Start with [HANDOFF.md](HANDOFF.md), the operations guide.
 | `quantcore.py` | Volatility estimators, indicators, stop distance, position sizing, data-anomaly detection |
 | `runlog.py` | Run manifests, staged timing, the preflight self-audit, regression review, honest scoring |
 | `washsale.py` | Cross-account wash-sale registry (26 U.S.C. 1091 is taxpayer-level, not account-level) |
+| `emailer.py` | HTML rendering of the brief, with failure diagnosis |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic series the demo falls back to |
 
@@ -54,7 +55,7 @@ Python 3.11 or newer.
 ```
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 122 tests
+python -m pytest -q          # 148 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
