@@ -37,11 +37,21 @@ the daylight-saving changeover dates.
 > 7. Reconcile: read both accounts' positions from the broker and compare against the journal in `state.json`. **If they disagree, abort execution and report the discrepancy.** Our memory of the world being wrong makes every downstream decision wrong.
 > 8. Review the last ten run manifests in `state.json` for regressions and improvement opportunities using `runlog.find_optimizations`. Propose changes in the email; never apply them silently.
 >
-> **STAGE 1 — GATHER.** Read both accounts named in `state.json.accounts`: the individual account is READ ONLY, the agentic account is tradable. Pull prices, fundamentals, and indicators from the market-data connector — **keep every payload small; some endpoints return 70,000+ characters and will blow the budget**. Use `datatype=csv` and `outputsize=compact`. Research overnight news, macro events, earnings, and filings by web search. Run `quantcore.detect_anomalies` on every price series; any symbol with a blocking anomaly is excluded from decisions today and the reason is reported.
+> **STAGE 1 — GATHER.** Read both accounts named in `state.json.accounts`: the individual account is READ ONLY, the agentic account is tradable.
+> 
+> Pull prices with **`TIME_SERIES_DAILY_ADJUSTED`**, not `TIME_SERIES_DAILY`. The unadjusted endpoint returns raw prices, so a stock that split inside the window shows a cliff that is not a price move: CRWD's 4-for-1 read as 293% volatility. Volatility is what stop distance and position size are derived from, so an unadjusted split silently poisons the sizing of every trade in that name. If the adjusted endpoint is unavailable on this key, say so in the email and rely on `detect_anomalies`, which blocks any symbol whose series contains a split-shaped ratio.
+> 
+> **Keep every payload small** — `datatype=csv`, `outputsize=compact`. Some endpoints return 70,000+ characters and will blow the budget.
+> 
+> **Compact returns about 100 bars, and that is a hard limit on what can be measured.** `vol_percentile` needs 252 and `trend_state` needs 200. Report both as **unavailable** for want of history — not as a degraded estimate — and let neither influence sizing or the gate. A percentile computed from a third of its window is not a weak signal, it is a different statistic wearing the same name. `consensus_volatility`, `average_true_range`, and `rsi` are all fine on 100 bars.
+> 
+> Research overnight news, macro events, earnings, and filings by web search. Run `quantcore.detect_anomalies` on every price series; any symbol with a blocking anomaly is excluded from decisions today and the reason is reported.
 >
 > **STAGE 2 — MEASURE.** For every position and candidate: `consensus_volatility`, `average_true_range`, `rsi`, `vol_percentile`, `trend_state`. Portfolio-level `correlation_concentration`. Carry the quality flags through; a degraded estimate shrinks the position or kills the idea.
 >
-> **STAGE 3 — GATE.** Apply the five conditions in section 7 of `HANDOFF.md`. Check the wash-sale registry with `washsale.Registry.check_buy` before any purchase and `check_loss_sale` before realising any loss, across BOTH accounts.
+> **STAGE 3 — GATE.** Apply the five conditions in section 7 of `HANDOFF.md`.
+> 
+> **Rebuild the wash-sale registry from broker transaction history every run.** Do not trust the copy in `state.json`: on the first live read it was empty while the broker showed two real loss sales, and a registry that has forgotten a loss sale cheerfully approves the repurchase that disallows it. Treat the stored copy as a cache — cross-check it against what you rebuilt and report any disagreement rather than silently preferring one. Then check `washsale.Registry.check_buy` before any purchase and `check_loss_sale` before realising any loss, across BOTH accounts.
 >
 > **STAGE 4 — INDIVIDUAL ACCOUNT (suggestions only).** You cannot trade here and must not try. Write specific buys, adds, trims, and exits with size, entry limit, invalidation level, catalyst, horizon, and thesis. Flag any breach of the single-name cap, the cash floor, or the sector cap from `state.json.config`. List rejected ideas with the failing gate condition.
 >

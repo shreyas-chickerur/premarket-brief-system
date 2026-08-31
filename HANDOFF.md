@@ -13,7 +13,7 @@ to an agent or a person with no memory of the design conversation.
 > values. It is gitignored and lives alongside `state.json` in Drive.
 
 **Status:** measurement, health, and wash-sale layers are built and tested
-(148 tests passing). The market calendar is verified against the exchange's
+(159 tests passing). The market calendar is verified against the exchange's
 published table. Nothing is scheduled. No research pass has ever run. The agentic
 account has not been traded except for one deliberate throwaway test order.
 
@@ -174,7 +174,7 @@ Two properties of the Drive connector shape how state is written:
 | `emailer.py` | HTML brief rendering, failure diagnosis, subject lines |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
-| `test_quantcore.py` | 45 tests, including known-answer volatility recovery |
+| `test_quantcore.py` | 56 tests, including known-answer volatility and correlation recovery |
 | `test_runlog.py` | 45 tests, including daylight-saving drift and market-calendar integrity |
 | `test_washsale.py` | 32 tests, including the live overlapping-holding case |
 | `test_emailer.py` | 26 tests, including escaping and no-research-on-abort |
@@ -214,7 +214,7 @@ v2 = reg.check_loss_sale("XYZ", today)               # the reverse direction
 ```bash
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 148 tests
+python -m pytest -q          # 159 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
@@ -361,13 +361,58 @@ rejected idea.
    concentration and cash-floor breaches if and only if they clear the gate.
 9. **Extend the holiday table** before `HOLIDAY_TABLE_HORIZON`.
 
+## 10b. What the first live dry run found
+
+The 31 August dry run was the first to reach real market data. It placed nothing
+and surfaced four defects, which is what the exercise was for.
+
+**Fixed:**
+
+- **Unadjusted prices made volatility meaningless.** `TIME_SERIES_DAILY` returns
+  raw prices, so CRWD's 4-for-1 split read as 293% volatility. Worse,
+  `detect_anomalies` only ever tested the FINAL bar, so a split weeks back left
+  today's bar ordinary while corrupting every estimate over the window. The
+  scan now covers the whole series, uses a median-absolute-deviation scale so a
+  split cannot hide inside the volatility it creates, and **blocks** a symbol
+  whose move matches a split ratio. Stage 1 now pulls the adjusted endpoint.
+- **Concentration was understated.** `correlation_concentration` shrank
+  covariance toward one average variance, which is wrong for every asset at once
+  when a 1%-vol Treasury fund sits beside a 105%-vol semiconductor. On a
+  known-answer book at a true 0.55 correlation it reported 0.28, claimed 2.65
+  effective bets against a true 1.75, and called the book unconcentrated.
+  Returns are now standardised before shrinking, and the verdict uses the less
+  flattering of the shrunk and sample views — a risk measure may err toward
+  caution, never toward "you have more independent bets than you do".
+- **The wash-sale registry was empty while the broker showed two real loss
+  sales.** It is now rebuilt from broker history every run, with the stored copy
+  treated as a cache to cross-check rather than a source of truth.
+- **`vol_percentile` and `trend_state` were degraded for all 23 symbols.**
+  Compact payloads return ~100 bars; they need 252 and 200. They are now
+  reported as unavailable rather than as a weak estimate, because a percentile
+  computed over a third of its window is a different statistic wearing the same
+  name.
+
+**Still open — a real operational one:** a stale good-for-day stop from an
+earlier session holds 1 share of SGOV, so the correct 4-share sell is rejected
+with `EQUITY_MAX_SELL_SHARES_EXCEEDED`, and there is no cancel tool. See
+section 11.
+
 ## 11. Open and unverified
 
+- **A stale good-for-day stop is holding shares hostage.** A leftover stop from
+  an earlier session reserves 1 share of SGOV, so a correctly-sized 4-share sell
+  is rejected outright rather than partially filled. There is no cancel tool, so
+  the only remedies are to wait for it to expire, place the smaller order that
+  fits, or cancel it by hand in the broker's own app. Worth watching: if
+  good-for-day stops are outliving their day, the whole "stops expire by
+  themselves" design needs revisiting.
 - Whether the connector broker refreshes the brokerage token indefinitely without
   a fresh desktop-browser sign-in. The token expires roughly every four days;
   refresh is supported but unconfirmed for this server.
-- Whether a scheduled cloud run reliably sees the brokerage connector.
-  **Observed on the first scheduled fire: it did not.** The market-data, mail,
+- ~~Whether a scheduled cloud run reliably sees the brokerage connector.~~
+  **Resolved.** A routine sees only the connectors attached to its own
+  configuration, not those connected to the account. With all four attached, the
+  31 August run saw all ten required tools. Originally observed as: The market-data, mail,
   and storage connectors resolved; the brokerage connector was not present in
   the run's tool set. Preflight caught it and refused to proceed, which is the
   designed behaviour, but it means the routine cannot do useful work until the

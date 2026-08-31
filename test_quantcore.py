@@ -333,13 +333,65 @@ def test_zero_volume_blocks(df):
     assert q.blocking(a) and any(x.code == "zero_volume" for x in a)
 
 
+def _rescale(frame, at, factor):
+    """Apply `factor` to every price from bar `at` onward, as a split would."""
+    bad = frame.copy()
+    for col in ("open", "high", "low", "close"):
+        j = bad.columns.get_loc(col)
+        bad.iloc[at:, j] = bad.iloc[at:, j].astype(float) * factor
+    return bad
+
+
 def test_price_jump_warns_but_does_not_block(df):
+    """A large move that is NOT a clean split ratio is news, not a corporate
+    action: worth flagging, not worth refusing to trade on."""
     bad = df.copy()
     for col in ("open", "high", "low", "close"):
-        bad.iloc[-1, bad.columns.get_loc(col)] = float(bad[col].iloc[-1]) * 2.0
-    a = q.detect_anomalies("SPLIT", bad, asof=bad.index[-1])
+        bad.iloc[-1, bad.columns.get_loc(col)] = float(bad[col].iloc[-1]) * 1.55
+    a = q.detect_anomalies("NEWS", bad, asof=bad.index[-1])
     assert any(x.code == "price_jump" and x.severity == "warn" for x in a)
     assert not q.blocking(a)
+
+
+def test_a_clean_split_ratio_blocks_rather_than_warns(df):
+    """Unadjusted prices make volatility meaningless, and volatility is what
+    stop distance and position size are derived from."""
+    a = q.detect_anomalies("RSPLIT", _rescale(df, len(df) - 1, 2.0),
+                           asof=df.index[-1])
+    assert q.blocking(a)
+    hit = next(x for x in a if x.code == "possible_split")
+    assert "1-for-2" in hit.message
+
+
+def test_a_forward_split_is_caught_too(df):
+    """CRWD's 4-for-1 divides the price by four; the ratio is 0.25."""
+    a = q.detect_anomalies("CRWD", _rescale(df, len(df) - 1, 0.25),
+                           asof=df.index[-1])
+    hit = next(x for x in a if x.code == "possible_split")
+    assert "4-for-1" in hit.message and hit.severity == "block"
+
+
+def test_a_split_in_the_MIDDLE_of_the_series_is_caught(df):
+    """The regression that mattered. The old check tested only the final bar, so
+    a split weeks back left today's bar ordinary while corrupting every estimate
+    computed over the window. CRWD read 293% volatility and nothing objected."""
+    bad = _rescale(df, len(df) // 2, 0.25)
+    a = q.detect_anomalies("CRWD", bad, asof=bad.index[-1])
+    assert q.blocking(a)
+    assert any(x.code == "possible_split" for x in a)
+
+
+def test_a_split_cannot_hide_inside_the_volatility_it_creates(df):
+    """A split is a huge outlier and inflates a standard deviation enough to
+    stop being an outlier by that measure. The scale is a MAD for this reason."""
+    bad = _rescale(df, len(df) // 3, 0.1)          # 10-for-1, a violent one
+    a = q.detect_anomalies("TENFOR1", bad, asof=bad.index[-1])
+    assert any(x.code == "possible_split" for x in a)
+
+
+def test_an_ordinary_series_raises_no_split(df):
+    assert not any(x.code == "possible_split"
+                   for x in q.detect_anomalies("CALM", df, asof=df.index[-1]))
 
 
 def test_volume_spike_is_informational(df):
@@ -366,3 +418,73 @@ def test_estimate_rejects_bad_quality_flag():
 
 def test_nan_value_is_never_usable():
     assert not q.Estimate(float("nan"), "x", 10, "ok").usable
+
+
+# ------------------------------------------------- concentration, known-answer
+
+def _correlated_book(rho, vols, n=150, seed=11):
+    """A book whose TRUE pairwise correlation is exactly `rho`, with the given
+    per-asset volatilities. Known-answer input: the estimator has to recover a
+    number we already know."""
+    rng = np.random.default_rng(seed)
+    common = rng.normal(size=n)
+    out = {}
+    for i, v in enumerate(vols):
+        idio = rng.normal(size=n)
+        z = np.sqrt(rho) * common + np.sqrt(1 - rho) * idio
+        out[f"S{i}"] = pd.Series(z * v)
+    return out
+
+
+def test_concentration_recovers_a_known_correlation():
+    book = _correlated_book(0.55, [0.02] * 12)
+    out = q.correlation_concentration(book)
+    assert abs(out["mean_pairwise_corr"] - 0.55) < 0.12
+
+
+def test_heterogeneous_volatility_does_not_deflate_the_correlation():
+    """The regression that mattered. Shrinking COVARIANCE toward one average
+    variance is wrong for every asset when a 1%-vol Treasury fund sits beside a
+    105%-vol semiconductor; it dragged a true 0.55 down to 0.28 and called a
+    concentrated book diversified. Standardising first fixes it."""
+    vols = [0.01] * 4 + list(np.linspace(0.15, 1.05, 16))
+    mixed = q.correlation_concentration(_correlated_book(0.55, vols))
+    even = q.correlation_concentration(_correlated_book(0.55, [0.02] * 20))
+
+    # the estimate must not depend on how spread out the volatilities are
+    assert abs(mixed["mean_pairwise_corr"] - even["mean_pairwise_corr"]) < 0.10
+    assert mixed["mean_pairwise_corr"] > 0.40
+
+
+def test_effective_bets_is_not_overstated_under_mixed_volatility():
+    vols = [0.01] * 4 + list(np.linspace(0.15, 1.05, 16))
+    out = q.correlation_concentration(_correlated_book(0.55, vols))
+    true_bets = 1.0 / ((1 + 19 * 0.55) / 20)          # ~1.75
+    assert out["effective_bets"] < true_bets + 0.6
+
+
+def test_the_verdict_uses_the_less_flattering_of_the_two_views():
+    """Shrinkage always says the book is more diversified than the raw sample
+    does. A risk measure may err toward caution, never toward 'you have more
+    independent bets than you do'."""
+    out = q.correlation_concentration(_correlated_book(0.90, [0.02] * 15))
+    assert out["concentrated"] is True
+    assert out["effective_bets_sample"] <= out["effective_bets"] + 1e-6
+
+
+def test_independent_series_are_not_called_concentrated():
+    rng = np.random.default_rng(3)
+    book = {f"S{i}": pd.Series(rng.normal(size=200) * 0.02) for i in range(8)}
+    out = q.correlation_concentration(book)
+    assert out["concentrated"] is False
+    assert abs(out["mean_pairwise_corr"]) < 0.15
+
+
+def test_a_zero_variance_series_is_dropped_not_crashed_on():
+    """A halted or fully frozen series has no correlation with anything, and
+    dividing by its zero standard deviation would poison the whole matrix."""
+    book = _correlated_book(0.5, [0.02] * 5)
+    book["DEAD"] = pd.Series([0.0] * len(book["S0"]))
+    out = q.correlation_concentration(book)
+    assert out["status"] == "ok"
+    assert "DEAD" not in str(out.get("max_pair", ""))
