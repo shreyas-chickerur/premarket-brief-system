@@ -31,9 +31,10 @@ from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Optional, Sequence
 
 __all__ = [
-    "Fill", "fills_from_orders", "positions_from_fills", "cost_basis",
-    "loss_sales", "reconcile_positions", "to_washsale_trades",
-    "JournalEntry", "Journal", "fold_journal", "journal_filename", "JOURNAL_RE",
+    "Fill", "fills_from_orders", "SplitEvent", "splits_from_api", "apply_splits",
+    "positions_from_fills", "cost_basis", "loss_sales", "reconcile_positions",
+    "to_washsale_trades", "JournalEntry", "Journal", "fold_journal",
+    "journal_filename", "JOURNAL_RE",
 ]
 
 # Quantities are compared with a tolerance because broker payloads carry six
@@ -119,9 +120,95 @@ def fills_from_orders(orders: Iterable[dict]) -> list[Fill]:
     return out
 
 
+# --------------------------------------------------------------------------
+# split adjustment
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SplitEvent:
+    """One corporate split. `ratio` is post-split shares per pre-split share:
+    4.0 for a 4-for-1 forward split, 0.1 for a 1-for-10 reverse split. This is
+    the convention Alpha Vantage's SPLITS endpoint uses for `split_factor`."""
+    symbol: str
+    effective_date: date
+    ratio: float
+
+    def __post_init__(self):
+        if self.ratio <= 0:
+            raise ValueError(f"split ratio must be positive, got {self.ratio}")
+
+
+def splits_from_api(symbol: str, records: Iterable[dict]) -> list[SplitEvent]:
+    """Build SplitEvent objects from Alpha Vantage SPLITS response records.
+
+    Each record is expected to carry `effective_date` (YYYY-MM-DD) and
+    `split_factor` (e.g. "4" for 4-for-1, "0.1" for 1-for-10). Malformed
+    records are skipped rather than raising, since one bad record from an
+    external API should not take down reconciliation for every symbol.
+    """
+    out = []
+    for r in records:
+        d = _as_date(r.get("effective_date"))
+        try:
+            ratio = float(r.get("split_factor"))
+        except (TypeError, ValueError):
+            ratio = None
+        if d is not None and ratio is not None and ratio > 0:
+            out.append(SplitEvent(symbol, d, ratio))
+    return out
+
+
+def apply_splits(fills: Sequence[Fill],
+                 splits: dict[str, Sequence[SplitEvent]]) -> list[Fill]:
+    """Re-express every historical fill in CURRENT, post-split share terms.
+
+    Fills are reported by the broker as executed at the time: a share bought
+    the day before a 4-for-1 split is one pre-split share, not the four
+    post-split shares it became. Summing those raw quantities against a
+    broker position snapshot taken today -- which is always in current,
+    post-split terms -- makes a symbol that has ever split look like a
+    reconciliation failure no matter how correct the trading was. This is
+    exactly what happened on 31 August 2026: NVDA, CMG, NFLX, VUG, CRWD, and
+    five other symbols in a real account all disagreed by amounts that
+    matched known split ratios once investigated, and nothing had been
+    wrong with a single trade.
+
+    For a fill dated strictly before a split's effective date, quantity is
+    multiplied by the ratio and price is divided by it, so the fill's
+    notional value is unchanged -- only the share-count convention shifts to
+    match today's. A fill on or after the effective date is already quoted in
+    post-split terms and is left alone. Multiple splits on the same symbol
+    compound correctly regardless of the order `splits` lists them in,
+    because each is applied only to fills strictly before ITS OWN date, and
+    they are processed earliest-first so a fill before two splits picks up
+    both factors.
+
+    Symbols with no entry in `splits` pass through completely unchanged --
+    this is a deliberate no-op, not a silent skip, so a caller that forgot to
+    look up a symbol's splits gets a reconciliation failure loud enough to
+    notice rather than a quietly wrong number.
+    """
+    out = list(fills)
+    for symbol, events in splits.items():
+        for ev in sorted(events, key=lambda e: e.effective_date):
+            out = [
+                Fill(f.symbol, f.side, f.quantity * ev.ratio, f.price / ev.ratio,
+                    f.on, f.order_id)
+                if f.symbol == symbol and f.on < ev.effective_date else f
+                for f in out
+            ]
+    return out
+
+
 def positions_from_fills(fills: Sequence[Fill]) -> dict[str, float]:
     """Net position per symbol. Dust below the tolerance is dropped, because a
-    residue of 1e-9 shares is a rounding artefact, not a holding."""
+    residue of 1e-9 shares is a rounding artefact, not a holding.
+
+    Expects SPLIT-ADJUSTED fills (see `apply_splits`) for any symbol that has
+    ever split -- a broker's current position snapshot is always in current
+    share terms, and comparing it against unadjusted historical fills is the
+    reconciliation failure this function cannot see from the inside.
+    """
     pos: dict[str, float] = {}
     for f in fills:
         pos[f.symbol] = pos.get(f.symbol, 0.0) + f.signed_quantity
@@ -138,6 +225,13 @@ def cost_basis(fills: Sequence[Fill], symbol: str,
     on an expensive lot while the average shows a gain. Using the average alone
     would miss exactly those loss sales, and a wash-sale registry that misses a
     loss sale approves the repurchase that disallows it.
+
+    Expects SPLIT-ADJUSTED fills for any symbol that has ever split, same as
+    `positions_from_fills`. FIFO lot accounting sums quantities across fills as
+    if they share one unit; a pre-split buy and a post-split sell do not, and
+    mixing them makes a partially-sold, still-open position look fully closed
+    while reporting an average cost off by the split factor -- verified on a
+    synthetic NVDA-shaped scenario in the tests.
     """
     sym = symbol.upper()
     lots: list[list[float]] = []          # [quantity, price], FIFO
@@ -174,6 +268,9 @@ def loss_sales(fills: Sequence[Fill]) -> list[dict]:
     average cost OR below the highest lot still held at the time. Over-reporting
     a loss sale costs a delayed repurchase; under-reporting it silently
     disallows a deduction the owner believes they have.
+
+    Expects SPLIT-ADJUSTED fills, for the same reason as `cost_basis`, which
+    this calls directly.
     """
     out = []
     for i, f in enumerate(fills):
@@ -250,6 +347,10 @@ def to_washsale_trades(fills: Sequence[Fill], account: str):
     computed it from broker history. FIFO cost basis, same lot accounting as
     `cost_basis` and `loss_sales` above, so a wash sale detected here and a
     loss sale detected there can never disagree about which lot was consumed.
+
+    Expects SPLIT-ADJUSTED fills for the same reason `cost_basis` does: its
+    own FIFO lot matching here would otherwise mix pre- and post-split share
+    counts as one unit and compute a realised P&L off by the split factor.
     """
     import washsale as W       # deferred: washsale imports nothing from here,
                                # avoids a cycle since this module is the one

@@ -243,3 +243,164 @@ def test_a_settled_thesis_is_not_offered_for_scoring_twice():
 def test_an_empty_folder_folds_to_an_empty_journal():
     j = L.fold_journal([])
     assert j.runs == [] and j.entries == [] and j.unreadable == []
+
+
+# ------------------------------------------------------------- split adjustment
+
+def test_a_pre_split_fill_is_rescaled_to_current_share_terms():
+    """A share bought the day before a 4-for-1 split is one pre-split share,
+    not the four post-split shares it became. apply_splits re-expresses it."""
+    ev = L.SplitEvent("XYZ", date(2026, 6, 10), 4.0)
+    fills = [L.Fill("XYZ", "buy", 10.0, 400.0, date(2026, 6, 1), "o1")]
+    out = L.apply_splits(fills, {"XYZ": [ev]})
+    assert out[0].quantity == pytest.approx(40.0)
+    assert out[0].price == pytest.approx(100.0)
+
+
+def test_notional_value_is_preserved_by_a_split():
+    """A split changes the share-count convention, not what was actually paid."""
+    ev = L.SplitEvent("XYZ", date(2026, 6, 10), 4.0)
+    fills = [L.Fill("XYZ", "buy", 7.0, 250.0, date(2026, 5, 1), "o1")]
+    out = L.apply_splits(fills, {"XYZ": [ev]})
+    before = fills[0].quantity * fills[0].price
+    after = out[0].quantity * out[0].price
+    assert after == pytest.approx(before)
+
+
+def test_a_fill_on_or_after_the_effective_date_is_left_alone():
+    ev = L.SplitEvent("XYZ", date(2026, 6, 10), 4.0)
+    on_date = L.Fill("XYZ", "buy", 10.0, 100.0, date(2026, 6, 10), "o1")
+    after = L.Fill("XYZ", "buy", 10.0, 100.0, date(2026, 6, 15), "o2")
+    out = L.apply_splits([on_date, after], {"XYZ": [ev]})
+    assert out[0].quantity == 10.0 and out[1].quantity == 10.0
+
+
+def test_a_reverse_split_divides_shares_and_multiplies_price():
+    """1-for-10: ratio 0.1, shares fall, price rises, notional unchanged."""
+    ev = L.SplitEvent("XYZ", date(2026, 6, 10), 0.1)
+    fills = [L.Fill("XYZ", "buy", 100.0, 5.0, date(2026, 6, 1), "o1")]
+    out = L.apply_splits(fills, {"XYZ": [ev]})
+    assert out[0].quantity == pytest.approx(10.0)
+    assert out[0].price == pytest.approx(50.0)
+
+
+def test_multiple_splits_on_one_symbol_compound_correctly():
+    """A fill before BOTH a 4-for-1 and a later 2-for-1 picks up both factors
+    (x8 total); a fill between them picks up only the second (x2)."""
+    splits = {"XYZ": [
+        L.SplitEvent("XYZ", date(2027, 1, 1), 2.0),   # deliberately out of
+        L.SplitEvent("XYZ", date(2026, 6, 10), 4.0),  # chronological order --
+    ]}                                                  # must not matter
+    before_both = L.Fill("XYZ", "buy", 1.0, 800.0, date(2026, 1, 1), "o1")
+    between = L.Fill("XYZ", "buy", 1.0, 200.0, date(2026, 8, 1), "o2")
+    after_both = L.Fill("XYZ", "buy", 1.0, 100.0, date(2027, 2, 1), "o3")
+    out = L.apply_splits([before_both, between, after_both], splits)
+    assert out[0].quantity == pytest.approx(8.0)   # 1 * 4 * 2
+    assert out[1].quantity == pytest.approx(2.0)   # 1 * 2 only
+    assert out[2].quantity == pytest.approx(1.0)   # untouched
+
+
+def test_a_symbol_with_no_split_data_passes_through_unchanged():
+    """A deliberate no-op, not a silent skip: a caller that forgot to look up a
+    symbol's splits gets a loud reconciliation failure, not a quiet wrong number."""
+    fills = [L.Fill("ABC", "buy", 5.0, 50.0, date(2026, 1, 1), "o1")]
+    out = L.apply_splits(fills, {"XYZ": [L.SplitEvent("XYZ", date(2026, 6, 10), 4.0)]})
+    assert out[0].quantity == 5.0 and out[0].price == 50.0
+
+
+def test_apply_splits_does_not_mutate_the_input_list():
+    ev = L.SplitEvent("XYZ", date(2026, 6, 10), 4.0)
+    original = [L.Fill("XYZ", "buy", 10.0, 400.0, date(2026, 6, 1), "o1")]
+    snapshot = list(original)
+    L.apply_splits(original, {"XYZ": [ev]})
+    assert original == snapshot
+
+
+def test_splits_from_api_parses_alpha_vantage_style_records():
+    records = [
+        {"effective_date": "2026-06-10", "split_factor": "4"},
+        {"effective_date": "2025-01-05", "split_factor": "0.1"},
+    ]
+    events = L.splits_from_api("XYZ", records)
+    assert len(events) == 2
+    assert {e.ratio for e in events} == {4.0, 0.1}
+    assert all(e.symbol == "XYZ" for e in events)
+
+
+def test_splits_from_api_skips_malformed_records_rather_than_raising():
+    records = [
+        {"effective_date": "2026-06-10", "split_factor": "4"},
+        {"effective_date": None, "split_factor": "4"},
+        {"effective_date": "2026-01-01", "split_factor": "not-a-number"},
+        {},
+    ]
+    events = L.splits_from_api("XYZ", records)
+    assert len(events) == 1
+
+
+def test_split_event_rejects_a_non_positive_ratio():
+    with pytest.raises(ValueError, match="ratio"):
+        L.SplitEvent("XYZ", date(2026, 6, 10), 0.0)
+    with pytest.raises(ValueError, match="ratio"):
+        L.SplitEvent("XYZ", date(2026, 6, 10), -2.0)
+
+
+# ---------------------------------- the regression that mattered (31 Aug 2026)
+
+def test_reconciliation_fails_without_split_adjustment_and_passes_with_it():
+    """Mirrors the actual production failure on 31 August 2026: a real
+    individual account's positions failed to reconcile against its own order
+    history, and every one of the ten disagreeing symbols turned out to have
+    split at some point in a multi-year history pulled with no date floor.
+    The scenario here is synthetic (the real trade sizes are not put in a
+    public test file), but the failure shape is exact: raw fill quantities
+    from BEFORE a real split disagree with a broker snapshot taken AFTER it,
+    and applying the split is what makes reconciliation possible at all."""
+    # A position built from three years of raw fills, spanning a real 4-for-1
+    # split. Bought 12 shares pre-split, bought 3 more post-split: broker shows
+    # 12*4 + 3 = 51 shares today. Unadjusted fills sum to 12 + 3 = 15 -- looks
+    # like a 36-share discrepancy that has nothing to do with any bad trade.
+    fills = [
+        L.Fill("NVDA", "buy", 12.0, 900.0, date(2023, 9, 12), "o1"),
+        L.Fill("NVDA", "buy", 3.0, 130.0, date(2024, 8, 1), "o2"),
+    ]
+    broker_today = {"NVDA": 51.0}
+    split = {"NVDA": [L.SplitEvent("NVDA", date(2024, 6, 10), 4.0)]}
+
+    unadjusted_drift = L.reconcile_positions(broker_today, fills)
+    assert "NVDA" in unadjusted_drift
+    assert unadjusted_drift["NVDA"]["difference"] == pytest.approx(51.0 - 15.0)
+
+    adjusted = L.apply_splits(fills, split)
+    assert L.reconcile_positions(broker_today, adjusted) == {}
+
+
+def test_a_symbol_that_never_split_still_reconciles_normally_in_a_mixed_batch():
+    """Splits are applied per-symbol; a stock that never split in the same
+    batch as one that did must not be affected."""
+    fills = [
+        L.Fill("NVDA", "buy", 12.0, 900.0, date(2023, 9, 12), "o1"),
+        L.Fill("SGOV", "buy", 5.0, 100.0, date(2023, 9, 12), "o2"),
+    ]
+    splits = {"NVDA": [L.SplitEvent("NVDA", date(2024, 6, 10), 4.0)]}
+    out = L.apply_splits(fills, splits)
+    sgov = next(f for f in out if f.symbol == "SGOV")
+    assert sgov.quantity == 5.0 and sgov.price == 100.0
+
+
+def test_unadjusted_splits_corrupt_cost_basis_and_loss_sale_detection():
+    """Worse than a reconciliation failure: on a synthetic NVDA-shaped position
+    (buy pre-split, sell post-split), unadjusted FIFO thinks the position is
+    fully closed when 28 shares remain, and reports the average cost off by
+    exactly the split factor. Split-adjusting fixes both."""
+    fills = [
+        L.Fill("NVDA", "buy", 12.0, 900.0, date(2023, 9, 12), "o1"),
+        L.Fill("NVDA", "sell", 20.0, 130.0, date(2024, 8, 1), "o2"),
+    ]
+    unadjusted = L.cost_basis(fills, "NVDA")
+    assert unadjusted["quantity"] == 0.0          # WRONG: 28 shares actually remain
+
+    split = {"NVDA": [L.SplitEvent("NVDA", date(2024, 6, 10), 4.0)]}
+    adjusted = L.cost_basis(L.apply_splits(fills, split), "NVDA")
+    assert adjusted["quantity"] == pytest.approx(28.0)
+    assert adjusted["average_cost"] == pytest.approx(225.0)   # 900 / 4

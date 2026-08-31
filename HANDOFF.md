@@ -214,7 +214,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_quantcore.py` | 76 tests, including known-answer volatility and correlation recovery |
 | `test_runlog.py` | 45 tests, including daylight-saving drift and market-calendar integrity |
 | `test_washsale.py` | 32 tests |
-| `test_ledger.py` | 23 tests, several against a real broker order-history fixture |
+| `test_ledger.py` | 35 tests, several against a real broker order-history fixture and a synthetic split-adjustment regression |
 | `test_evidence.py` | 24 tests, including known-answer edge detection and futility |
 | `test_emailer.py` | 26 tests, including escaping and no-research-on-abort |
 
@@ -269,7 +269,7 @@ caller to check.
 ```bash
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 235 tests
+python -m pytest -q          # 248 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
@@ -413,9 +413,12 @@ A completed run keeps the full brief: health line, then the research narrative s
    pre-registered with a target edge, a sample-size plan, and a decision
    deadline; every run reviews the accumulated evidence, and a verdict of
    futile or no-edge-by-deadline pauses new positions automatically.
-8. **Prove the redesigned pipeline on two or three consecutive clean weekday
-   dry runs** — the memory rebuild, the journal fold, and the evidence review
-   are all new as of 31 August and have not yet run against a live weekday.
+8. ~~Prove the redesigned pipeline against real order history.~~ Done, the
+   hard way: the first live run of the memory rebuild aborted correctly,
+   finding a real bug (section 10d) rather than a clean pass. That is the
+   more valuable outcome for a proving run to have found.
+8b. **Prove the split-adjustment fix on two or three consecutive clean weekday
+    dry runs** before trusting the memory rebuild fully.
 9. **Only then, switch to live.** Replace the dry-run prompt with the standard
    one from `TRIGGER_PROMPT.md`. This is a deliberate, reversible decision.
 10. **First live run:** act on the concentration and cash-floor breaches in the
@@ -611,11 +614,62 @@ directional holding) was sold 27 August 2026 at 90.79, a small loss against a
 September. XLE was also opened and closed at a small loss the same window. Both
 are exactly the loss sales the registry's first live read missed entirely.
 
-### 235 tests, up from 116 at handoff
+### 248 tests, up from 116 at handoff
 
-`test_ledger.py` (23) and `test_evidence.py` (24) are new. `test_quantcore.py`
+`test_ledger.py` (35, including split adjustment) and `test_evidence.py` (24) are new. `test_quantcore.py`
 grew from 45 to 76 for the sizing, quality-enforcement, direction, fractional,
 and concentration-recalibration coverage.
+
+## 10d. The redesigned pipeline's first live run — a real bug, correctly caught
+
+The memory rebuild from section 10c was proven the same day it was written, on
+the actual account, during market hours. It found a genuine defect and stopped
+rather than working around it, which is what a proving run is for.
+
+**What happened.** Stage 0 step 7 pulled full order history with no date
+floor, as designed — 10 orders on the agentic account, 880 on the individual
+account spanning June 2022 to August 2026. The agentic account reconciled
+exactly: 3 positions, 10 fills, zero drift. The individual account did not: 10
+of 21 symbols disagreed with the broker, e.g. NVDA off by 19.83 shares, CMG off
+by 1.51. The run correctly diagnosed every discrepancy as a corporate-action
+artifact from the fill price ranges alone (NVDA fills spanning \$113.67 to
+\$1,237.68 is not one stock's ordinary price history) and **aborted rather than
+guessing** — no research, no sizing, no orders, an aborted-run email sent, both
+Drive files written. Exactly the designed behaviour: inaction plus a report.
+
+**Root cause.** `ledger.fills_from_orders` reports fills the way the broker
+recorded them: a share bought the day before a 4-for-1 split is one pre-split
+share, not the four post-split shares it became. `positions_from_fills` summed
+those raw quantities and compared them against `get_equity_positions`, which is
+always in TODAY's post-split terms. A multi-year, no-date-floor history pull —
+exactly what step 7 calls for — was guaranteed to cross a real split sooner or
+later; it is not a hypothetical, it happened on the very first live run.
+
+**Fix.** `ledger.py` gained `SplitEvent`, `splits_from_api` (parses Alpha
+Vantage's `SPLITS` response), and `apply_splits`, which re-expresses every fill
+strictly before a split's effective date in current share terms — quantity
+multiplied by the ratio, price divided by it, so the fill's notional value is
+unchanged and only the share-count convention shifts. Multiple splits on one
+symbol compound correctly regardless of the order they are supplied in. A
+symbol with no split data passes through as a deliberate no-op, so a symbol
+someone forgot to look up fails LOUDLY (a reconciliation mismatch) rather than
+silently.
+
+**It was worse than a reconciliation failure.** `cost_basis`, `loss_sales`, and
+`to_washsale_trades` all do FIFO lot accounting that sums quantities across
+fills as one unit. On a synthetic NVDA-shaped position (12 shares bought
+pre-split, 20 sold post-split), the unadjusted version doesn't just mis-count —
+it reports the position as **fully closed** when 28 shares actually remain, and
+the average cost is off by exactly the split factor. A wash-sale registry built
+on that would misjudge every loss sale on a split-affected symbol. All three
+functions' docstrings now say explicitly that they expect split-adjusted fills.
+
+Stage 0 step 7 now calls Alpha Vantage `SPLITS` for every symbol across both
+accounts' fills and applies the adjustment before deriving positions,
+reconciling, or building the wash-sale registry. 12 new tests in
+`test_ledger.py`, including a reconstruction of the exact failure shape (not
+the real account's actual trade sizes, which stay out of the public repo) that
+fails without the fix and passes with it.
 
 ## 11. Open and unverified
 
