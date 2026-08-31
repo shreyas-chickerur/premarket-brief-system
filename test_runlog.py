@@ -299,7 +299,7 @@ def test_every_optimization_states_its_sample_size():
 def test_scoring_refuses_to_certify_a_small_sample():
     closed = [{"outcome_pct": 4.0, "thesis_played_out": True, "horizon_days": 20}] * 12
     s = R.score_closed_decisions(closed)
-    assert s["n"] == 12 and s["statistically_meaningful"] is False
+    assert s["n"] == 12 and s["statistically_meaningful"] == "no"
     assert "too few" in s["verdict"]
 
 
@@ -308,8 +308,24 @@ def test_scoring_stays_provisional_even_at_larger_samples():
               [{"outcome_pct": -3.0, "thesis_played_out": False}] * 20)
     s = R.score_closed_decisions(closed)
     assert s["n"] == 40
-    assert s["statistically_meaningful"] is False
+    assert s["statistically_meaningful"] == "no"
     assert s["hit_rate"] == 0.5 and s["thesis_accuracy"] == 0.5
+
+
+def test_statistically_meaningful_is_never_a_bare_bool():
+    """The regression that mattered: this field used to return the STRING
+    'provisional' at n>=100, which `if result[...]:` treats as truthy --
+    silently certifying a sample the verdict text next to it calls provisional.
+    It is now always one of exactly three strings."""
+    small = R.score_closed_decisions([{"outcome_pct": 1.0, "thesis_played_out": True}] * 10)
+    mid = R.score_closed_decisions([{"outcome_pct": 1.0, "thesis_played_out": True}] * 50)
+    big = R.score_closed_decisions([{"outcome_pct": 1.0, "thesis_played_out": True}] * 150)
+    for res in (small, mid, big):
+        assert res["statistically_meaningful"] in ("no", "provisional")
+        assert not isinstance(res["statistically_meaningful"], bool)
+    assert small["statistically_meaningful"] == "no"
+    assert mid["statistically_meaningful"] == "no"
+    assert big["statistically_meaningful"] == "provisional"
 
 
 def test_scoring_empty():

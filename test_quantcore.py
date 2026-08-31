@@ -488,3 +488,263 @@ def test_a_zero_variance_series_is_dropped_not_crashed_on():
     out = q.correlation_concentration(book)
     assert out["status"] == "ok"
     assert "DEAD" not in str(out.get("max_pair", ""))
+
+
+# ------------------------------------------------------ cash-limited sizing
+
+def _plan(entry=100.0, stop_fraction=0.08):
+    """A plan that lands cleanly at `stop_fraction` with 'ok' quality -- floor
+    and cap bracket it rather than pin it, so it is neither floored nor capped
+    and the new quality-based size scaling does not confound these tests."""
+    vol = q.Estimate(0.30, "test", 60, "ok")
+    atr = q.Estimate(float("nan"), "test", 0, "failed")
+    daily = 0.30 / (252 ** 0.5)
+    assert daily < stop_fraction, "stop_fraction must exceed 1x daily sigma for this helper"
+    k = stop_fraction / daily
+    return q.stop_plan(entry, vol, atr, k_daily_sigma=k,
+                       floor=stop_fraction * 0.5, cap=stop_fraction * 2)
+
+
+def test_cash_limited_sizing_matches_the_real_agentic_account():
+    """992.50 equity, 251.88 settled cash -- the account this was built for on
+    31 August 2026. At the current 18% cap the cap-derived notional ($178.65)
+    already sits below that cash, so this exact config is not where it bites --
+    but the code must not rely on that coincidence, and cash must never be
+    exceeded regardless of how the cap and risk budget are dialed."""
+    plan = _plan(entry=25.0, stop_fraction=0.08)
+    size = q.size_position(992.50, 25.0, plan, risk_budget_fraction=0.02,
+                           max_weight=0.18, buying_power=251.88)
+    assert size.notional <= 251.88 + 1e-9
+    assert size.cash_limited is False          # the cap already binds first here
+
+    # Same account and cash, a cap dialed to what the aggressiveness table
+    # allows at level 8 (up to 25%+). Now the cap-derived notional ($248) is
+    # comfortably inside equity but would ask for more than the $251.88 that
+    # is actually spendable is NOT the case either at 25%; push to a scenario
+    # that genuinely exceeds it: a richer risk budget, same real dollars.
+    size2 = q.size_position(992.50, 25.0, plan, risk_budget_fraction=0.05,
+                            max_weight=0.30, buying_power=251.88)
+    assert size2.notional <= 251.88 + 1e-9
+    assert size2.cash_limited is True
+    assert "cash" in size2.reason.lower()
+
+
+def test_without_buying_power_the_old_behaviour_is_unchanged():
+    """Backward compatible for callers with no cash constraint (margin, backtest)."""
+    plan = _plan(entry=25.0)
+    with_bp = q.size_position(1000.0, 25.0, plan, buying_power=1000.0)
+    without_bp = q.size_position(1000.0, 25.0, plan)
+    assert with_bp.shares == without_bp.shares
+    assert without_bp.cash_limited is False
+
+
+def test_ample_cash_is_not_reported_as_the_binding_constraint():
+    plan = _plan(entry=25.0)
+    size = q.size_position(1000.0, 25.0, plan, buying_power=5000.0)
+    assert size.cash_limited is False
+    assert "cash" not in size.reason.lower()
+
+
+def test_zero_cash_correctly_excludes_the_position():
+    plan = _plan(entry=25.0)
+    size = q.size_position(1000.0, 25.0, plan, buying_power=0.0)
+    assert size.shares == 0 and size.cash_limited is True
+    assert "0.00 is settled" in size.reason
+
+
+def test_a_price_above_settled_cash_is_excluded_even_if_the_cap_would_allow_it():
+    """A $180 stock, an 18% cap that would allow up to $180, but only $150
+    actually settled and spendable -- one share cannot be bought."""
+    plan = _plan(entry=180.0)
+    size = q.size_position(1000.0, 180.0, plan, max_weight=0.18, buying_power=150.0)
+    assert size.shares == 0
+    assert "settled" in size.reason.lower() or "cash" in size.reason.lower()
+
+
+def test_negative_buying_power_is_rejected():
+    plan = _plan()
+    with pytest.raises(ValueError, match="buying_power"):
+        q.size_position(1000.0, 25.0, plan, buying_power=-1.0)
+
+
+def test_reason_names_what_the_position_would_have_been_without_the_cash_limit():
+    """So the email can say 'would have been 6 shares, cash allowed 3' rather
+    than just a smaller number with no context."""
+    plan = _plan(entry=25.0)
+    size = q.size_position(1000.0, 25.0, plan, max_weight=0.18, buying_power=75.0)
+    assert size.shares == 3
+    assert "cash-limited" in size.reason
+
+
+# --------------------------------------------------------- quality enforcement
+
+def test_stop_plan_refuses_a_quality_outside_the_required_set():
+    """Quality used to be advisory -- carried through by convention, never
+    checked. A 'failed' estimate already raised via .usable; this closes the
+    gap for a caller that explicitly narrows what it will accept."""
+    vol = q.Estimate(0.30, "test", 60, "thin")
+    atr = q.Estimate(float("nan"), "test", 0, "failed")
+    with pytest.raises(ValueError, match="quality"):
+        q.stop_plan(100.0, vol, atr, require_quality=("ok",))
+
+
+def test_stop_plan_accepts_thin_when_the_caller_allows_it():
+    vol = q.Estimate(0.30, "test", 60, "thin")
+    atr = q.Estimate(float("nan"), "test", 0, "failed")
+    plan = q.stop_plan(100.0, vol, atr, require_quality=("ok", "thin"))
+    assert plan.quality in ("thin", "degraded")
+
+
+def test_degraded_quality_shrinks_the_position_rather_than_only_being_reported():
+    """The enforcement gap this closes: a degraded estimate used to size
+    identically to an 'ok' one. Same plan.quality, same everything else --
+    only the quality flag differs -- and the degraded one must come out
+    smaller."""
+    good = _plan(entry=50.0, stop_fraction=0.08)
+    bad = q.StopPlan(**{**good.to_dict(), "quality": "degraded"})
+    size_good = q.size_position(1000.0, 50.0, good, buying_power=1000.0)
+    size_bad = q.size_position(1000.0, 50.0, bad, buying_power=1000.0)
+    assert size_bad.notional < size_good.notional
+    assert "scaled" in size_bad.reason and "degraded" in size_bad.reason
+
+
+def test_size_position_rejects_an_unrecognised_quality_flag():
+    good = _plan()
+    bad = q.StopPlan(**{**good.to_dict(), "quality": "excellent"})
+    with pytest.raises(ValueError, match="quality"):
+        q.size_position(1000.0, 100.0, bad)
+
+
+# ------------------------------------------------------------- direction
+
+def test_a_long_stop_sits_below_entry():
+    vol = q.Estimate(0.30, "test", 60, "ok")
+    atr = q.Estimate(float("nan"), "test", 0, "failed")
+    plan = q.stop_plan(100.0, vol, atr, direction="long")
+    assert plan.stop_price < 100.0 and plan.direction == "long"
+
+
+def test_a_short_stop_sits_above_entry():
+    """The regression that mattered: nothing previously checked direction, so a
+    short position would have silently received a long-side stop -- the wrong
+    side of the market, not just a worse number."""
+    vol = q.Estimate(0.30, "test", 60, "ok")
+    atr = q.Estimate(float("nan"), "test", 0, "failed")
+    plan = q.stop_plan(100.0, vol, atr, direction="short")
+    assert plan.stop_price > 100.0 and plan.direction == "short"
+
+
+def test_an_invalid_direction_is_rejected():
+    vol = q.Estimate(0.30, "test", 60, "ok")
+    atr = q.Estimate(float("nan"), "test", 0, "failed")
+    with pytest.raises(ValueError, match="direction"):
+        q.stop_plan(100.0, vol, atr, direction="sideways")
+
+
+# ------------------------------------------------------------- fractional
+
+def test_fractional_sizing_actually_produces_a_fraction():
+    """require_whole_shares=False was previously accepted and ignored -- shares
+    were always floored to an int regardless. This is the regression test."""
+    plan = _plan(entry=683.0)         # a $683 stock, like the real SPY case
+    size = q.size_position(1000.0, 683.0, plan, max_weight=0.18,
+                           require_whole_shares=False, buying_power=1000.0)
+    assert size.shares > 0
+    assert size.shares != int(size.shares)
+    assert size.whole_share_ok is False
+
+
+def test_whole_share_mode_still_floors_to_an_integer():
+    plan = _plan(entry=683.0)
+    size = q.size_position(1000.0, 683.0, plan, max_weight=0.18,
+                           require_whole_shares=True, buying_power=1000.0)
+    assert size.shares == 0          # one share costs more than the 18% cap allows
+
+
+def test_a_fractional_position_below_the_dollar_minimum_is_excluded():
+    plan = _plan(entry=683.0)
+    size = q.size_position(10.0, 683.0, plan, max_weight=0.05,
+                           require_whole_shares=False, buying_power=10.0)
+    assert size.shares == 0 and "minimum" in size.reason
+
+
+# ------------------------------------------------------- vol_percentile honesty
+
+def test_vol_percentile_fails_rather_than_reports_thin_on_deep_undercoverage():
+    """The regression that mattered: a compact pull returning ~100 bars against
+    a 252-day lookback used to come back 'thin', not unavailable, on every
+    single run. 80 of 252 is 32% coverage -- below the 50% floor."""
+    idx = pd.date_range("2026-01-01", periods=99, freq="B")
+    close = pd.Series(np.exp(np.cumsum(np.random.default_rng(1).normal(0, 0.01, 99))),
+                      index=idx) * 100
+    df = pd.DataFrame({"close": close})
+    est = q.vol_percentile(df, lookback=252, window=20)
+    assert est.quality == "failed" and not est.usable
+    assert "unavailable" in est.note
+
+
+def test_vol_percentile_is_ok_with_the_full_lookback():
+    idx = pd.date_range("2026-01-01", periods=300, freq="B")
+    close = pd.Series(np.exp(np.cumsum(np.random.default_rng(2).normal(0, 0.01, 300))),
+                      index=idx) * 100
+    df = pd.DataFrame({"close": close})
+    est = q.vol_percentile(df, lookback=252, window=20)
+    assert est.usable and est.quality == "ok"
+
+
+def test_trend_state_reports_whether_long_history_is_actually_available():
+    short = pd.Series(np.arange(100.0, 100.0 + 80))       # 80 bars, needs 200
+    long_ = pd.Series(np.arange(100.0, 100.0 + 250))
+    assert q.trend_state(short)["long_history_available"] is False
+    assert q.trend_state(long_)["long_history_available"] is True
+
+
+# ------------------------------------------------------- judgment calls (risk)
+
+def test_gap_risk_haircut_shrinks_the_position_by_default():
+    """Stops do not execute outside regular hours, so the real risk per
+    position is larger than risk_budget_fraction alone states. Sizing now
+    assumes less capital is being risked than requested, by default.
+    max_weight is set high enough that the risk budget binds rather than the
+    weight cap, so the haircut has somewhere to show up."""
+    # Fractional sizing so whole-share flooring cannot distort the ratio.
+    plan = _plan(entry=50.0, stop_fraction=0.08)
+    covered = q.size_position(1000.0, 50.0, plan, max_weight=0.30, buying_power=1000.0,
+                              require_whole_shares=False, gap_risk_haircut=0.0)
+    real = q.size_position(1000.0, 50.0, plan, max_weight=0.30, buying_power=1000.0,
+                           require_whole_shares=False)
+    assert "risk budget" in covered.reason and "risk budget" in real.reason
+    assert real.notional < covered.notional
+    assert real.notional == pytest.approx(covered.notional * (1 - q.GAP_RISK_HAIRCUT))
+
+
+def test_gap_risk_haircut_is_bounded():
+    plan = _plan()
+    with pytest.raises(ValueError, match="gap_risk_haircut"):
+        q.size_position(1000.0, 100.0, plan, gap_risk_haircut=1.0)
+    with pytest.raises(ValueError, match="gap_risk_haircut"):
+        q.size_position(1000.0, 100.0, plan, gap_risk_haircut=-0.1)
+
+
+def test_realistically_correlated_equity_book_is_flagged_concentrated():
+    """The regression this recalibration fixes: 20 names at a true 0.55
+    correlation used to report 'concentrated: False' under the old 0.60
+    eigen-share cutoff. That is exactly the book the check exists to catch."""
+    rng = np.random.default_rng(11)
+    common = rng.normal(size=150)
+    vols = [0.01] * 4 + list(np.linspace(0.15, 1.05, 16))
+    book = {f"S{i}": pd.Series((np.sqrt(0.55)*common + np.sqrt(0.45)*rng.normal(size=150)) * v)
+           for i, v in enumerate(vols)}
+    out = q.correlation_concentration(book)
+    assert out["concentrated"] is True
+
+
+def test_a_small_independent_book_is_not_penalised_for_being_small():
+    """An absolute 'fewer than 5 bets' floor was tried and rejected: sampling
+    noise on 5 genuinely independent names regularly dips the estimate under
+    5, which would flag an ordinary diversified small book as concentrated."""
+    rng = np.random.default_rng(1)
+    factor = rng.normal(0, 0.012, 300)
+    indep = {f"I{i}": pd.Series(rng.normal(0, 0.012, 300)) for i in range(5)}
+    out = q.correlation_concentration(indep)
+    assert out["concentrated"] is False

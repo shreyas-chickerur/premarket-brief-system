@@ -331,8 +331,15 @@ def preflight(log: RunLog, *,
     return log
 
 
-def _reconcile(ledger: dict, broker: dict, tol: float = 1e-6) -> dict:
-    """Symbol -> (ledger_qty, broker_qty) for anything that disagrees."""
+def _reconcile(ledger: dict, broker: dict, tol: float = 1e-4) -> dict:
+    """Symbol -> (ledger_qty, broker_qty) for anything that disagrees.
+
+    tol was 1e-6. Broker payloads carry six decimal places and round-trip
+    through JSON and float arithmetic without preserving the last digit, so
+    1e-6 was tight enough to flag positions that actually agreed -- a false
+    drift abort waiting to happen. 1e-4 matches ledger.QTY_TOL, which was
+    derived the same way against real broker data.
+    """
     out = {}
     for sym in set(ledger) | set(broker):
         a, b = float(ledger.get(sym, 0)), float(broker.get(sym, 0))
@@ -490,14 +497,25 @@ def score_closed_decisions(closed: Sequence[dict]) -> dict:
 
     # The honesty gate. Below roughly 30 closed trades, per-trade noise swamps
     # any plausible edge, and reporting a Sharpe-like number would be theatre.
+    #
+    # `statistically_meaningful` is a three-valued string, never a bool. It used
+    # to return False below 100 trades and the STRING "provisional" from 100 up
+    # -- any `if result["statistically_meaningful"]:` check treated "provisional"
+    # as truthy, silently certifying a sample the verdict text next to it calls
+    # provisional. A caller that wants a yes/no should compare the string, not
+    # branch on it as a bool.
     if n < 30:
         res["verdict"] = (f"{n} closed trades is too few to distinguish skill from luck. "
                           f"These figures describe what happened; they do not "
                           f"establish that the process works.")
-        res["statistically_meaningful"] = False
-    else:
+        res["statistically_meaningful"] = "no"
+    elif n < 100:
         res["verdict"] = (f"{n} closed trades — still a small sample. Treat any edge "
                           f"as provisional and check it against a deflated Sharpe ratio "
                           f"before acting on it.")
-        res["statistically_meaningful"] = False if n < 100 else "provisional"
+        res["statistically_meaningful"] = "no"
+    else:
+        res["verdict"] = (f"{n} closed trades. Treat any edge as provisional and check "
+                          f"it against a deflated Sharpe ratio before acting on it.")
+        res["statistically_meaningful"] = "provisional"
     return res

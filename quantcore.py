@@ -292,23 +292,51 @@ class StopPlan:
     capped: bool
     quality: str
     detail: str
+    direction: str = "long"
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
+# Quality floor below which a plan REFUSES rather than degrading. A refusal
+# propagating is the whole design; a caller that wants degraded-anyway sizing
+# still gets it, but has to say so explicitly rather than by omission.
+_MIN_TRADEABLE_QUALITY = ("ok", "thin", "degraded")
+
+
 def stop_plan(entry: float, vol: Estimate, atr: Estimate, *,
               k_daily_sigma: float = 2.5,
-              floor: float = 0.06, cap: float = 0.15) -> StopPlan:
+              floor: float = 0.06, cap: float = 0.15,
+              direction: str = "long",
+              require_quality: Sequence[str] = _MIN_TRADEABLE_QUALITY) -> StopPlan:
     """Distance to stop = k daily standard deviations, cross-checked against ATR.
 
     A flat percentage stop is wrong for every stock at once. This sets the stop
     where ordinary daily noise will not reach it, but a genuine break will.
+
+    `direction` controls which side of entry the stop sits on: `"long"` places
+    it below entry (a BUY-side stop, `sell` to exit); `"short"` places it above
+    (a short position's stop, `buy` to cover). Nothing previously checked this,
+    so a short position would have silently received a long-side stop with no
+    error -- the one case where the wrong side is not a worse number but a
+    completely wrong side of the market.
+
+    `require_quality` is the enforcement this was missing: an Estimate's quality
+    flag used to be advisory, carried through only by convention. Passing a
+    `vol` whose quality is outside this set now raises rather than silently
+    producing a plan a caller might act on anyway.
     """
     if entry <= 0:
         raise ValueError("entry must be positive")
+    if direction not in ("long", "short"):
+        raise ValueError(f"direction must be 'long' or 'short', got {direction!r}")
     if not vol.usable:
         raise ValueError(f"unusable volatility estimate: {vol.note}")
+    if vol.quality not in require_quality:
+        raise ValueError(
+            f"volatility quality {vol.quality!r} is below the required "
+            f"{require_quality} -- refusing rather than sizing on a number "
+            f"this system itself flagged as untrustworthy")
 
     daily = vol.value / math.sqrt(TRADING_DAYS)
     raw = k_daily_sigma * daily
@@ -329,64 +357,163 @@ def stop_plan(entry: float, vol: Estimate, atr: Estimate, *,
         quality = "degraded" if quality == "ok" else quality
         detail += f"; {'floored' if floored else 'capped'} from {raw:.4f}"
 
+    stop_price = entry * (1 - frac) if direction == "long" else entry * (1 + frac)
+    detail += f"; {direction} stop"
+
     return StopPlan(
         stop_fraction=frac,
-        stop_price=round(entry * (1 - frac), 2),
+        stop_price=round(stop_price, 2),
         entry=entry,
         annual_vol=vol.value,
         daily_vol=daily,
         atr_fraction=atr_frac,
         multiple_of_daily_vol=frac / daily if daily > 0 else float("nan"),
         floored=floored, capped=capped, quality=quality, detail=detail,
+        direction=direction,
     )
 
 
 @dataclass
 class SizePlan:
-    shares: int
+    shares: float          # int for whole shares, float when fractional
     notional: float
     weight: float
     risk_dollars: float
     whole_share_ok: bool
     reason: str
+    cash_limited: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
+# How much a degraded estimate shrinks the position, rather than the quality
+# flag being carried along as decoration. "ok" costs nothing; "thin" and
+# "degraded" pay for the extra uncertainty in smaller size instead of full size
+# on a number this system itself is not fully confident in.
+_QUALITY_SIZE_SCALAR = {"ok": 1.0, "thin": 0.65, "degraded": 0.40}
+
+
+# Stops do not execute outside regular hours, so an overnight gap can pass
+# straight through one. risk_budget_fraction is the loss if the stop fills
+# exactly at its trigger; a gap does not do that. GAP_RISK_HAIRCUT sizes the
+# position as if the effective risk budget were smaller than requested, which
+# is the honest way to say "the real risk per position is larger than the
+# stated number" without inventing a false sense of the gap being covered --
+# nothing can cover it while this broker enforces regular-hours-only stops.
+# 25% is a judgment call, not a measurement: it assumes a genuine overnight gap
+# is materially rarer than a regular-hours stop touch but not negligible, for a
+# portfolio of liquid single names and ETFs with no scheduled earnings gate
+# (the five-condition gate already requires a dated catalyst, which excludes
+# blind earnings-date exposure). Revisit if the traded universe changes.
+GAP_RISK_HAIRCUT = 0.25
+
+
 def size_position(account_equity: float, entry: float, plan: StopPlan, *,
                   risk_budget_fraction: float = 0.02,
                   max_weight: float = 0.18,
-                  require_whole_shares: bool = True) -> SizePlan:
-    """Equal RISK per position, not equal dollars, then clipped by the weight cap.
+                  require_whole_shares: bool = True,
+                  buying_power: Optional[float] = None,
+                  gap_risk_haircut: float = GAP_RISK_HAIRCUT) -> SizePlan:
+    """Equal RISK per position, not equal dollars, then clipped by the weight
+    cap, by data quality, and — the constraint that actually binds on a cash
+    account — by what is settled and spendable right now.
 
     risk_budget_fraction is the fraction of the account lost if the stop fills
     at its trigger price. Slippage past the stop makes the realised loss larger,
     which is why the budget is deliberately small.
+
+    `account_equity` and `buying_power` are different numbers on a cash account
+    with T+1 settlement: equity counts everything held, buying power counts
+    only settled cash. Sizing against equity alone can produce an order the
+    broker rejects outright. `buying_power` defaults to `account_equity` only
+    so a caller with genuinely no cash constraint (a margin account, a
+    backtest) keeps working; every live cash-account call site must pass the
+    real figure.
+
+    `gap_risk_haircut` shrinks the risk budget to account for stops that
+    cannot execute outside regular hours: a gap can pass straight through one,
+    so the position is sized as if less capital were being risked than
+    requested. Default 0.25 (see GAP_RISK_HAIRCUT for the reasoning); pass 0 to
+    disable, which nothing in this codebase does by default.
+
+    A `plan` built with `stop_plan`'s `require_quality` already refuses a
+    quality outside its allowed set. What was still missing is that "thin" and
+    "degraded" passed through unpenalised once they cleared that gate --
+    `plan.quality` is now used to scale the position down rather than only
+    being reported.
+
+    `require_whole_shares=False` previously accepted but did nothing: shares
+    were always floored to an integer regardless. It now actually sizes
+    fractionally when set, and whole-share when not.
     """
     if account_equity <= 0 or entry <= 0:
         raise ValueError("account_equity and entry must be positive")
+    if buying_power is not None and buying_power < 0:
+        raise ValueError("buying_power cannot be negative")
+    if plan.quality not in _QUALITY_SIZE_SCALAR:
+        raise ValueError(f"unrecognised plan quality {plan.quality!r}")
 
-    risk_dollars = account_equity * risk_budget_fraction
+    if not 0.0 <= gap_risk_haircut < 1.0:
+        raise ValueError("gap_risk_haircut must be in [0, 1)")
+
+    spendable = account_equity if buying_power is None else buying_power
+    quality_scalar = _QUALITY_SIZE_SCALAR[plan.quality]
+
+    risk_dollars = (account_equity * risk_budget_fraction * quality_scalar
+                    * (1.0 - gap_risk_haircut))
     notional_by_risk = risk_dollars / plan.stop_fraction
     notional_cap = account_equity * max_weight
-    notional = min(notional_by_risk, notional_cap)
-    binding = "risk budget" if notional_by_risk <= notional_cap else "weight cap"
+    notional_cash = min(notional_by_risk, notional_cap)
+    cash_limited = spendable < notional_cash
+    notional = min(notional_cash, spendable)
 
-    shares = int(notional // entry)
-    if require_whole_shares and shares < 1:
-        return SizePlan(0, 0.0, 0.0, 0.0, False,
-                        f"one share costs {entry:.2f} but cap allows {notional:.2f} "
-                        f"— excluded because a resting stop needs whole shares")
+    if notional_by_risk <= notional_cap and not cash_limited:
+        binding = "risk budget"
+    elif not cash_limited:
+        binding = "weight cap"
+    else:
+        binding = "settled cash"
 
-    filled = shares * entry
+    quality_note = (f"; scaled to {quality_scalar:.0%} for {plan.quality} data quality"
+                    if quality_scalar < 1.0 else "")
+
+    if require_whole_shares:
+        shares_n = int(notional // entry)
+        if shares_n < 1:
+            why = (f"one share costs {entry:.2f} but only {spendable:.2f} is settled "
+                   f"and spendable" if cash_limited and spendable < entry else
+                   f"one share costs {entry:.2f} but cap allows {notional:.2f}")
+            return SizePlan(0, 0.0, 0.0, 0.0, False,
+                            f"{why} — excluded because a resting stop needs whole shares"
+                            f"{quality_note}",
+                            cash_limited=cash_limited)
+        filled = shares_n * entry
+        reason = f"{binding} binding; {shares_n} share(s) at {entry:.2f}{quality_note}"
+        if cash_limited and shares_n > 0:
+            reason += f" (would be {int(notional_cash // entry)} on cap alone; cash-limited)"
+        return SizePlan(
+            shares=shares_n, notional=round(filled, 2), weight=filled / account_equity,
+            risk_dollars=round(filled * plan.stop_fraction, 2), whole_share_ok=True,
+            reason=reason, cash_limited=cash_limited,
+        )
+
+    # Fractional path: no floor to an integer, but still refuse a position too
+    # small to be worth the round-trip cost, and never a fractional order at a
+    # broker that would reject one -- this path is for accounts that support it.
+    shares_f = notional / entry
+    if notional < 1.0:
+        return SizePlan(0.0, 0.0, 0.0, 0.0, False,
+                        f"notional {notional:.2f} is below the $1 minimum for a "
+                        f"fractional order{quality_note}",
+                        cash_limited=cash_limited)
+    filled = shares_f * entry
+    reason = f"{binding} binding; {shares_f:.4f} share(s) at {entry:.2f}{quality_note}"
     return SizePlan(
-        shares=shares,
-        notional=round(filled, 2),
+        shares=round(shares_f, 6), notional=round(filled, 2),
         weight=filled / account_equity,
-        risk_dollars=round(filled * plan.stop_fraction, 2),
-        whole_share_ok=True,
-        reason=f"{binding} binding; {shares} share(s) at {entry:.2f}",
+        risk_dollars=round(filled * plan.stop_fraction, 2), whole_share_ok=False,
+        reason=reason, cash_limited=cash_limited,
     )
 
 
@@ -410,7 +537,8 @@ def rsi(close: pd.Series, window: int = 14) -> Estimate:
 
 def trend_state(close: pd.Series, fast: int = 50, slow: int = 200) -> dict:
     c = pd.Series(close, dtype=float).dropna()
-    out = {"fast_ma": None, "slow_ma": None, "state": "unknown", "n_obs": len(c)}
+    out = {"fast_ma": None, "slow_ma": None, "state": "unknown", "n_obs": len(c),
+          "long_history_available": len(c) >= slow}
     if len(c) >= fast:
         out["fast_ma"] = float(c.rolling(fast).mean().iloc[-1])
     if len(c) >= slow:
@@ -424,12 +552,21 @@ def trend_state(close: pd.Series, fast: int = 50, slow: int = 200) -> dict:
     return out
 
 
-def vol_percentile(df: pd.DataFrame, lookback: int = 252, window: int = 20) -> Estimate:
+def vol_percentile(df: pd.DataFrame, lookback: int = 252, window: int = 20,
+                   min_coverage: float = 0.5) -> Estimate:
     """Where current realised volatility sits in its own recent history.
 
     This is the regime signal. It replaces a hidden Markov model deliberately:
     it is stable across reruns, has no label-switching problem, and is
     explainable in one sentence at six in the morning.
+
+    A percentile is only as meaningful as the history it is a percentile OF.
+    With a 252-day lookback and a compact data pull returning ~100 bars, the
+    rolling window has under a third of its intended length -- that is not a
+    weak signal, it is a different statistic wearing the same name, and it
+    used to come back merely 'thin' rather than saying so. Below
+    `min_coverage` of the requested lookback this now FAILS outright rather
+    than returning a number a caller might act on.
     """
     c = df["close"].astype(float)
     r = np.log(c / c.shift(1)).dropna()
@@ -437,11 +574,20 @@ def vol_percentile(df: pd.DataFrame, lookback: int = 252, window: int = 20) -> E
         return Estimate(float("nan"), "vol_percentile", len(r), "failed",
                         f"needs {window*3} returns, have {len(r)}")
     rolling = r.rolling(window).std().dropna().iloc[-lookback:]
+    coverage = len(rolling) / lookback
+
+    if coverage < min_coverage:
+        return Estimate(float("nan"), "vol_percentile", len(rolling), "failed",
+                        f"needs {lookback}-day history for a real percentile, "
+                        f"have {len(rolling)} ({coverage:.0%} coverage) — "
+                        f"unavailable, not merely thin")
+
     cur = float(rolling.iloc[-1])
     pct = float((rolling < cur).mean() * 100)
-    q = "ok" if len(rolling) >= 120 else "thin"
-    return Estimate(pct, "vol_percentile", len(rolling), q,
-                    note=f"{window}d realised vol vs trailing {len(rolling)} obs")
+    quality = "ok" if coverage >= 1.0 else "thin"
+    return Estimate(pct, "vol_percentile", len(rolling), quality,
+                    note=f"{window}d realised vol vs trailing {len(rolling)} obs "
+                        f"({coverage:.0%} of the {lookback}-day lookback)")
 
 
 def correlation_concentration(returns_by_symbol: dict[str, pd.Series]) -> dict:
@@ -512,6 +658,30 @@ def correlation_concentration(returns_by_symbol: dict[str, pd.Series]) -> dict:
 
     worst = int(np.argmax(off))
     pairs = [(syms[i], syms[j]) for i, j in zip(*iu)]
+    eff_bets = 1.0 / top_share
+    eff_bets_sample = 1.0 / s_top
+
+    # A single eigen-share cutoff never fires for a realistically correlated
+    # equity book: 20 names at a true 0.55 correlation land at a first-factor
+    # share of ~0.57, just under the old 0.60 threshold -- most real
+    # portfolios never got graded. The more legible failure mode for a person
+    # reading an email is "how many of your N positions are actually
+    # independent bets", so the primary trigger is RATIO-based: concentrated
+    # when the effective bets fall under half the number of names examined.
+    # An absolute floor (e.g. "fewer than 5 bets") was tried first and
+    # rejected: on a small book of 5 genuinely independent names, sampling
+    # noise alone regularly pulls the estimate under 5, which would flag an
+    # ordinary diversified 5-stock book as concentrated. Scaling the floor by
+    # n avoids penalising small portfolios for being small.
+    # The eigen-share cutoff is kept as a second, absolute path at 0.45
+    # (down from 0.60) for the case a skewed pair distribution trips it
+    # without moving the ratio much.
+    bets_floor = 0.5 * len(syms)
+    concentrated = bool(
+        min(eff_bets, eff_bets_sample) < bets_floor
+        or max(top_share, s_top) > 0.45
+    )
+
     return {
         "status": "ok",
         "n_symbols": len(syms),
@@ -520,13 +690,14 @@ def correlation_concentration(returns_by_symbol: dict[str, pd.Series]) -> dict:
         "max_pairwise_corr": float(off.max()),
         "max_pair": pairs[worst],
         "first_factor_share": top_share,
-        "effective_bets": float(1.0 / top_share),
+        "effective_bets": float(eff_bets),
         "shrinkage": float(lw.shrinkage_),
         # unshrunk view, for the reader who wants to see the raw evidence
         "mean_pairwise_corr_sample": float(s_off.mean()),
-        "effective_bets_sample": float(1.0 / s_top),
+        "effective_bets_sample": float(eff_bets_sample),
+        "effective_bets_floor": bets_floor,
         # the verdict uses whichever view is less flattering
-        "concentrated": bool(max(top_share, s_top) > 0.60),
+        "concentrated": concentrated,
     }
 
 

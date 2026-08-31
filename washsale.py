@@ -119,7 +119,6 @@ class Registry:
         exact = [t for t in self._trades
                  if t.symbol.upper() == sym and t.is_loss_sale and cutoff <= t.on <= asof]
         if exact:
-            worst = min(exact, key=lambda t: t.on)
             clears = max(t.on for t in exact) + timedelta(days=WINDOW_DAYS + 1)
             accts = sorted({t.account for t in exact})
             return Verdict(
