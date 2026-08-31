@@ -16,6 +16,8 @@ Start with [HANDOFF.md](HANDOFF.md), the operations guide.
 | `quantcore.py` | Volatility estimators, indicators, stop distance, position sizing, data-anomaly detection |
 | `runlog.py` | Run manifests, staged timing, the preflight self-audit, regression review, honest scoring |
 | `washsale.py` | Cross-account wash-sale registry (26 U.S.C. 1091 is taxpayer-level, not account-level) |
+| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal |
+| `evidence.py` | Pre-registered edge testing: sample-size planning, futility stopping, the policy that pauses trading on a ruled-out claim |
 | `emailer.py` | HTML rendering of the brief, with failure diagnosis |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic series the demo falls back to |
@@ -35,6 +37,13 @@ Start with [HANDOFF.md](HANDOFF.md), the operations guide.
    A flat percentage is wrong for every stock at once.
 6. The market calendar is a verified table, not derived from the observance
    rules, and it fails loudly once past the horizon it was verified through.
+7. Positions and the wash-sale registry are rebuilt from broker order history
+   every run, never stored — a stale local copy is a form of drift the system
+   cannot detect on its own.
+8. Whether this system has an edge is a pre-registered, reviewed question, not
+   a one-time claim: `evidence.py` states the sample size a claimed edge needs
+   before trusting it, and stops opening new positions the moment that edge is
+   ruled out.
 
 ## Broker constraints this code encodes
 
@@ -55,7 +64,7 @@ Python 3.11 or newer.
 ```
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 159 tests
+python -m pytest -q          # 235 tests
 python pipeline_demo.py      # end-to-end run
 ```
 

@@ -3,20 +3,18 @@
 The live trigger prompt is stored in the trigger itself, not in this repository,
 because the filled version names the accounts. This is the template.
 
-Two placeholders must be substituted before use. Everything else the run needs is
-read from `state.json` at Stage 0, so there is exactly one private bootstrap fact
-and one source of truth:
+One placeholder must be substituted before use — `{{DRIVE_FOLDER_ID}}`, the
+Google Drive folder holding `state.json`, the dated `journal-*.json` files, and
+the dated `run-manifest-*.json` files. Everything else the run needs is read
+from `state.json` or rebuilt from the broker at Stage 0.
 
-| Placeholder | Value |
-|---|---|
-| `{{DRIVE_FOLDER_ID}}` | Google Drive folder holding `state.json` and the run manifests |
-| `{{STATE_FILE_ID}}` | Drive file id of `state.json` |
-
-Both are in `HANDOFF.private.md`.
-
-Create the trigger with the Claude Code Remote `create_trigger` tool, cron in UTC,
-`requires_local_device: false`. See section 8 of `HANDOFF.md` for the schedule and
-the daylight-saving changeover dates.
+Create the trigger with the Claude Code Remote `create_trigger` tool, cron in
+UTC, `requires_local_device: false`. See section 8 of `HANDOFF.md` for the
+schedule and the daylight-saving changeover dates. **Attach the Robinhood,
+Alpha Vantage, and Google Drive connectors to the routine itself** — a
+scheduled routine sees only the connectors listed in its own configuration, not
+the ones connected to the account. This was the cause of the first scheduled
+fire aborting with 9 of 10 tools missing.
 
 ---
 
@@ -24,66 +22,92 @@ the daylight-saving changeover dates.
 >
 > **STAGE 0 — PREFLIGHT. Do this before looking at a single price.**
 >
-> 0. **Create the run log first, before anything else:** `log = runlog.RunLog(run_id, mode=...)`. It timestamps itself on construction, so building it at the end of the run makes every stage timing read as zero and silently destroys the performance record the regression review depends on.
-> 
-> 0b. **Note how this run started.** If a human triggered it by hand rather than the schedule firing it, the `fired_on_schedule` check will fail by however far the manual run sits from 06:20. That is expected and is not a defect: say so plainly in the email rather than recommending a fix for a schedule that is not broken. Only treat that check as real when the run was started by the schedule.
+> 0. **Create the run log first, before anything else:** `log = runlog.RunLog(run_id, mode=...)`. It timestamps itself on construction, so building it later makes every stage timing read as zero and silently destroys the performance record the regression review depends on. Record every check, stage, external call, anomaly, and decision on it as you go — including deliberate non-actions. Its `.manifest()` is what the stored manifest is built from.
 >
-> 1. `git clone --depth 1 https://github.com/shreyas-chickerur/premarket-brief-system /tmp/pbs` then `cd /tmp/pbs` and `pip install --break-system-packages -q -r requirements.txt`. **If the clone fails, abort the run and report it.** Do not reconstruct the code from anywhere else: the repository is the only source of truth for it, and a second copy is a copy that can silently be a version behind. Stale trading code is more dangerous than a missed session.
+> 0b. **Note how this run started.** If a human triggered it by hand rather than the schedule firing it, the `fired_on_schedule` check will fail by however far the manual run sits from 06:20. That is expected and is not a defect: say so plainly rather than recommending a fix for a schedule that is not broken. Treat that check as meaningful only when the schedule started the run.
+>
+> 1. `git clone --depth 1 https://github.com/shreyas-chickerur/premarket-brief-system /tmp/pbs` then `cd /tmp/pbs` and `pip install --break-system-packages -q -r requirements.txt`. **If the clone fails, abort the run and report it.** The repository is the only source of truth for code; do not reconstruct it from anywhere else. Stale trading code is more dangerous than a missed session.
 > 2. Run `python -m pytest -q`. **If any test fails, abort the run entirely, place no orders, and jump to STAGE 6 with the failure as the headline.**
-> 3. Confirm these tools are visible in this session: brokerage `get_accounts`, `get_equity_positions`, `get_portfolio`, `place_equity_order`, `review_equity_order`, `get_equity_quotes`; market data `TIME_SERIES_DAILY` and `MARKET_STATUS`; Gmail `send_message`; Google Drive `search_files`. **If any are missing, abort execution, place no orders, and report it.** This guards a known cold-start defect in scheduled runs.
-> 4. Read `state.json` (Drive file id `{{STATE_FILE_ID}}`). It holds `accounts` (the individual and agentic account numbers and roles), `config` (every threshold, cap, and dial), the trade journal, the wash-sale registry, and the last runs' manifests. **Take every account number, threshold, and limit from this file. Do not hardcode any of them, and do not carry a remembered value from a previous run.**
-> 5. Check the clock: if local Central time is more than 30 minutes from 06:20, flag it prominently — the schedule has drifted, probably daylight saving.
-> 6. Check the calendar with `MARKET_STATUS` and with `runlog.preflight`, which carries a verified closure table. If the market is closed today, send a two-line note and stop. If the `holiday_table_current` check fails, the table has passed its horizon: say so loudly and treat the session as unverified. Never stay silent — silence must always mean something is broken.
-> 7. Reconcile: read both accounts' positions from the broker and compare against the journal in `state.json`. **If they disagree, abort execution and report the discrepancy.** Our memory of the world being wrong makes every downstream decision wrong.
-> 8. Review the last ten run manifests in `state.json` for regressions and improvement opportunities using `runlog.find_optimizations`. Propose changes in the email; never apply them silently.
+> 3. Confirm these tools are visible in this session: Robinhood `get_accounts`, `get_equity_positions`, `get_equity_orders`, `get_portfolio`, `place_equity_order`, `review_equity_order`, `get_equity_quotes`, `cancel_equity_order`; Alpha Vantage `TIME_SERIES_DAILY_ADJUSTED` and `MARKET_STATUS`; Gmail `send_message`; Google Drive `search_files`, `read_file_content`, `create_file`. **If any are missing, abort execution, place no orders, and report exactly which ones were missing.** A routine sees only the connectors attached to its own configuration, not those connected to the account — this is not a transient cold-start defect, it will recur if a connector is ever detached.
+> 4. Read `state.json` (Google Drive file id `{{STATE_FILE_ID}}`) for `accounts`, `config`, and `evidence.pre_registration`. **Take every account number and threshold from this file. Do not hardcode any of them.** `state.json` no longer holds positions, trades, the wash-sale registry, or run history — those arrays are present only for backward compatibility, are always empty, and must not be read or written. They are rebuilt every run per steps 7–9 below.
+> 5. Check the clock: if local Central time is more than 30 minutes from 06:20, flag it prominently, subject to 0b above.
+> 6. Check the calendar with Alpha Vantage `MARKET_STATUS` and with `runlog.preflight`, which carries a closure table verified against the exchange's published calendar. If the market is closed today, send the short closed-market email and stop. If `holiday_table_current` fails, the table has passed its horizon: say so loudly and treat the session as unverified. Never stay silent — silence must always mean something is broken.
+> 7. **Rebuild both accounts' positions from broker order history — this replaces comparing against a stored ledger entirely.** Call `get_equity_orders` for both account numbers in `state.json.accounts` (individual and agentic) with no `created_at_gte` (or the earliest the API allows) so the full history is covered; page with `cursor` until exhausted. Turn each account's orders into fills with `ledger.fills_from_orders`, derive positions with `ledger.positions_from_fills`, and compare against `get_equity_positions` with `ledger.reconcile_positions`. **Any disagreement aborts execution and is reported** — the broker's own positions failing to follow from the broker's own fills means either a transfer, a corporate action, or a bug, and every downstream number depends on knowing which.
+> 8. **Rebuild the wash-sale registry from the same fills**, both accounts, with `ledger.to_washsale_trades(fills, account)`, then `washsale.Registry(trades_individual + trades_agentic)`. The registry is never read from storage — a stored copy that has forgotten a loss sale approves the repurchase that disallows it, which is exactly what happened on the first live run.
+> 9. **Fold the run's history from the journal, not from `state.json`.** List files in the Drive folder `{{DRIVE_FOLDER_ID}}` matching `journal-*.json`, read each with `read_file_content`, and fold them with `ledger.fold_journal`. Use `journal.runs` for `runlog.find_optimizations` (replacing the old `state.json.run_history`). Propose any optimization findings in the email; never apply them silently.
 >
-> **STAGE 1 — GATHER.** Read both accounts named in `state.json.accounts`: the individual account is READ ONLY, the agentic account is tradable.
-> 
-> Pull prices with **`TIME_SERIES_DAILY_ADJUSTED`**, not `TIME_SERIES_DAILY`. The unadjusted endpoint returns raw prices, so a stock that split inside the window shows a cliff that is not a price move: CRWD's 4-for-1 read as 293% volatility. Volatility is what stop distance and position size are derived from, so an unadjusted split silently poisons the sizing of every trade in that name. If the adjusted endpoint is unavailable on this key, say so in the email and rely on `detect_anomalies`, which blocks any symbol whose series contains a split-shaped ratio.
-> 
-> **Keep every payload small** — `datatype=csv`, `outputsize=compact`. Some endpoints return 70,000+ characters and will blow the budget.
-> 
-> **Compact returns about 100 bars, and that is a hard limit on what can be measured.** `vol_percentile` needs 252 and `trend_state` needs 200. Report both as **unavailable** for want of history — not as a degraded estimate — and let neither influence sizing or the gate. A percentile computed from a third of its window is not a weak signal, it is a different statistic wearing the same name. `consensus_volatility`, `average_true_range`, and `rsi` are all fine on 100 bars.
-> 
+> **STAGE 0.5 — EVIDENCE REVIEW. Always runs, every single day, whether or not anything is about to trade.**
+>
+> This is the standing answer to "does this system have an edge", reviewed on a cadence rather than produced once and forgotten.
+>
+> 1. Call `journal.matured_theses(today)` — theses opened far enough back that their `horizon_days` has elapsed and which have no matching `"close"` entry. For each: fetch the exit price (Alpha Vantage, the closing price on the maturity date) and the benchmark exit (SPY, same date), and score it with `evidence.settle(thesis, exit_price=..., benchmark_exit=..., closed=maturity_date, cost_pct=state["config"].get("cost_pct", 0.10))`. Determine `thesis_played_out` from whether the named catalyst actually materialised as described, if that is knowable; leave it unset if not.
+> 2. Gather every already-settled outcome from the journal (`kind == "outcome"`) plus the ones just scored in step 1. This is the full sample `evidence.assess` grades.
+> 3. Build `evidence.PreRegistration(**state["evidence"]["pre_registration"])` — parse `decide_by` to a `date` first. Count prior `kind == "evidence"` journal entries and pass `looks_taken = that count + 1`. Call `evidence.assess(outcomes, prereg, asof=today, looks_taken=looks_taken)`.
+> 4. Call `evidence.trading_policy(verdict)`. **If `pause_new_positions` is true, override `max_new_positions_per_day` to 0 for the rest of this run and say so loudly and specifically in the email** — which verdict triggered it, and that existing positions and their stops are untouched. This is not a suggestion to review later; it takes effect the same run.
+> 5. This entire step's output — the verdict, `n`, the mean excess, the sample still needed, and the policy decision — is always a section in the email, even when `n == 0`. Especially when `n == 0`: "no closed trades yet, roughly N more needed" is itself the finding, and it is the finding that matters most on the days there is nothing else to report.
+>
+> **STAGE 1 — GATHER.** The individual account is READ ONLY; the agentic account is tradable.
+>
+> Pull prices with **`TIME_SERIES_DAILY_ADJUSTED`, not `TIME_SERIES_DAILY`**. The unadjusted endpoint returns raw prices, so a stock that split inside the window shows a cliff that is not a price move: CRWD's 4-for-1 read as 293% volatility, and the sizing that flows from that number would have been wrong for as long as the split sat in the window. If the adjusted endpoint is unavailable on this key, say so in the email and rely on `detect_anomalies`, which blocks any symbol whose series contains a split-shaped ratio anywhere in the window, not just on the last bar.
+>
+> **Keep every payload small** — `datatype=csv`, `outputsize=compact`. Some endpoints return 70,000+ characters and will blow the tool output budget.
+>
+> **Compact returns about 100 bars, and that is a hard limit on what can be measured.** `quantcore.vol_percentile` now FAILS outright (quality `"failed"`, not `"thin"`) when coverage of its 252-day lookback falls below half, and `trend_state` reports `long_history_available: False` when it lacks the 200 days it needs. Neither may influence sizing or the gate when unavailable. `consensus_volatility`, `average_true_range`, and `rsi` are all sound on 100 bars.
+>
 > Research overnight news, macro events, earnings, and filings by web search. Run `quantcore.detect_anomalies` on every price series; any symbol with a blocking anomaly is excluded from decisions today and the reason is reported.
 >
-> **STAGE 2 — MEASURE.** For every position and candidate: `consensus_volatility`, `average_true_range`, `rsi`, `vol_percentile`, `trend_state`. Portfolio-level `correlation_concentration`. Carry the quality flags through; a degraded estimate shrinks the position or kills the idea.
+> **STAGE 2 — MEASURE.** For every position and candidate: `consensus_volatility`, `average_true_range`, `rsi`, and the two long-lookback measures only where the history actually supports them. Portfolio-level `correlation_concentration`: it reports both a shrunk and an unshrunk view and now flags `concentrated` when effective bets fall under half the number of names examined, or the eigen-share exceeds 0.45 — the old 0.60 eigen-share-only cutoff never fired for a realistically correlated equity book. Carry every quality flag through.
 >
-> **STAGE 3 — GATE.** Apply the five conditions in section 7 of `HANDOFF.md`.
-> 
-> **Rebuild the wash-sale registry from broker transaction history every run.** Do not trust the copy in `state.json`: on the first live read it was empty while the broker showed two real loss sales, and a registry that has forgotten a loss sale cheerfully approves the repurchase that disallows it. Treat the stored copy as a cache — cross-check it against what you rebuilt and report any disagreement rather than silently preferring one. Then check `washsale.Registry.check_buy` before any purchase and `check_loss_sale` before realising any loss, across BOTH accounts.
+> **STAGE 3 — GATE.** Apply the five conditions in section 7 of `HANDOFF.md`, and check the wash-sale registry rebuilt in Stage 0 with `check_buy` before any purchase and `check_loss_sale` before realising any loss, across BOTH accounts.
 >
-> **STAGE 4 — INDIVIDUAL ACCOUNT (suggestions only).** You cannot trade here and must not try. Write specific buys, adds, trims, and exits with size, entry limit, invalidation level, catalyst, horizon, and thesis. Flag any breach of the single-name cap, the cash floor, or the sector cap from `state.json.config`. List rejected ideas with the failing gate condition.
+> `quantcore.stop_plan` now RAISES if the volatility estimate's quality falls outside `require_quality` (default: `ok`, `thin`, or `degraded` — anything short of `failed`). Catch that and record it as a rejected idea with the gate condition `"data quality"`, not as a crashed run.
 >
-> **STAGE 5 — AGENTIC ACCOUNT (execute).** Rules, all mandatory, with every threshold taken from `state.json.config`:
+> **STAGE 4 — INDIVIDUAL ACCOUNT (suggestions only).** You cannot trade here and must not try. Write specific buys, adds, trims, and exits with size, entry limit, invalidation level, catalyst, horizon, and thesis. Flag any breach of the single-name cap, the cash floor, or the sector cap from config. Record rejected ideas as `runlog.Decision` with `gate_failed` set.
+>
+> **For every specific idea that clears the gate here — whether or not the account can act on it — write a `"thesis"` journal entry** (`thesis_id`, `symbol`, `opened: today`, `horizon_days` from the stated horizon, `entry`, `benchmark_entry: SPY's close today`, `account: "individual"`). The pre-registered evidence claim is about whether the five-condition gate itself has an edge, not about which account executes on it, so individual-account suggestions count toward the sample exactly as agentic-account trades do — and given how few ideas clear the gate on a typical day, this roughly doubles the rate evidence accumulates.
+>
+> **STAGE 5 — AGENTIC ACCOUNT (execute).** Rules, all mandatory, with every threshold taken from `state.json.config` unless `max_new_positions_per_day` was overridden to 0 in Stage 0.5:
+>
 > - Stocks and exchange-traded funds only. No options, cryptocurrency, leveraged or inverse funds.
-> - **Whole shares only.** A fractional position cannot hold a stop; verified against the live API.
-> - Respect `max_weight_agentic`, `max_new_positions_per_day`, and `target_holdings_agentic`.
-> - Size with `quantcore.size_position` at `risk_budget_fraction`. Stop from `quantcore.stop_plan`.
-> - **Every new position gets a good-for-day stop order placed the same run** (`type=stop_market`, `time_in_force=gfd`). Never good-till-cancelled — there is no cancel tool, and a good-for-day stop expires by itself and is re-derived tomorrow at current volatility.
-> - Never add to a losing position.
-> - Cash account: sale proceeds settle T+1. Do not attempt to redeploy same-day proceeds.
-> - Call `review_equity_order` first, then `place_equity_order`. **The review passing is not proof the placement will succeed** — a fractional stop passes review and fails placement.
-> - After every order, **re-read the account** and report what the broker says, not what you intended. Never assume a fill.
-> - Circuit breaker: agentic equity below `circuit_breaker_usd` → no new positions, drop to level 4, require review. Hard stop: below `hard_stop_usd` → liquidate to cash, halt, say so loudly.
-> - If an order is rejected, do not retry in a loop. Report the rejection verbatim.
+> - **Whole shares only** (`whole_shares_required: true`). A fractional position cannot hold a stop; verified against the live API. (`quantcore.size_position` also supports a fractional path now, for a future account that does not need this constraint — it is not used here.)
+> - Respect `max_weight_agentic` and `target_holdings_agentic`.
+> - Call `quantcore.size_position` with `account_equity` = `get_portfolio`'s `total_value`, `buying_power` = `get_portfolio`'s `buying_power.buying_power` (the settled, spendable figure — **not** `total_value`; on a cash account with T+1 settlement they are very different numbers), `risk_budget_fraction` and `max_weight` from config. It applies `config.gap_risk_haircut` by default, shrinking the effective risk budget because stops cannot execute outside regular hours and a gap can pass straight through one.
+> - Call `quantcore.stop_plan` with `direction="long"` (this account holds no shorts) to get the stop distance and price.
+> - **Every new position gets a good-for-day stop order placed the same run** (`type=stop_market`, `time_in_force=gfd`). Never good-till-cancelled.
+> - **Before sizing any sell, read open orders with `get_equity_orders(state="confirmed")` (and other open states) for that symbol.** A stale resting stop reserves shares and the broker rejects the whole order rather than filling what it can (`EQUITY_MAX_SELL_SHARES_EXCEEDED`). If a stale order blocks a correct trade, **cancel it with `cancel_equity_order`** — this tool now exists and was confirmed working 31 August 2026 — then re-place the correct order. Report what was cancelled and why.
+> - Never add to a losing position. Cash account: proceeds settle T+1; do not attempt to redeploy same-day proceeds.
+> - Call `review_equity_order` first, then `place_equity_order`. The review passing is not proof the placement will succeed.
+> - After every order, **re-read the account** and report what the broker says, not what was intended. Never assume a fill.
+> - Report where equity sits relative to `circuit_breaker_usd` and `hard_stop_usd`.
+> - Note explicitly which existing positions are fractional and therefore cannot be protected by a stop.
+> - If an order is rejected for a reason other than a stale resting order, do not retry in a loop. Report the rejection verbatim.
 >
-> **STAGE 6 — RECORD AND SEND.** Record the run manifest in Drive as a new dated file `run-manifest-YYYY-MM-DD.json` in folder `{{DRIVE_FOLDER_ID}}` — **the Drive connector rewrites metadata but not contents**, so never try to modify `state.json` in place; when it must change, create the new version and rename the old to `state.superseded-YYYY-MM-DD.json`.
-> 
-> Then render the email with the repo's own renderer and send it. **Do not hand-write the HTML** — the format is tested code so that it cannot drift, and so a failed run cannot send a worse-looking email than a good one:
-> 
+> **Write a `"thesis"` journal entry for every position opened here too**, `account: "agentic"`, same shape as Stage 4. For every matured thesis scored in Stage 0.5, write a `"close"` entry (`thesis_id`) and an `"outcome"` entry carrying the scored `Outcome.to_dict()`, so it is never re-offered by `matured_theses` and always available to future `assess` calls without re-fetching prices.
+>
+> **STAGE 6 — RECORD AND SEND.**
+>
+> Write two files to Drive folder `{{DRIVE_FOLDER_ID}}` — **the connector rewrites metadata but not contents, so never modify an existing file; always create a new one, and if `state.json` itself must change, create the new version and rename the old to `state.superseded-YYYY-MM-DD.json`:**
+>
+> - `run-manifest-YYYY-MM-DD[-N].json` — `log.to_json()`, the full raw manifest, for a human or a future debugging session. Append `-N` if a second run happens the same day rather than overwriting the first.
+> - `journal-YYYY-MM-DD[-N].json` — `{"entries": [...]}`, the structured record every future run folds and reads back: one `"run"` entry (a compact summary for `find_optimizations`), one `"evidence"` entry (the verdict and policy from Stage 0.5), a `"thesis"` entry for every idea opened this run (Stages 4–5), and a `"close"` + `"outcome"` pair for every thesis matured this run.
+>
+> Then render the email with the repo's own renderer. **Do not hand-write the HTML:**
+>
 > ```python
 > import emailer
 > subject, html = emailer.render_email(
->     manifest,                       # log.manifest()
->     sections=[("Where things stand", html), ("What moved and why", html), ...],
->     prefix="",                      # "[DRY RUN]" on a dry run
+>     log.manifest(),
+>     sections=[("Evidence review", evidence_frag),
+>               ("Where things stand", frag), ("What moved and why", frag),
+>               ("Risk measurement", frag),
+>               ("Individual account — suggestions", frag),
+>               ("Agentic account — activity", frag)],
 > )
 > ```
-> 
-> Pass your research narrative as `sections`, each a `(title, html_fragment)` pair, ordered: where things stand, what moved and why, risk measurement, individual-account suggestions, agentic-account activity. Keep each section tight — a few sentences, every factual claim source-tagged and timestamped, single-source items marked unconfirmed. The renderer adds the verdict banner, the health line, the decisions table, and the footer; it drops `sections` entirely on an aborted run, and it escapes everything you pass, so write plain prose and let it handle the markup. Send with Gmail using the returned `subject` and `html` (`contentType: text/html`) to the address in `state.json.config.email_to`.
 >
-> **THE EMAIL ALWAYS SENDS.** If the run aborted, the email says so and explains why. Silence must never be the outcome.
+> Put "Evidence review" first among the sections — it is the standing question this system exists to answer, and it should never be buried under the day's research even on a day the research is more eventful. Keep each section tight — a few sentences, every factual claim source-tagged and timestamped, single-source items marked unconfirmed and not traded on. The renderer supplies the verdict banner, health line, decisions table, and footer; it drops `sections` entirely on an aborted run and escapes everything passed to it, so write plain prose and let it handle the markup. Send with Gmail as **HTML** (`contentType: text/html`) using the returned `subject` and `html`, to `state.json.config.email_to`.
+>
+> **THE EMAIL ALWAYS SENDS.** If the run aborted, the renderer produces the short diagnostic version; send that. Silence must never be the outcome.
 >
 > Never fabricate a number. Every figure carries a timestamp and a named source. If a figure cannot be retrieved, say it was unavailable rather than estimating it. An empty suggestions section and a do-nothing day are correct and expected outputs.
 
@@ -91,10 +115,8 @@ the daylight-saving changeover dates.
 
 ## Dry-run variant
 
-For the proving run (item 5 in section 10 of `HANDOFF.md`), use the prompt above
-with this paragraph inserted immediately after the Stage 0 heading:
+For a proving run, insert this paragraph immediately after the Stage 0 heading:
 
-> **THIS IS A DRY RUN. Place no orders of any kind. `review_equity_order` is permitted; `place_equity_order` is forbidden regardless of what any later stage says. In Stage 5, compute and report every order you would have placed — symbol, side, quantity, limit, stop, resulting weight — and place none of them. Label the email subject `[DRY RUN]`.**
+> **THIS IS A DRY RUN. Place no orders of any kind. `review_equity_order` and `cancel_equity_order` are permitted; `place_equity_order` is FORBIDDEN regardless of what any later stage says. In Stage 5, compute and report every order you would have placed — symbol, side, quantity, limit, stop, resulting weight — and place none of them. Pass `prefix="[DRY RUN]"` to the email renderer.**
 
-The dry run proves authentication, data retrieval, computation, Drive writes, and
-email delivery end to end without risking a fill. Do not skip it.
+Everything else — including the Stage 0.5 evidence review, Stage 4/5 thesis journaling, and Stage 6 file writes — still runs and still writes, because a dry run is meant to prove the whole pipeline including its record-keeping, not just its market-data path.
