@@ -3,10 +3,15 @@
 The live trigger prompt is stored in the trigger itself, not in this repository,
 because the filled version names the accounts. This is the template.
 
-One placeholder must be substituted before use — `{{DRIVE_FOLDER_ID}}`, the
-Google Drive folder holding `state.json`, the dated `journal-*.json` files, and
-the dated `run-manifest-*.json` files. Everything else the run needs is read
-from `state.json` or rebuilt from the broker at Stage 0.
+Two placeholders must be substituted before use:
+
+| Placeholder | Value |
+|---|---|
+| `{{DRIVE_FOLDER_ID}}` | Google Drive folder holding `state.json`, the dated `journal-*.json` files, and the dated `run-manifest-*.json` files |
+| `{{STATE_FILE_ID}}` | Drive file id of the current `state.json` (schema 3 as of 31 August 2026) |
+
+Both are in `HANDOFF.private.md`. Everything else the run needs is read from
+`state.json` or rebuilt from the broker at Stage 0.
 
 Create the trigger with the Claude Code Remote `create_trigger` tool, cron in
 UTC, `requires_local_device: false`. See section 8 of `HANDOFF.md` for the
