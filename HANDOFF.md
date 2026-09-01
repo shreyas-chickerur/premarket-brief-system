@@ -217,6 +217,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
 | `emailer.py` | HTML brief rendering, failure diagnosis, subject lines |
+| `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
 | `test_quantcore.py` | 76 tests, including known-answer volatility and correlation recovery |
@@ -224,6 +225,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_washsale.py` | 32 tests |
 | `test_ledger.py` | 45 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, and the opening-balance mechanism |
 | `test_evidence.py` | 24 tests, including known-answer edge detection and futility |
+| `test_watchdog.py` | 15 tests |
 | `test_emailer.py` | 26 tests, including escaping and no-research-on-abort |
 
 Key API surface:
@@ -277,7 +279,7 @@ caller to check.
 ```bash
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 258 tests
+python -m pytest -q          # 273 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
@@ -356,6 +358,50 @@ version is in `HANDOFF.private.md`. The prompt's shape:
 
 **The email always sends.** If the run aborted, it says so and explains why.
 Silence must never be the outcome.
+
+### The watchdog — the check the run cannot perform on itself
+
+A second, separate routine, "Pre-Market Brief System — Watchdog," fires 30
+minutes after the main run (06:50 Central) and reads `watchdog.py`. It exists
+for one failure the main run structurally cannot report on its own: on 31
+August a run hung indefinitely on a sandbox permission prompt meant for an
+interactive human, and because it never reached Stage 6, it sent no email —
+the one outcome this system is built never to produce, reached anyway, from
+the outside, by a run that could not know it had failed.
+
+Each fire, the watchdog:
+
+1. Lists the Drive folder for a `run-manifest-YYYY-MM-DD[-N].json` dated
+   today. None found by 06:50 → the main run likely hung or never fired →
+   send an alert immediately. This is the one case the main run cannot detect
+   about itself.
+2. If found, reads the latest one and checks `aborted`. **`aborted`, not
+   "did research happen," is the signal** — a closed-market day is
+   `aborted: false` and correctly produces no alert; only a genuine blocking
+   failure does.
+3. On an aborted run, calls `emailer.diagnose()` — the same function the
+   daily brief itself uses — so the watchdog and the brief agree on what a
+   failure means by construction, not by two hand-maintained tables staying
+   in sync.
+4. **A healthy day sends nothing.** Twenty routine "all clear" emails train
+   the reader to stop reading watchdog mail at all, which defeats the one day
+   it matters.
+
+The watchdog only reads Drive and sends mail — it carries neither the
+Robinhood nor Alpha Vantage connector, so it cannot trade and has nothing to
+lose access to. It is deliberately **diagnosis-and-alert only**: it does not
+attempt to write or push a code fix. A process that autonomously commits
+changes to a live trading system's repository with nobody reviewing them is
+exactly the kind of action this system's own design principles argue against
+letting run unattended, so that decision stays with a person.
+
+Same cron pattern and DST changeover as the main run, offset by 30 minutes:
+
+| Period | Cron |
+|---|---|
+| Daylight time | `50 11 * * 1-5` |
+| From 1 Nov 2026 (standard time) | `50 12 * * 1-5` |
+| From 14 Mar 2027 | `50 11 * * 1-5` |
 
 ---
 
@@ -627,7 +673,7 @@ reconciliation output caught as wrong; corrected here. XLE was also opened and
 closed at a small loss the same window. Both loss sales are exactly what the
 registry's first live read missed entirely.
 
-### 258 tests, up from 116 at handoff
+### 273 tests, up from 116 at handoff
 
 `test_ledger.py` (45, including split adjustment, the FIG fix, and opening balances) and `test_evidence.py` (24) are new. `test_quantcore.py`
 grew from 45 to 76 for the sizing, quality-enforcement, direction, fractional,

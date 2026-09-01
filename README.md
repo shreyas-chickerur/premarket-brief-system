@@ -19,6 +19,7 @@ Start with [HANDOFF.md](HANDOFF.md), the operations guide.
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal |
 | `evidence.py` | Pre-registered edge testing: sample-size planning, futility stopping, the policy that pauses trading on a ruled-out claim |
 | `emailer.py` | HTML rendering of the brief, with failure diagnosis |
+| `watchdog.py` | Outside check on whether the daily run happened and was healthy |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic series the demo falls back to |
 
@@ -64,7 +65,7 @@ Python 3.11 or newer.
 ```
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 258 tests
+python -m pytest -q          # 273 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
