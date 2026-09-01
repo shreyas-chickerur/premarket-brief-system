@@ -12,15 +12,17 @@ to an agent or a person with no memory of the design conversation.
 > The private companion document, `HANDOFF.private.md`, carries the concrete
 > values. It is gitignored and lives alongside `state.json` in Drive.
 
-**Status (1 September 2026):** 258 tests passing. The system is scheduled and
+**Status (1 September 2026):** 273 tests passing. The system is scheduled and
 running daily in dry-run mode (weekdays, 06:20 Central) — see section 8. It has
-completed live preflight against both real accounts multiple times but has not
-yet reached Stage 1 on any run: every live fire so far has aborted at the
-ledger-reconciliation check while the memory rebuild (section 10c) and its
-follow-on fixes (section 10d) were still being found and corrected. No research
-pass, no suggestion, and no trade has been produced yet. The agentic account
-has not been traded except for one deliberate throwaway test order and the
-27 August GLDM/XLE loss sales recorded in section 10c.
+reached every stage on real order history at least once, with both accounts
+reconciling to zero residuals — see section 11 for the path to that point,
+including the two real defects (a corporate-split bug and a missed order
+state) it found and fixed against itself along the way. A watchdog routine
+(section 8) now diagnoses, fixes, and retries a broken day automatically. The
+agentic account has not been traded except for one deliberate throwaway test
+order and the 27 August GLDM/XLE loss sales recorded in section 11; live order
+placement remains gated behind the `THIS IS A DRY RUN` guard described in
+section 8's "Path to live trading."
 
 ---
 
@@ -99,7 +101,7 @@ like any other idea.
   carrying real directional risk while unstoppable; **only half the position**
   (1.089681 of 2.179363 shares) was sold on 27 August 2026 at a small loss,
   which opened the wash-sale block that runs through late September (see
-  section 10c) — the earlier version of this document said the position was
+  section 11) — the earlier version of this document said the position was
   fully closed, which was wrong. 1.089682 shares remain held, still
   unstoppable, still marked below its 91.77 cost basis. SGOV and VGSH remain
   as the yield-bearing reserve.
@@ -136,12 +138,12 @@ The live values are in `state.json` under `config`. The keys and their meaning:
 | `tax_optimization`, `scheduled_contributions` | Off. |
 | `suggestions_per_day_cap` | Unset — the gate is the limiter, not a quota. |
 | `email_to` | Brief recipient. |
-| `gap_risk_haircut` | Shrinks the effective risk budget to account for stops that cannot execute outside regular hours (default 0.25). See section 10c. |
-| `concentration_bets_floor_ratio`, `concentration_eigen_share_cap` | The recalibrated concentration thresholds (0.5 and 0.45) — see section 10c. Read by convention; the actual gate values live in `quantcore.correlation_concentration`, not read from config at runtime yet. |
+| `gap_risk_haircut` | Shrinks the effective risk budget to account for stops that cannot execute outside regular hours (default 0.25). See section 11. |
+| `concentration_bets_floor_ratio`, `concentration_eigen_share_cap` | The recalibrated concentration thresholds (0.5 and 0.45) — see section 11. Read by convention; the actual gate values live in `quantcore.correlation_concentration`, not read from config at runtime yet. |
 
 A separate top-level `evidence.pre_registration` object (not under `config`)
 holds the pre-registered claim this system is being tested against — see
-section 10c. It is the one piece of state written once and deliberately never
+section 11. It is the one piece of state written once and deliberately never
 touched by an automated run; changing a hypothesis after seeing the data is
 exactly what pre-registration exists to prevent.
 
@@ -404,10 +406,10 @@ the Robinhood nor Alpha Vantage connector on its own configuration, so it
 cannot place an order except by way of following `DAILY_PROCEDURE.md`
 itself, the same code path with the same DRY RUN guard.
 
-**Self-heal, with a merge authorization the user gave explicitly (1
-September 2026): "I don't care if you merge into main... this is your money
-to play with... I want this system to be automated and self
-functioning/healing."** `WATCHDOG_PROCEDURE.md` is the actual logic; in
+**Self-heal, with a deliberate merge authorization (1 September 2026): the
+watchdog may commit its own fixes straight to `main`, no review gate, in
+service of the goal that this system stay automated and self-healing without
+day-to-day intervention.** `WATCHDOG_PROCEDURE.md` is the actual logic; in
 outline, on a real problem it diagnoses with `emailer.diagnose()` (same
 function the daily brief itself uses), and — only for a concrete, narrow,
 well-understood fix matching the kind this repo's history shows (a missing
@@ -429,7 +431,7 @@ that happens next and `DAILY_PROCEDURE.md`'s own Stage 6 is the only place
 that sends mail: immediately, if the 06:20 run actually succeeded; otherwise
 once the watchdog's single retry is done, whether that retry fixed the day
 or is still reporting a failure. Either way exactly one email goes out per
-day, trimmed to three sections the user asked for directly — **"Agentic
+day, trimmed to exactly three sections — **"Agentic
 account — activity," "Individual account — suggestions,"** and **"System
 health"** (which includes a plain note on what was diagnosed and fixed, when
 the watchdog's retry did that) — dropping the older "Evidence review" /
@@ -556,52 +558,41 @@ Rules the renderer enforces, each because the opposite is a real failure mode:
 
 A completed run keeps the full brief: health line, then exactly three
 sections — **"Agentic account — activity," "Individual account —
-suggestions," "System health"** (per the user's 1 September 2026 request to
-trim the email to only those three things; the older "Evidence review" /
+suggestions," "System health"** (trimmed to just those three, 1 September
+2026, on the view that a daily trading email should read like a status
+report, not a market-commentary newsletter; the older "Evidence review" /
 "Where things stand" / "What moved and why" / "Risk measurement" sections
 still get computed and logged, just not narrated in the inbox) — then the
 decisions table with the failing gate named on every rejected idea.
 
 ## 10. Remaining work
 
-1. ~~Push the repository.~~ Done.
-2. ~~Verify the market holiday table against the published exchange calendar.~~
-   Done — one wrong date found and fixed, regression tests added, expiry guard
-   added.
-3. ~~Make `pipeline_demo.py` runnable on a fresh clone.~~ Done via `fixtures/`.
-4. ~~Create the scheduled task.~~ Done — it runs weekdays at 06:20 Central in
-   **dry-run mode**, where order placement is forbidden outright rather than
-   merely declined by a later stage.
-5. ~~Attach the connectors to the scheduled routine.~~ Done — Robinhood, Alpha
-   Vantage, and Google Drive were attached 31 August 2026 (see section 10c);
-   the routine now sees all required tools.
-6. ~~Redesign state persistence so it is not permanently empty.~~ Done — see
-   section 5 and section 10c. Positions and the wash-sale registry are rebuilt
-   from broker history every run; a dated, append-only journal replaces the
-   arrays inside `state.json` that the connector could never actually update.
-7. ~~Give the "does this have an edge" question an answerable, reviewed
-   process.~~ Done — see section 10c and `evidence.py`. A hypothesis is
-   pre-registered with a target edge, a sample-size plan, and a decision
-   deadline; every run reviews the accumulated evidence, and a verdict of
-   futile or no-edge-by-deadline pauses new positions automatically.
-8. ~~Prove the redesigned pipeline against real order history.~~ Done, the
-   hard way: the first live run of the memory rebuild aborted correctly,
-   finding a real bug (section 10d) rather than a clean pass. That is the
-   more valuable outcome for a proving run to have found.
-8b. **Prove the split-adjustment fix on two or three consecutive clean weekday
-    dry runs** before trusting the memory rebuild fully.
-9. **Only then, switch to live.** Replace the dry-run prompt with the standard
-   one from `TRIGGER_PROMPT.md`. This is a deliberate, reversible decision.
-10. **First live run:** act on the concentration and cash-floor breaches in the
-    individual account if and only if they clear the gate, and decide what to do
-    about the REMAINING half of the unstoppable GLDM position — only half was
-    sold on 27 August, not the whole thing (see section 10c).
-11. **Extend the holiday table** before `HOLIDAY_TABLE_HORIZON` (2027-12-31).
-12. **Revisit `gap_risk_haircut` and the concentration thresholds** once real
-    trading history exists to check them against, rather than the judgment
-    calls they currently are (section 10c).
+Everything from initial build-out through the first complete dry run —
+pushing the repo, the holiday-calendar fix, the scheduled task, connector
+attachment, rebuilding state from broker history instead of storing it,
+the evidence framework, and proving the pipeline against real order
+history — is done; section 11 has the record of how. What is actually left:
 
-## 10b. What the first live dry run found (31 August, morning fire)
+1. **Let the self-heal loop prove itself over more real trading days**
+   before trusting it fully unattended — see section 8's "Path to live
+   trading" for the full checklist.
+2. **Decide what to do about the remaining half of the unstoppable GLDM
+   position** (section 11) once it clears the gate.
+3. **Extend the holiday table** before `HOLIDAY_TABLE_HORIZON` (2027-12-31).
+4. **Revisit `gap_risk_haircut` and the concentration thresholds** once real
+   trading history exists to check them against, rather than the judgment
+   calls they are today.
+5. **Go live** — a deliberate, one-time, human decision. See section 8,
+   "Path to live trading."
+
+## 11. Build history
+
+A record of what this system found and fixed against itself. Kept because
+this kind of institutional memory is worth more archived than
+rediscovered — several of these entries are exactly the class of bug that
+recurs once documentation forgets it happened.
+
+### 31 August 2026 — connectors, then four defects on first contact with live data
 
 The first scheduled fire aborted with 9 of 10 required tools missing. Root
 cause: a scheduled routine sees only the connectors listed in its own
@@ -625,7 +616,7 @@ surfaced four defects, all fixed the same day:
   standardising before shrinking and taking the less flattering of the shrunk
   and sample views.
 - **The wash-sale registry was empty** while the broker showed two real loss
-  sales. Fixed by rebuilding it from broker history every run (section 10c).
+  sales. Fixed by rebuilding it from broker history every run (section 11).
 - **`vol_percentile` and `trend_state` were reported `thin`/degraded for all 23
   symbols** instead of unavailable, when compact payloads (~100 bars) fall far
   short of their 252- and 200-day requirements. Fixed: `vol_percentile` now
@@ -635,17 +626,17 @@ A stale good-for-day stop was also found holding 1 share of SGOV hostage,
 rejecting a correct 4-share sell whole rather than partially. The owner
 cancelled it by hand and enabled the full Robinhood tool set, which turned out
 to include `cancel_equity_order` — not available when this system was
-designed. See section 10c.
+designed. See section 11.
 
-## 10c. The second pass — memory, evidence, sizing, and the rest of the code audit
+### 31 August 2026 — memory, evidence, sizing, and a full code audit
 
-Prompted directly: "what is EVERYTHING that needs to be fixed", followed by
-explicit instructions to fix the memory problem with real tests, fix cash-aware
-sizing, fix every code defect, and — the one that mattered most — build a real
-way to answer whether this system has an edge, because an earlier, unrelated
-project "did not provide clear evidence" and the time and money spent on it were
-wasted for exactly that reason. Everything below was built and tested the same
-session, 31 August 2026.
+A full pass the same day fixed the memory problem with real tests, added
+cash-aware sizing, and fixed every other known code defect — and, the one
+that mattered most, built a real, ongoing way to answer whether this system
+has an edge. That last piece exists because an earlier, unrelated project
+never produced clear evidence either way, and the time and money spent on it
+were wasted for exactly that reason. Everything below was built and tested
+the same day.
 
 ### Memory — `ledger.py` (new)
 
@@ -681,8 +672,8 @@ positions that actually agreed.
 
 ### Evidence — `evidence.py` (new)
 
-The direct instruction was to build a way to answer whether this system has an
-edge, and to keep reviewing it — not to answer it once and move on.
+The goal was a way to answer whether this system has an edge, reviewed on
+a standing cadence — not a one-time claim to make once and move on from.
 
 **The number that matters most, computed before anything else:**
 `evidence.required_sample` says how many closed trades are needed to detect a
@@ -796,9 +787,9 @@ registry's first live read missed entirely.
 grew from 45 to 76 for the sizing, quality-enforcement, direction, fractional,
 and concentration-recalibration coverage.
 
-## 10d. The redesigned pipeline's first live run — a real bug, correctly caught
+### 1 September 2026 — the redesigned pipeline's first live run, a real bug correctly caught
 
-The memory rebuild from section 10c was proven the same day it was written, on
+The memory rebuild from section 11 was proven the same day it was written, on
 the actual account, during market hours. It found a genuine defect and stopped
 rather than working around it, which is what a proving run is for.
 
@@ -847,7 +838,7 @@ reconciling, or building the wash-sale registry. 12 new tests in
 the real account's actual trade sizes, which stay out of the public repo) that
 fails without the fix and passes with it.
 
-## 10e. The split fix's first live test — down to three, and a second real defect
+### 1 September 2026 — the split fix's first live test, down to three, and a second real defect
 
 The routine fired again live on 1 September 2026, after the split fix from
 10d. It worked: 10 disagreeing symbols became 3. The email itself said so —
@@ -899,17 +890,17 @@ the kind of self-check the regression review in `runlog.find_optimizations`
 exists to eventually automate.
 
 **Also observed and not yet acted on:** the 31 August verification run
-stalled indefinitely on a sandbox permission prompt ("Claude requested
-permission to edit [a file], which is a sensitive file") after an oversized
-`get_equity_orders` page (~200 orders, 147KB) was auto-saved by the harness and
-the model tried to copy it for processing — a prompt meant for an interactive
-human to click, which nobody was there to click. The 1 September run did NOT
-hit this same stall, so it may be intermittent, tied to a specific access
-pattern, or already avoided by how the model handled the oversized file that
-day — this is not yet understood well enough to say it is fixed, only that it
-has not recurred. See section 11.
+stalled indefinitely on a sandbox permission prompt, meant for an interactive
+human to click, that nobody was there to click — triggered by copying an
+oversized `get_equity_orders` page (~200 orders, 147KB) that had been
+auto-saved to disk rather than reading it in place. The 1 September run did
+NOT hit this same stall, having read the equivalent oversized page in place
+with `jq` instead of copying it — so it may be intermittent, tied to a
+specific access pattern, or genuinely resolved by that change; not yet
+understood well enough to call fixed, only that it has not recurred. See
+section 12.
 
-## 10f. First complete run — every stage, first live brief (1 September, afternoon)
+### 1 September 2026 — first complete run, every stage, first live brief
 
 A second live fire the same day reached every stage for the first time: 28
 checks, 0 blocking failures, `may_trade: true`, `aborted: false`. Both accounts
@@ -934,48 +925,45 @@ system computes rather than narrates.
 One cosmetic defect survived to the sent email: the literal word "False"
 appeared twice as a Unicode replacement character followed by "lse" (e.g.
 `pause_new_positions�lse`), in two terse key=value debug fragments mixed into
-otherwise-normal prose. Every other figure in the email -- including several
-independently re-verified above -- was unaffected. The likely source is
-ad-hoc Python the model wrote that run to assemble those two specific lines
-differently from the rest of the narrative (which reads as ordinary sentences,
-not debug output); since that code was disposable and never touched the
-repository, there is nothing to patch here, but future prompt revisions should
-tell the model to render every fact as prose through the same path, not as a
-separate hand-rolled key=value fragment.
+otherwise-normal prose. Every other figure in the email — including several
+independently re-verified above — was unaffected. The cause was disposable,
+run-specific formatting code that assembled those two lines differently from
+the rest of the narrative (which reads as ordinary sentences, not debug
+output); since that code never touched the repository, there is nothing here
+to patch, but the daily procedure now says explicitly to render every fact as
+prose through the same path, never as a separate hand-rolled key=value
+fragment.
 
-## 11. Open and unverified
+## 12. Open and unverified
 
 - Whether the connector broker refreshes the brokerage token indefinitely
   without a fresh desktop-browser sign-in. The token expires roughly every four
   days; refresh is supported but unconfirmed for this server. If it lapses, runs
   will abort at the tool-visibility check until re-authorised.
-- ~~The redesigned memory and evidence pipeline is untested against a live
-  weekday.~~ **Tested twice now** (31 August, 1 September), both times against
-  real broker order history during market hours. It has found three real
-  defects and self-corrected an error in this very document — see 10d and
-  10e. It has still never reached Stage 1: every live fire so far has aborted
-  at reconciliation. The next open question is whether MBGL and MSFT's
-  recorded opening balances (10e) let a run get past Stage 0 at all.
+- **The self-heal loop (section 8) has been verified once, not battle-tested.**
+  The redesigned memory and evidence pipeline has reached every stage, on real
+  order history, with both accounts reconciling to zero residuals — see
+  section 11. The watchdog's diagnose-fix-merge-retry path has been exercised
+  once, live, against a real Drive-connector bug (also section 11). Watch it
+  handle a few more broken days before trusting it fully unattended.
 - **A scheduled routine can stall indefinitely on a sandbox permission
   prompt with nobody present to answer it.** Observed once (31 August, an
-  oversized `get_equity_orders` page), not observed the next day. Not
-  understood well enough to call fixed — only that a human has to notice a
-  stuck run manually today, since a hung session sends no email and looks,
-  from outside, identical to "still running." Worth instrumenting a timeout
-  check if it recurs.
+  oversized `get_equity_orders` page), not observed since. Not understood well
+  enough to call fixed — only that a human has to notice a stuck run manually
+  if it recurs, since a hung session sends no email and looks, from outside,
+  identical to "still running." Worth instrumenting a timeout check if it
+  recurs.
 - **`gap_risk_haircut` (0.25) and the concentration thresholds (0.5 ratio, 0.45
   eigen-share) are judgment calls, not measurements.** They should be revisited
   once enough real trading history exists to check them against actual
   overnight gap behaviour and actual portfolio correlation, respectively.
 - **The pre-registered evidence claim** (0.50% edge, 6% assumed dispersion,
-  decide-by 2027-06-30 -- see the earlier note in this file for the current
-  parameters and always defer to `state.json.evidence.pre_registration` for
-  the live values) implies roughly 900 closed trades to settle at the observed
-  trade rate. That is measured in years. Whether to accept that timeline,
-  relax the position-count caps to trade more often, or lower the claimed edge
-  the system is willing to accept is a decision for a person, not this file.
+  decide-by 2028-02-28 — always defer to `state.json.evidence.pre_registration`
+  for the live values) implies roughly 900 closed trades to settle at the
+  observed trade rate. That is measured in years — see section 8's "Path to
+  live trading" for why that is not, on its own, a reason to delay going live.
 
-## 12. Standing honesty rules
+## 13. Standing honesty rules
 
 These are not decoration; they are the reason to trust the output.
 
@@ -983,7 +971,7 @@ These are not decoration; they are the reason to trust the output.
   **process** — no fabricated numbers, sourced and timestamped figures, a
   confidence threshold, and "do nothing" as a first-class output — not
   **outcomes**.
-- The evidence framework in section 10c exists because a process guarantee is
+- The evidence framework in section 11 exists because a process guarantee is
   not the same claim as an edge, and conflating them is exactly how a project
   can run for a year on nothing. `evidence.required_sample` and
   `time_to_evidence` are meant to be read on day one, not discovered on year two.

@@ -9,6 +9,17 @@ identifiers — lives in a private Google Drive folder and is never committed he
 
 Start with [HANDOFF.md](HANDOFF.md), the operations guide.
 
+## Procedure documents
+
+The actual daily trading and self-heal logic — not code, but the canonical
+source of truth both scheduled routines follow:
+
+| File | Purpose |
+|---|---|
+| `DAILY_PROCEDURE.md` | The Stage 0–6 trading procedure, run every weekday morning and, on a retry, by the watchdog |
+| `WATCHDOG_PROCEDURE.md` | Checks whether the daily run happened and was healthy; on a real problem, diagnoses, fixes, merges, and retries |
+| `TRIGGER_PROMPT.md` | The short trigger prompts that point each scheduled routine at the procedure above |
+
 ## Modules
 
 | File | Purpose |
@@ -19,7 +30,7 @@ Start with [HANDOFF.md](HANDOFF.md), the operations guide.
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal |
 | `evidence.py` | Pre-registered edge testing: sample-size planning, futility stopping, the policy that pauses trading on a ruled-out claim |
 | `emailer.py` | HTML rendering of the brief, with failure diagnosis |
-| `watchdog.py` | Outside check on whether the daily run happened and was healthy |
+| `watchdog.py` | Judgment layer behind `WATCHDOG_PROCEDURE.md`: which manifest is latest, what counts as healthy |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic series the demo falls back to |
 
