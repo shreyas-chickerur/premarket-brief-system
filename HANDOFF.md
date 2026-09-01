@@ -12,10 +12,15 @@ to an agent or a person with no memory of the design conversation.
 > The private companion document, `HANDOFF.private.md`, carries the concrete
 > values. It is gitignored and lives alongside `state.json` in Drive.
 
-**Status:** measurement, health, and wash-sale layers are built and tested
-(159 tests passing). The market calendar is verified against the exchange's
-published table. Nothing is scheduled. No research pass has ever run. The agentic
-account has not been traded except for one deliberate throwaway test order.
+**Status (1 September 2026):** 258 tests passing. The system is scheduled and
+running daily in dry-run mode (weekdays, 06:20 Central) — see section 8. It has
+completed live preflight against both real accounts multiple times but has not
+yet reached Stage 1 on any run: every live fire so far has aborted at the
+ledger-reconciliation check while the memory rebuild (section 10c) and its
+follow-on fixes (section 10d) were still being found and corrected. No research
+pass, no suggestion, and no trade has been produced yet. The agentic account
+has not been traded except for one deliberate throwaway test order and the
+27 August GLDM/XLE loss sales recorded in section 10c.
 
 ---
 
@@ -90,11 +95,14 @@ like any other idea.
   a second line of defence: if a stale one is ever found still resting and
   blocking a trade, `cancel_equity_order` removes it directly rather than
   waiting it out.
-- **Pre-existing fractional positions cannot be stopped.** GLDM, the one
-  carrying real directional risk while unstoppable, was closed on 27 August
-  2026 at a small loss, opening the wash-sale block that runs through late
-  September (see section 10c). SGOV and VGSH remain as the yield-bearing
-  reserve.
+- **Pre-existing fractional positions cannot be stopped.** GLDM is the one
+  carrying real directional risk while unstoppable; **only half the position**
+  (1.089681 of 2.179363 shares) was sold on 27 August 2026 at a small loss,
+  which opened the wash-sale block that runs through late September (see
+  section 10c) — the earlier version of this document said the position was
+  fully closed, which was wrong. 1.089682 shares remain held, still
+  unstoppable, still marked below its 91.77 cost basis. SGOV and VGSH remain
+  as the yield-bearing reserve.
 - **Overnight gap risk cannot be eliminated, only sized for.** Since stops
   cannot execute outside regular hours, `size_position` applies
   `config.gap_risk_haircut` (25% by default) to the risk budget on every
@@ -214,7 +222,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_quantcore.py` | 76 tests, including known-answer volatility and correlation recovery |
 | `test_runlog.py` | 45 tests, including daylight-saving drift and market-calendar integrity |
 | `test_washsale.py` | 32 tests |
-| `test_ledger.py` | 35 tests, several against a real broker order-history fixture and a synthetic split-adjustment regression |
+| `test_ledger.py` | 45 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, and the opening-balance mechanism |
 | `test_evidence.py` | 24 tests, including known-answer edge detection and futility |
 | `test_emailer.py` | 26 tests, including escaping and no-research-on-abort |
 
@@ -269,7 +277,7 @@ caller to check.
 ```bash
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 248 tests
+python -m pytest -q          # 258 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
@@ -422,8 +430,9 @@ A completed run keeps the full brief: health line, then the research narrative s
 9. **Only then, switch to live.** Replace the dry-run prompt with the standard
    one from `TRIGGER_PROMPT.md`. This is a deliberate, reversible decision.
 10. **First live run:** act on the concentration and cash-floor breaches in the
-    individual account if and only if they clear the gate. (The one unstoppable
-    directional position, GLDM, was already closed — see section 10c.)
+    individual account if and only if they clear the gate, and decide what to do
+    about the REMAINING half of the unstoppable GLDM position — only half was
+    sold on 27 August, not the whole thing (see section 10c).
 11. **Extend the holiday table** before `HOLIDAY_TABLE_HORIZON` (2027-12-31).
 12. **Revisit `gap_risk_haircut` and the concentration thresholds** once real
     trading history exists to check them against, rather than the judgment
@@ -608,15 +617,19 @@ stale SGOV stop was cancelled this way (confirmed via live order history:
 `state: cancelled`), and `TRIGGER_PROMPT.md` now instructs cancelling a stale
 order that blocks a correct trade rather than only reporting it.
 
-The three-position GLDM/VGSH/SGOV baseline changed too: GLDM (the unstoppable
-directional holding) was sold 27 August 2026 at 90.79, a small loss against a
-91.77 cost basis, opening a wash-sale block on GLDM/GLD/IAU through late
-September. XLE was also opened and closed at a small loss the same window. Both
-are exactly the loss sales the registry's first live read missed entirely.
+The three-position GLDM/VGSH/SGOV baseline changed too: **half** of the
+GLDM position (1.089681 of 2.179363 shares; verified against live order
+history, order `6a8f4ba5`) was sold 27 August 2026 at 90.79, a small loss
+against a 91.77 cost basis, opening a wash-sale block on GLDM/GLD/IAU through
+late September. **1.089682 shares of GLDM remain held** — this document
+previously said the position was closed, which the 1 September live run's own
+reconciliation output caught as wrong; corrected here. XLE was also opened and
+closed at a small loss the same window. Both loss sales are exactly what the
+registry's first live read missed entirely.
 
-### 248 tests, up from 116 at handoff
+### 258 tests, up from 116 at handoff
 
-`test_ledger.py` (35, including split adjustment) and `test_evidence.py` (24) are new. `test_quantcore.py`
+`test_ledger.py` (45, including split adjustment, the FIG fix, and opening balances) and `test_evidence.py` (24) are new. `test_quantcore.py`
 grew from 45 to 76 for the sizing, quality-enforcement, direction, fractional,
 and concentration-recalibration coverage.
 
@@ -671,16 +684,88 @@ reconciling, or building the wash-sale registry. 12 new tests in
 the real account's actual trade sizes, which stay out of the public repo) that
 fails without the fix and passes with it.
 
+## 10e. The split fix's first live test — down to three, and a second real defect
+
+The routine fired again live on 1 September 2026, after the split fix from
+10d. It worked: 10 disagreeing symbols became 3. The email itself said so —
+"Split-adjusting the fills against Alpha Vantage SPLITS resolved 7 of them
+(WMT, CMG, VUG, CRWD, NFLX, GOOGL, NVDA)" — and it investigated the remaining
+three rather than reporting a bare number, correctly separating a second code
+defect from two facts about history that no code fix could ever produce.
+
+**FIG — a second real bug, now fixed.** `fills_from_orders` allow-listed
+exactly two order states, `filled` and `partially_filled`. A real FIG order
+from 24 July 2025 has the terminal state `partially_filled_rest_cancelled` —
+1.0 share genuinely executed at $33.00, with the unfilled remainder cancelled
+— and that state was never on the list, so the fill was silently discarded.
+Fixed by dropping the allow-list entirely: any order with a positive
+`cumulative_quantity` contributed a real fill, regardless of what happened to
+the rest of it. `cumulative_quantity` already says authoritatively what
+executed; a state-name allow-list was always going to miss a state nobody had
+enumerated yet, and it did, on the very next attempt.
+
+**MBGL and MSFT — not bugs, gaps in what fills can ever explain.** MBGL: 4.32
+shares sold 24 August 2026 with no matching buy anywhere in the pulled
+history — they arrived outside the order book (a transfer, a spin-off, a DRIP
+conversion; which one is not yet known). MSFT: 0.021 shares sold in December
+2022 with no prior buy, because the account already held MSFT before the
+order history the API returns even starts. Both are the same shape of fact:
+something true about history that fills structurally cannot contain, and no
+amount of correct code will make them reconcile.
+
+`ledger.py` gained an `opening_balances` mechanism for exactly this — a
+`{symbol: quantity}` map that `positions_from_fills` and `reconcile_positions`
+add in before comparing to the broker, sourced from a new `journal.opening_balance`
+entry kind rather than invented, inferred, or silently accepted. **This is not
+a way to make reconciliation pass** — an unrecorded residual is still a hard
+abort, by test (`test_reconciliation_still_aborts_on_an_unrecorded_residual`).
+It is a way to stop re-litigating the same already-understood 4.32 shares
+every single morning once a human has actually recorded why. The MBGL and MSFT
+entries are recorded in the journal folder for exactly this reason; if the
+true cause of the MBGL transfer ever comes to light, correct the entry rather
+than leaving a placeholder reason standing.
+
+**A documentation error this run's output caught.** Section 10c said GLDM
+"was sold" on 27 August, implying the whole position closed. The broker
+disagrees: only half the position (1.089681 of 2.179363 shares) was sold that
+day; **1.089682 shares of GLDM remain held**, still fractional, still
+unstoppable, still marked below cost. Corrected in sections 3 and 10c. The run
+found this itself, in its "where things stand" section, by comparing its own
+rebuilt state against what earlier documentation claimed — which is precisely
+the kind of self-check the regression review in `runlog.find_optimizations`
+exists to eventually automate.
+
+**Also observed and not yet acted on:** the 31 August verification run
+stalled indefinitely on a sandbox permission prompt ("Claude requested
+permission to edit [a file], which is a sensitive file") after an oversized
+`get_equity_orders` page (~200 orders, 147KB) was auto-saved by the harness and
+the model tried to copy it for processing — a prompt meant for an interactive
+human to click, which nobody was there to click. The 1 September run did NOT
+hit this same stall, so it may be intermittent, tied to a specific access
+pattern, or already avoided by how the model handled the oversized file that
+day — this is not yet understood well enough to say it is fixed, only that it
+has not recurred. See section 11.
+
 ## 11. Open and unverified
 
 - Whether the connector broker refreshes the brokerage token indefinitely
   without a fresh desktop-browser sign-in. The token expires roughly every four
   days; refresh is supported but unconfirmed for this server. If it lapses, runs
   will abort at the tool-visibility check until re-authorised.
-- **The redesigned memory and evidence pipeline is untested against a live
-  weekday.** Everything in section 10c was built and unit-tested the same
-  session it was designed in; it has not yet run against real broker order
-  history inside the scheduled routine on a day the market is open.
+- ~~The redesigned memory and evidence pipeline is untested against a live
+  weekday.~~ **Tested twice now** (31 August, 1 September), both times against
+  real broker order history during market hours. It has found three real
+  defects and self-corrected an error in this very document — see 10d and
+  10e. It has still never reached Stage 1: every live fire so far has aborted
+  at reconciliation. The next open question is whether MBGL and MSFT's
+  recorded opening balances (10e) let a run get past Stage 0 at all.
+- **A scheduled routine can stall indefinitely on a sandbox permission
+  prompt with nobody present to answer it.** Observed once (31 August, an
+  oversized `get_equity_orders` page), not observed the next day. Not
+  understood well enough to call fixed — only that a human has to notice a
+  stuck run manually today, since a hung session sends no email and looks,
+  from outside, identical to "still running." Worth instrumenting a timeout
+  check if it recurs.
 - **`gap_risk_haircut` (0.25) and the concentration thresholds (0.5 ratio, 0.45
   eigen-share) are judgment calls, not measurements.** They should be revisited
   once enough real trading history exists to check them against actual

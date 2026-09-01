@@ -404,3 +404,122 @@ def test_unadjusted_splits_corrupt_cost_basis_and_loss_sale_detection():
     adjusted = L.cost_basis(L.apply_splits(fills, split), "NVDA")
     assert adjusted["quantity"] == pytest.approx(28.0)
     assert adjusted["average_cost"] == pytest.approx(225.0)   # 900 / 4
+
+
+# --------------------------- the regression that mattered (1 September 2026)
+
+def test_a_partially_filled_rest_cancelled_order_still_counts_its_fill():
+    """The real FIG defect: the state allow-list excluded a genuine execution
+    because its terminal state was 'partially_filled_rest_cancelled', a state
+    that was never on the list. cumulative_quantity already says authoritatively
+    what executed; the label on the unfilled remainder is not this function's
+    concern."""
+    orders = [{"id": "fig1", "symbol": "FIG", "side": "buy",
+              "state": "partially_filled_rest_cancelled",
+              "quantity": "5.000000", "cumulative_quantity": "1.000000",
+              "average_price": "33.00", "created_at": "2025-07-24T14:00:00Z",
+              "last_transaction_at": "2025-07-24T14:00:05Z"}]
+    fills = L.fills_from_orders(orders)
+    assert len(fills) == 1
+    assert fills[0].quantity == pytest.approx(1.0)
+    assert fills[0].price == pytest.approx(33.0)
+
+
+def test_any_terminal_state_counts_if_cumulative_quantity_is_positive():
+    """Not an allow-list of known-good state strings -- any state at all, as
+    long as something actually executed. A broker can introduce a new terminal
+    state name at any time; this must not require updating a list to match."""
+    orders = [{"id": "o1", "symbol": "AAA", "side": "buy",
+              "state": "some_future_state_that_does_not_exist_yet",
+              "cumulative_quantity": "3.000000", "average_price": "10.00",
+              "created_at": "2026-01-01T00:00:00Z"}]
+    fills = L.fills_from_orders(orders)
+    assert len(fills) == 1 and fills[0].quantity == pytest.approx(3.0)
+
+
+def test_a_state_with_zero_cumulative_quantity_still_contributes_nothing():
+    """The other direction must still hold: a cancelled order with nothing
+    executed contributes no fill, regardless of what its state string is."""
+    orders = [{"id": "o1", "symbol": "AAA", "side": "buy", "state": "cancelled",
+              "cumulative_quantity": "0.000000", "average_price": "10.00",
+              "created_at": "2026-01-01T00:00:00Z"}]
+    assert L.fills_from_orders(orders) == []
+
+
+def test_opening_balance_resolves_a_residual_fills_can_never_explain():
+    """MBGL: 4.316287 shares sold with no matching buy anywhere in history --
+    they arrived outside the order book. positions_from_fills alone reports a
+    negative phantom position; the recorded opening balance corrects it."""
+    fills = [L.Fill("MBGL", "sell", 4.316287, 19.93, date(2026, 8, 24), "o1")]
+    without = L.positions_from_fills(fills)
+    assert without["MBGL"] == pytest.approx(-4.316287)
+
+    with_balance = L.positions_from_fills(fills, opening_balances={"MBGL": 4.316287})
+    assert "MBGL" not in with_balance   # nets to zero, matching the broker's flat position
+
+
+def test_reconciliation_still_aborts_on_an_unrecorded_residual():
+    """The mechanism must not become a way to make reconciliation silently pass
+    for anything unexplained -- only for a residual a human has actually
+    recorded a reason for."""
+    fills = [L.Fill("MBGL", "sell", 4.316287, 19.93, date(2026, 8, 24), "o1")]
+    assert "MBGL" in L.reconcile_positions({"MBGL": 0.0}, fills)
+
+
+def test_reconciliation_passes_once_the_opening_balance_is_recorded():
+    fills = [L.Fill("MBGL", "sell", 4.316287, 19.93, date(2026, 8, 24), "o1")]
+    drift = L.reconcile_positions({"MBGL": 0.0}, fills,
+                                  opening_balances={"MBGL": 4.316287})
+    assert drift == {}
+
+
+def test_a_pre_history_holding_is_the_same_mechanism_as_an_off_book_transfer():
+    """MSFT: the account already held shares before the earliest order the API
+    will return. Economically identical to MBGL's off-book transfer -- both are
+    a fact about history predating what fills can see -- so the same mechanism
+    covers it without a second code path."""
+    fills = [
+        L.Fill("MSFT", "buy", 5.0, 250.0, date(2022, 7, 1), "o1"),
+        L.Fill("MSFT", "sell", 0.021388, 250.0, date(2022, 12, 3), "o2"),
+    ]
+    broker = {"MSFT": 4.978612 + 2.0}          # broker holds 2.0 more than fills alone imply
+    drift = L.reconcile_positions(broker, fills, opening_balances={"MSFT": 2.0})
+    assert drift == {}
+
+
+# -------------------------------------------- journal.opening_balances
+
+def test_journal_folds_opening_balance_entries_into_a_symbol_map():
+    j = L.fold_journal([_file("journal-2026-09-01.json", [
+        {"run_id": "a", "kind": "opening_balance",
+         "payload": {"symbol": "MBGL", "quantity": 4.316287,
+                     "recorded_on": "2026-09-01",
+                     "reason": "shares sold 2026-08-24 with no matching buy in history"}},
+        {"run_id": "a", "kind": "opening_balance",
+         "payload": {"symbol": "MSFT", "quantity": 2.0,
+                     "recorded_on": "2026-09-01",
+                     "reason": "pre-history holding; order history starts 2022-06-22"}},
+    ])])
+    assert j.opening_balances == {"MBGL": 4.316287, "MSFT": 2.0}
+
+
+def test_a_later_opening_balance_entry_corrects_an_earlier_one_for_the_same_symbol():
+    """Meant to be recorded once and rarely revised, not accumulated -- a
+    correction replaces, it does not add to, the earlier value."""
+    j = L.fold_journal([
+        _file("journal-2026-09-01.json", [
+            {"run_id": "a", "kind": "opening_balance",
+             "payload": {"symbol": "MBGL", "quantity": 4.0}},
+        ]),
+        _file("journal-2026-09-02.json", [
+            {"run_id": "b", "kind": "opening_balance",
+             "payload": {"symbol": "MBGL", "quantity": 4.316287}},
+        ]),
+    ])
+    assert j.opening_balances == {"MBGL": 4.316287}
+
+
+def test_no_opening_balance_entries_gives_an_empty_map_not_an_error():
+    j = L.fold_journal([_file("journal-2026-09-01.json",
+                              [{"run_id": "a", "kind": "run", "payload": {}}])])
+    assert j.opening_balances == {}

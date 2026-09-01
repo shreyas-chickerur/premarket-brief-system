@@ -83,17 +83,22 @@ def _as_date(value: Any) -> Optional[date]:
 def fills_from_orders(orders: Iterable[dict]) -> list[Fill]:
     """Extract actual executions from broker order payloads.
 
-    Only `filled` and `partially_filled` orders contribute, and the quantity
-    used is `cumulative_quantity`, never `quantity`. An order's requested size
-    is an intention; a position is built from what actually executed. Conflating
-    the two is how a cancelled or rejected order becomes a phantom holding.
+    The quantity used is `cumulative_quantity`, never `quantity`. An order's
+    requested size is an intention; a position is built from what actually
+    executed. Conflating the two is how a cancelled or rejected order becomes
+    a phantom holding -- but the reverse mistake is just as real: allow-listing
+    a fixed set of terminal states (`filled`, `partially_filled`) silently
+    discarded a genuine execution on 1 September 2026, because the broker's
+    actual terminal state for a partial fill whose remainder got cancelled is
+    `partially_filled_rest_cancelled`, a state that was never on the list. The
+    order still filled 1.0 share at $33.00 -- `cumulative_quantity` already
+    says so authoritatively regardless of what the label on the rest of the
+    order is. Any order with a positive `cumulative_quantity` contributed a
+    real fill; the state name describes what happened to the UNFILLED
+    remainder, which is not this function's concern.
     """
     out: list[Fill] = []
     for o in orders:
-        state = str(o.get("state", "")).lower()
-        if state not in ("filled", "partially_filled"):
-            continue
-
         qty = float(o.get("cumulative_quantity") or 0.0)
         if qty <= 0:
             continue
@@ -200,7 +205,9 @@ def apply_splits(fills: Sequence[Fill],
     return out
 
 
-def positions_from_fills(fills: Sequence[Fill]) -> dict[str, float]:
+def positions_from_fills(fills: Sequence[Fill],
+                         opening_balances: Optional[dict[str, float]] = None
+                         ) -> dict[str, float]:
     """Net position per symbol. Dust below the tolerance is dropped, because a
     residue of 1e-9 shares is a rounding artefact, not a holding.
 
@@ -208,10 +215,27 @@ def positions_from_fills(fills: Sequence[Fill]) -> dict[str, float]:
     ever split -- a broker's current position snapshot is always in current
     share terms, and comparing it against unadjusted historical fills is the
     reconciliation failure this function cannot see from the inside.
+
+    `opening_balances` covers the two situations fills can never explain:
+    shares that arrived outside the order book entirely (a transfer, a
+    spin-off distribution, a DRIP conversion with no corresponding buy order),
+    and shares bought before the earliest order the broker's API will return.
+    Both were found on 1 September 2026 (MBGL and MSFT) and both would
+    otherwise fail reconciliation on every single future run, forever, for a
+    fact about history that fills can never contain.
+
+    This is deliberately NOT inferred. A missing explanation is reported as a
+    residual by `reconcile_positions`, and stays a hard abort, until a human
+    has recorded why with a `journal.opening_balance` entry -- an explicit,
+    dated, auditable fact, the same shape as the pre-registered evidence claim
+    or the gap-risk haircut: a judgment call written down, never a silent
+    guess standing in for one.
     """
     pos: dict[str, float] = {}
     for f in fills:
         pos[f.symbol] = pos.get(f.symbol, 0.0) + f.signed_quantity
+    for sym, qty in (opening_balances or {}).items():
+        pos[sym] = pos.get(sym, 0.0) + qty
     return {s: q for s, q in pos.items() if abs(q) > QTY_TOL}
 
 
@@ -297,7 +321,9 @@ def loss_sales(fills: Sequence[Fill]) -> list[dict]:
 
 def reconcile_positions(broker: dict[str, float],
                         fills: Sequence[Fill],
-                        tol: float = QTY_TOL) -> dict:
+                        tol: float = QTY_TOL,
+                        opening_balances: Optional[dict[str, float]] = None
+                        ) -> dict:
     """Do the broker's positions follow from the broker's own fills?
 
     This replaces comparing the broker against a local file. A local file can be
@@ -305,9 +331,15 @@ def reconcile_positions(broker: dict[str, float],
     executions that produced it is a genuine anomaly -- a transfer, a corporate
     action, a manual trade outside this system, or a bug here.
 
+    `opening_balances` (see `positions_from_fills`) covers only the specific,
+    dated, human-recorded facts about history fills cannot explain -- an
+    UNEXPLAINED residual must still abort. This parameter is not a way to make
+    reconciliation pass; it is a way to stop re-litigating the same already-
+    understood gap in the order history every single day.
+
     Returns the disagreements only. Empty means the two views agree.
     """
-    derived = positions_from_fills(fills)
+    derived = positions_from_fills(fills, opening_balances)
     out: dict[str, dict] = {}
     for sym in set(broker) | set(derived):
         b = float(broker.get(sym, 0.0))
@@ -422,6 +454,22 @@ class Journal:
     def runs(self) -> list[dict]:
         """Past run manifests, oldest first — what find_optimizations reads."""
         return [e.payload for e in self.of_kind("run")]
+
+    @property
+    def opening_balances(self) -> dict[str, float]:
+        """Symbol -> quantity for shares a human has explicitly attested arrived
+        outside the order book or before the API's history horizon (see
+        `ledger.positions_from_fills`). Folded oldest-first, so a later entry
+        for the same symbol corrects an earlier one rather than doubling it —
+        this is meant to be recorded once per symbol and rarely revised, not
+        accumulated."""
+        out: dict[str, float] = {}
+        for e in self.of_kind("opening_balance"):
+            sym = e.payload.get("symbol")
+            qty = e.payload.get("quantity")
+            if sym is not None and qty is not None:
+                out[str(sym).upper()] = float(qty)
+        return out
 
     def open_theses(self, asof: date) -> list[dict]:
         """Theses whose horizon has not yet elapsed and which are not closed."""
