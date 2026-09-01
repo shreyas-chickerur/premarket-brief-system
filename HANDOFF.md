@@ -389,11 +389,32 @@ Each fire, the watchdog:
 
 The watchdog only reads Drive and sends mail — it carries neither the
 Robinhood nor Alpha Vantage connector, so it cannot trade and has nothing to
-lose access to. It is deliberately **diagnosis-and-alert only**: it does not
-attempt to write or push a code fix. A process that autonomously commits
-changes to a live trading system's repository with nobody reviewing them is
-exactly the kind of action this system's own design principles argue against
-letting run unattended, so that decision stays with a person.
+lose access to. Its job is **alert first, fix only as a bonus**: Stage 5
+(the alert) is mandatory and unconditional; only after it sends may the
+watchdog *optionally* attempt a narrow, well-understood code fix for an
+`aborted` (not `no_run`) failure — on a new branch, with tests, opened as a
+PR titled `[watchdog]`, never merged and never touching
+`place_equity_order`-related code. Deciding whether to merge stays with a
+person; a process that autonomously commits changes to a live trading
+system's repository with nobody reviewing them is exactly the kind of action
+this system's own design principles argue against letting run unattended.
+
+**First verification run (1 September 2026) — a real bug found and fixed
+same-day.** Fired by hand to test the newly built watchdog, it correctly
+picked the day's *latest* manifest (a run at 19:11Z that reconciled cleanly,
+superseding an 11:32Z run that had aborted on MBGL/MSFT/FIG before opening
+balances were recorded) and correctly stayed silent. Along the way it
+discovered that Google Drive's `read_file_content` markdown-escapes JSON text
+(backslash-escaping underscores and brackets), which breaks `json.loads`
+outright — for the watchdog this would silently look like `no_run` if it were
+the only manifest of the day, and for the main routine's journal fold
+(`ledger.fold_journal`, step 9) it fails quietly into `unreadable`, dropping a
+day's theses/opening-balances with no visible error. The run worked around it
+live by falling back to `download_file_content` (raw base64) and decoding by
+hand; both live trigger prompts (main and watchdog) and `TRIGGER_PROMPT.md`
+were updated the same day to use `download_file_content` for all JSON reads
+from Drive, rather than relying on every future run to rediscover the same
+workaround.
 
 Same cron pattern and DST changeover as the main run, offset by 30 minutes:
 
