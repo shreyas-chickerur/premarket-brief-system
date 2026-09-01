@@ -211,6 +211,8 @@ by default. Two properties of the connector, and the fix each one forced:
 
 | File | What |
 |---|---|
+| `DAILY_PROCEDURE.md` | The canonical Stage 0–6 trading procedure, followed by both the main routine and the watchdog's retry — not code, but the single source of truth for what either one actually does |
+| `WATCHDOG_PROCEDURE.md` | The watchdog's own procedure: assess today's manifest, and on a real problem, diagnose, attempt a fix, merge it, and re-run `DAILY_PROCEDURE.md` once |
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
 | `runlog.py` | Run manifests, staged timing, preflight self-audit, verified market calendar, regression review, optimization proposals, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
@@ -334,9 +336,12 @@ with daylight saving. Target fire time is 06:20 Central.
 
 `requires_local_device: false` — everything runs in the cloud.
 
-The trigger prompt itself is stored in the trigger, not here, because it names
-the accounts. The template with placeholders is `TRIGGER_PROMPT.md`; the filled
-version is in `HANDOFF.private.md`. The prompt's shape:
+The trigger prompt itself is a short pointer stored in the trigger (it names
+the accounts' Drive IDs, so it isn't committed here) — it clones the repo and
+tells the agent to follow `DAILY_PROCEDURE.md`, the canonical Stage 0–6
+procedure that lives in this repository and is the actual source of truth.
+`TRIGGER_PROMPT.md` is the template for the short pointer itself; the filled
+version (with real IDs) is in `HANDOFF.private.md`. The procedure's shape:
 
 - **Stage 0 — Preflight.** Clone, install, run the test suite (any failure aborts
   the run entirely), confirm every required tool is visible (this guards a known
@@ -354,10 +359,17 @@ version is in `HANDOFF.private.md`. The prompt's shape:
 - **Stage 5 — Agentic account.** Execute, under every rule in sections 3 and 4.
   Review then place; re-read the account after every order and report what the
   broker says, not what was intended.
-- **Stage 6 — Record and send.** Manifest and journal to Drive, then the email.
+- **Stage 6 — Record, and send only some of the time.** Manifest and journal
+  to Drive always. The email itself only sends here if this run succeeded or
+  the market was closed; on an ABORT this stage writes the record and stays
+  quiet, deliberately — see "The watchdog" below for why.
 
-**The email always sends.** If the run aborted, it says so and explains why.
-Silence must never be the outcome.
+**Exactly one email per trading day, always, eventually.** If this run
+succeeds outright, it sends immediately. If it aborts, it sends nothing and
+the watchdog (30 minutes later) owns diagnosing, retrying, and sending the
+one final email — see "The watchdog" below and `WATCHDOG_PROCEDURE.md`.
+Silence is never the outcome by the time the watchdog's pass is done, even
+on a day nothing could be fixed.
 
 ### The watchdog — the check the run cannot perform on itself
 
@@ -387,34 +399,61 @@ Each fire, the watchdog:
    the reader to stop reading watchdog mail at all, which defeats the one day
    it matters.
 
-The watchdog only reads Drive and sends mail — it carries neither the
-Robinhood nor Alpha Vantage connector, so it cannot trade and has nothing to
-lose access to. Its job is **alert first, fix only as a bonus**: Stage 5
-(the alert) is mandatory and unconditional; only after it sends may the
-watchdog *optionally* attempt a narrow, well-understood code fix for an
-`aborted` (not `no_run`) failure — on a new branch, with tests, opened as a
-PR titled `[watchdog]`, never merged and never touching
-`place_equity_order`-related code. Deciding whether to merge stays with a
-person; a process that autonomously commits changes to a live trading
-system's repository with nobody reviewing them is exactly the kind of action
-this system's own design principles argue against letting run unattended.
+The watchdog only reads Drive and sends mail directly — it carries neither
+the Robinhood nor Alpha Vantage connector on its own configuration, so it
+cannot place an order except by way of following `DAILY_PROCEDURE.md`
+itself, the same code path with the same DRY RUN guard.
+
+**Self-heal, with a merge authorization the user gave explicitly (1
+September 2026): "I don't care if you merge into main... this is your money
+to play with... I want this system to be automated and self
+functioning/healing."** `WATCHDOG_PROCEDURE.md` is the actual logic; in
+outline, on a real problem it diagnoses with `emailer.diagnose()` (same
+function the daily brief itself uses), and — only for a concrete, narrow,
+well-understood fix matching the kind this repo's history shows (a missing
+allow-list entry, a data-shape mismatch, a new corporate-action type) — writes
+it, adds tests, and **if the full suite passes, commits directly to `main`
+and pushes, with no PR review gate.** It then re-runs `DAILY_PROCEDURE.md`
+once, itself, so the day's trading is retried on the fixed code rather than
+left broken. Three things stay off-limits regardless of that authorization,
+stated as absolutes in `WATCHDOG_PROCEDURE.md` Stage 5 step 2: never touch
+`place_equity_order`-related code, never weaken a Stage 0 safety or
+reconciliation check, and never remove or alter the `THIS IS A DRY RUN`
+guard anywhere. Deciding to go live is a separate, one-time human decision —
+see "Path to live trading" below — not something either routine's ordinary
+self-heal authority extends to.
+
+**One consolidated email, not two.** The 06:20 routine sends nothing on an
+abort — it just writes the manifest and stops. The watchdog owns everything
+that happens next and `DAILY_PROCEDURE.md`'s own Stage 6 is the only place
+that sends mail: immediately, if the 06:20 run actually succeeded; otherwise
+once the watchdog's single retry is done, whether that retry fixed the day
+or is still reporting a failure. Either way exactly one email goes out per
+day, trimmed to three sections the user asked for directly — **"Agentic
+account — activity," "Individual account — suggestions,"** and **"System
+health"** (which includes a plain note on what was diagnosed and fixed, when
+the watchdog's retry did that) — dropping the older "Evidence review" /
+"Where things stand" / "What moved and why" / "Risk measurement" sections
+from the email body itself (that detail still lives in the run log and
+journal, just not narrated in the inbox every morning).
 
 **First verification run (1 September 2026) — a real bug found and fixed
-same-day.** Fired by hand to test the newly built watchdog, it correctly
-picked the day's *latest* manifest (a run at 19:11Z that reconciled cleanly,
-superseding an 11:32Z run that had aborted on MBGL/MSFT/FIG before opening
-balances were recorded) and correctly stayed silent. Along the way it
-discovered that Google Drive's `read_file_content` markdown-escapes JSON text
-(backslash-escaping underscores and brackets), which breaks `json.loads`
-outright — for the watchdog this would silently look like `no_run` if it were
-the only manifest of the day, and for the main routine's journal fold
-(`ledger.fold_journal`, step 9) it fails quietly into `unreadable`, dropping a
-day's theses/opening-balances with no visible error. The run worked around it
-live by falling back to `download_file_content` (raw base64) and decoding by
-hand; both live trigger prompts (main and watchdog) and `TRIGGER_PROMPT.md`
-were updated the same day to use `download_file_content` for all JSON reads
-from Drive, rather than relying on every future run to rediscover the same
-workaround.
+same-day, before any of the above existed.** Fired by hand to test the
+newly built watchdog (at the time, alert-only with a never-merged optional
+PR), it correctly picked the day's *latest* manifest (a run at 19:11Z that
+reconciled cleanly, superseding an 11:32Z run that had aborted on
+MBGL/MSFT/FIG before opening balances were recorded) and correctly stayed
+silent. Along the way it discovered that Google Drive's `read_file_content`
+markdown-escapes JSON text (backslash-escaping underscores and brackets),
+which breaks `json.loads` outright — for the watchdog this would silently
+look like `no_run` if it were the only manifest of the day, and for the main
+routine's journal fold (`ledger.fold_journal`, step 9) it fails quietly into
+`unreadable`, dropping a day's theses/opening-balances with no visible
+error. The run worked around it live by falling back to
+`download_file_content` (raw base64) and decoding by hand; `DAILY_PROCEDURE.md`
+and `WATCHDOG_PROCEDURE.md` both use `download_file_content` for every JSON
+read from Drive as a result, rather than relying on every future run to
+rediscover the same workaround.
 
 Same cron pattern and DST changeover as the main run, offset by 30 minutes:
 
@@ -423,6 +462,57 @@ Same cron pattern and DST changeover as the main run, offset by 30 minutes:
 | Daylight time | `50 11 * * 1-5` |
 | From 1 Nov 2026 (standard time) | `50 12 * * 1-5` |
 | From 14 Mar 2027 | `50 11 * * 1-5` |
+
+### Path to live trading
+
+The agentic account is a **real Robinhood brokerage account**, not a paper
+sandbox — the only thing standing between today's dry run and real orders is
+the `THIS IS A DRY RUN` paragraph at the top of `DAILY_PROCEDURE.md` Stage 0.
+Removing it is a one-time, human decision (see `TRIGGER_PROMPT.md`,
+"Dry-run vs. live") — deliberately left out of the self-heal authorization
+above, and out of scope for either routine to do on its own, regardless of
+how the merge authorization for ordinary bug fixes is worded.
+
+What should be true before that paragraph comes out, roughly in order:
+
+1. **Let the self-heal loop actually prove itself first.** It was built and
+   verified once (1 September 2026) against real Drive data, but has not yet
+   had to diagnose-fix-merge-retry a real `aborted` day end to end. Watch a
+   few weeks of daily emails — including at least one day it had to heal
+   itself — before trusting it unattended with real orders.
+2. **Watch the qualitative call quality, not just "no crashes."** Read the
+   "Individual account — suggestions" section for a stretch of days: are the
+   picks and sizing explainable and sane day after day? A system with zero
+   bugs can still have no edge; a system with an edge can still have bugs.
+   These are different questions and both matter.
+3. **Do not wait for the pre-registered evidence claim to reach full
+   statistical power before going live** — at the current trade rate,
+   reaching the ~891-trade sample the registered claim (`target_edge_pct
+   0.50%`, `decide_by 2028-02-28`) needs could take years. `evidence.assess`
+   exists to catch **futility** early (rule the claimed edge out fast if the
+   data says so) and to pause new positions if that happens — not to be a
+   gate you wait years to clear. Go live once 1 and 2 above hold, and keep
+   watching the evidence section after that; `trading_policy` will pause new
+   positions on its own if the data turns against it.
+4. **Shrink the risk budget below what `state.json.config` currently allows**
+   for the first stretch of real trading — a smaller `risk_budget_fraction`,
+   `max_weight_agentic`, and tighter `circuit_breaker_usd` / `hard_stop_usd`
+   than the dry-run config uses, specifically so a bug that slips past both
+   the test suite and the self-heal loop costs little while it's found.
+   Widen these back only after real trading has run cleanly for a while.
+5. **Confirm the circuit breaker and hard stop actually halt trading**, not
+   just log a warning — read the code path in `DAILY_PROCEDURE.md` Stage 5
+   that checks `circuit_breaker_usd` / `hard_stop_usd` and make sure it's
+   wired to actually block new orders, not just report where equity sits
+   relative to them.
+6. **When ready, the mechanical change is small:** in the live main-routine
+   trigger, delete the `THIS IS A DRY RUN` paragraph (and the `prefix`
+   argument in Stage 6's email call) and rename the trigger away from
+   "DRY RUN." Do this yourself, in the trigger config — it is the one edit
+   this system will not make to itself, self-heal authorization or not.
+   Watch the first several live days closely by hand rather than trusting
+   the watchdog's silence-on-healthy immediately; a quiet watchdog on day one
+   of real trading is worth a manual double-check regardless.
 
 ---
 
@@ -436,7 +526,7 @@ successful one.
 ```python
 import emailer
 subject, html = emailer.render_email(log.manifest(),
-                                     sections=[("What moved and why", html)],
+                                     sections=[("Agentic account — activity", html)],
                                      prefix="[DRY RUN]")
 ```
 
@@ -464,7 +554,13 @@ Rules the renderer enforces, each because the opposite is a real failure mode:
   lock screen: `Pre-Market Brief 2026-08-29 — ABORTED (connectors not attached)`
   or `Pre-Market Brief 2026-09-02 — 2 ideas, 2 orders`.
 
-A completed run keeps the full brief: health line, then the research narrative sections in order — **Evidence review first**, ahead of the day's market research, because the standing question of whether this system has an edge should never be buried under whatever happened to be interesting that morning — then the decisions table with the failing gate named on every rejected idea.
+A completed run keeps the full brief: health line, then exactly three
+sections — **"Agentic account — activity," "Individual account —
+suggestions," "System health"** (per the user's 1 September 2026 request to
+trim the email to only those three things; the older "Evidence review" /
+"Where things stand" / "What moved and why" / "Risk measurement" sections
+still get computed and logged, just not narrated in the inbox) — then the
+decisions table with the failing gate named on every rejected idea.
 
 ## 10. Remaining work
 
