@@ -746,6 +746,40 @@ pattern, or already avoided by how the model handled the oversized file that
 day — this is not yet understood well enough to say it is fixed, only that it
 has not recurred. See section 11.
 
+## 10f. First complete run — every stage, first live brief (1 September, afternoon)
+
+A second live fire the same day reached every stage for the first time: 28
+checks, 0 blocking failures, `may_trade: true`, `aborted: false`. Both accounts
+reconciled with zero residuals — individual (21 positions, 860 split-adjusted
+fills plus the two recorded opening balances) and agentic (3 positions, 10
+fills) — confirming the split fix, the FIG state fix, and the MBGL/MSFT
+opening balances (10d, 10e) all hold together under a real run, not just under
+test. The permission-prompt mitigation from 10e also held: the individual
+account's ~1,000-order history spilled to disk exactly as expected, and the
+run read it with `jq` with no stall.
+
+The brief itself: one dated catalyst on each side of the wash-sale/whole-share
+line (AAPL, blocked mechanically at the cash floor and the risk-budget/
+whole-share rule; XLE, blocked by the 27 August loss sale), a VTI cap-breach
+trim suggested for the read-only individual account, and every agentic holding
+correctly held with its reasoning stated. Every number in it was independently
+re-derived by hand afterward against the real formulas -- the AAPL risk-budget
+figure, the VTI trim size, the cash-floor percentage, the multiplicity-adjusted
+alpha -- and all matched exactly, which is the strongest evidence yet that the
+system computes rather than narrates.
+
+One cosmetic defect survived to the sent email: the literal word "False"
+appeared twice as a Unicode replacement character followed by "lse" (e.g.
+`pause_new_positions�lse`), in two terse key=value debug fragments mixed into
+otherwise-normal prose. Every other figure in the email -- including several
+independently re-verified above -- was unaffected. The likely source is
+ad-hoc Python the model wrote that run to assemble those two specific lines
+differently from the rest of the narrative (which reads as ordinary sentences,
+not debug output); since that code was disposable and never touched the
+repository, there is nothing to patch here, but future prompt revisions should
+tell the model to render every fact as prose through the same path, not as a
+separate hand-rolled key=value fragment.
+
 ## 11. Open and unverified
 
 - Whether the connector broker refreshes the brokerage token indefinitely
