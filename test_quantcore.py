@@ -188,6 +188,34 @@ def test_stop_respects_floor_and_cap():
         assert p.stop_price == round(50.0 * (1 - p.stop_fraction), 2)
 
 
+def test_floor_and_cap_do_not_downgrade_ok_quality():
+    """Floor/cap bounds the STOP DISTANCE for risk-management reasons; it says
+    nothing about whether the underlying volatility data can be trusted. A
+    real bug conflated the two: any 'ok'-quality estimate that got floored or
+    capped came out of stop_plan flagged 'degraded', and size_position then
+    read that as a data-quality problem and cut the position to 40% for a
+    reason that had nothing to do with data quality (a quiet utility or a
+    momentum name gets floored/capped on 'ok' data every single time). 2
+    September 2026 production found this the hard way: XOM and AAPL both
+    sized toward zero on ok-quality data for exactly this reason."""
+    quiet = q.Estimate(0.05, "test", 200, "ok")   # daily-sigma raw stop < 6% floor
+    wild = q.Estimate(2.0, "test", 200, "ok")     # daily-sigma raw stop > 15% cap
+    atr = q.Estimate(float("nan"), "atr_fraction", 0, "failed")
+
+    floored_plan = q.stop_plan(50.0, quiet, atr)
+    capped_plan = q.stop_plan(50.0, wild, atr)
+    assert floored_plan.floored and floored_plan.quality == "ok"
+    assert capped_plan.capped and capped_plan.quality == "ok"
+
+    # Same stop_fraction either way -- isolates whether `floored` alone (with
+    # quality still "ok") changes sizing. It must not.
+    unbounded = _plan(entry=50.0, stop_fraction=floored_plan.stop_fraction)
+    size_floored = q.size_position(1000.0, 50.0, floored_plan, buying_power=1000.0)
+    size_unbounded = q.size_position(1000.0, 50.0, unbounded, buying_power=1000.0)
+    assert size_floored.notional == size_unbounded.notional
+    assert "scaled" not in size_floored.reason
+
+
 def test_stop_refuses_unusable_volatility():
     bad = q.Estimate(float("nan"), "x", 0, "failed", "no data")
     with pytest.raises(ValueError):

@@ -5,7 +5,7 @@ repository, not in the trigger prompts themselves:
 
 - [`DAILY_PROCEDURE.md`](DAILY_PROCEDURE.md) — Stage 0 through 6, followed by
   the 06:20 Central scheduled run and, on a retry, by the watchdog.
-- [`WATCHDOG_PROCEDURE.md`](WATCHDOG_PROCEDURE.md) — the 06:50 Central check:
+- [`WATCHDOG_PROCEDURE.md`](WATCHDOG_PROCEDURE.md) — the 07:20 Central check:
   did today's run happen and was it healthy, and if not, diagnose, attempt a
   fix, merge it, and re-run `DAILY_PROCEDURE.md` once.
 

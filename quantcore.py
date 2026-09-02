@@ -352,9 +352,16 @@ def stop_plan(entry: float, vol: Estimate, atr: Estimate, *,
     capped = raw > cap
     frac = min(max(raw, floor), cap)
 
+    # `quality` reports the INPUT DATA's trustworthiness and nothing else.
+    # Floor/cap is a deliberate risk-management bound on the stop distance,
+    # not evidence the volatility estimate is unreliable -- a rock-steady
+    # utility or a runaway momentum name gets floored/capped on `ok`-quality
+    # data every time, and conflating the two used to cut `size_position`'s
+    # risk budget by 60% for a reason that had nothing to do with data
+    # quality. `floored`/`capped` already carry this fact on their own
+    # fields; `quality` does not need to encode it a second time.
     quality = vol.quality
     if floored or capped:
-        quality = "degraded" if quality == "ok" else quality
         detail += f"; {'floored' if floored else 'capped'} from {raw:.4f}"
 
     stop_price = entry * (1 - frac) if direction == "long" else entry * (1 + frac)

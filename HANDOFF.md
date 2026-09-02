@@ -12,12 +12,14 @@ to an agent or a person with no memory of the design conversation.
 > The private companion document, `HANDOFF.private.md`, carries the concrete
 > values. It is gitignored and lives alongside `state.json` in Drive.
 
-**Status (1 September 2026):** 273 tests passing. The system is scheduled and
+**Status (2 September 2026):** 274 tests passing. The system is scheduled and
 running daily in dry-run mode (weekdays, 06:20 Central) — see section 8. It has
-reached every stage on real order history at least once, with both accounts
-reconciling to zero residuals — see section 11 for the path to that point,
-including the two real defects (a corporate-split bug and a missed order
-state) it found and fixed against itself along the way. A watchdog routine
+reached every stage on real order history twice in a row, both times with
+both accounts reconciling to zero residuals — see section 11 for the path to
+that point, including a corporate-split bug, a missed order state, a
+too-tight watchdog offset that nearly started a duplicate trading run, and a
+sizing bug that conflated a mechanically-bounded stop with untrustworthy
+data, all found and fixed against itself along the way. A watchdog routine
 (section 8) now diagnoses, fixes, and retries a broken day automatically. The
 agentic account has not been traded except for one deliberate throwaway test
 order and the 27 August GLDM/XLE loss sales recorded in section 11; live order
@@ -368,15 +370,15 @@ version (with real IDs) is in `HANDOFF.private.md`. The procedure's shape:
 
 **Exactly one email per trading day, always, eventually.** If this run
 succeeds outright, it sends immediately. If it aborts, it sends nothing and
-the watchdog (30 minutes later) owns diagnosing, retrying, and sending the
+the watchdog (60 minutes later) owns diagnosing, retrying, and sending the
 one final email — see "The watchdog" below and `WATCHDOG_PROCEDURE.md`.
 Silence is never the outcome by the time the watchdog's pass is done, even
 on a day nothing could be fixed.
 
 ### The watchdog — the check the run cannot perform on itself
 
-A second, separate routine, "Pre-Market Brief System — Watchdog," fires 30
-minutes after the main run (06:50 Central) and reads `watchdog.py`. It exists
+A second, separate routine, "Pre-Market Brief System — Watchdog," fires 60
+minutes after the main run (07:20 Central) and reads `watchdog.py`. It exists
 for one failure the main run structurally cannot report on its own: on 31
 August a run hung indefinitely on a sandbox permission prompt meant for an
 interactive human, and because it never reached Stage 6, it sent no email —
@@ -386,17 +388,19 @@ the outside, by a run that could not know it had failed.
 Each fire, the watchdog:
 
 1. Lists the Drive folder for a `run-manifest-YYYY-MM-DD[-N].json` dated
-   today. None found by 06:50 → the main run likely hung or never fired →
-   send an alert immediately. This is the one case the main run cannot detect
-   about itself.
+   today. **None found does not immediately mean the main run is missing** —
+   it re-checks once after a short wait before concluding that, because the
+   main run can legitimately still be in progress (see the 2 September 2026
+   entry in section 11). Only genuinely absent after that recheck counts as
+   `no_run`.
 2. If found, reads the latest one and checks `aborted`. **`aborted`, not
    "did research happen," is the signal** — a closed-market day is
    `aborted: false` and correctly produces no alert; only a genuine blocking
    failure does.
-3. On an aborted run, calls `emailer.diagnose()` — the same function the
-   daily brief itself uses — so the watchdog and the brief agree on what a
-   failure means by construction, not by two hand-maintained tables staying
-   in sync.
+3. On an aborted run (or a genuine `no_run`), diagnoses with `emailer.diagnose()`
+   — the same function the daily brief itself uses — attempts a fix when
+   confident, and re-runs `DAILY_PROCEDURE.md` itself once, which is what
+   actually sends the day's email (see "One consolidated email" below).
 4. **A healthy day sends nothing.** Twenty routine "all clear" emails train
    the reader to stop reading watchdog mail at all, which defeats the one day
    it matters.
@@ -457,13 +461,14 @@ and `WATCHDOG_PROCEDURE.md` both use `download_file_content` for every JSON
 read from Drive as a result, rather than relying on every future run to
 rediscover the same workaround.
 
-Same cron pattern and DST changeover as the main run, offset by 30 minutes:
+Same cron pattern and DST changeover as the main run, offset by 60 minutes
+(widened from 30 on 2 September 2026 — see section 11 for why):
 
 | Period | Cron |
 |---|---|
-| Daylight time | `50 11 * * 1-5` |
-| From 1 Nov 2026 (standard time) | `50 12 * * 1-5` |
-| From 14 Mar 2027 | `50 11 * * 1-5` |
+| Daylight time | `20 12 * * 1-5` |
+| From 1 Nov 2026 (standard time) | `20 13 * * 1-5` |
+| From 14 Mar 2027 | `20 12 * * 1-5` |
 
 ### Path to live trading
 
@@ -934,18 +939,65 @@ to patch, but the daily procedure now says explicitly to render every fact as
 prose through the same path, never as a separate hand-rolled key=value
 fragment.
 
+### 2 September 2026 — a watchdog near-miss, and a sizing bug
+
+Two real problems surfaced from the second consecutive complete run, both
+fixed the same day.
+
+**The watchdog nearly started a duplicate trading run.** The main run took
+about 39 minutes end to end that morning — a research-heavy day — but the
+watchdog's offset was only 30 minutes. It listed Drive at the 30-minute
+mark, found no manifest yet because the main run was still in progress, and
+its procedure at the time treated that as `no_run`: no manifest by the
+deadline means the main run is missing. It began the prescribed retry —
+cloned the repo, pulled both accounts' full order history — before, partway
+through Stage 0, noticing a journal file appear in a Drive listing with a
+timestamp *after* its own check had started. It re-listed the folder on its
+own initiative, found the real manifest, confirmed the main run had
+completed normally (`aborted: false`), and abandoned the retry: no orders,
+no Drive writes, no repo pushes. It reported the near-miss directly rather
+than treating "turned out fine" as nothing to mention.
+
+Left alone, a slower day would not have gotten the same lucky catch, and two
+full trading attempts running back-to-back is exactly the same failure
+shape as a same-day duplicate run that has caused real damage before. Fixed
+two ways: the offset widened from 30 to 60 minutes (section 8's cron table),
+and `WATCHDOG_PROCEDURE.md` Stage 2 now requires a single recheck — wait
+roughly 10 minutes and re-list Drive once more — before a missing manifest
+counts as `no_run` at all, turning what the watchdog improvised into a
+designed step.
+
+**A sizing bug cut positions to 40% for a reason that had nothing to do with
+data quality.** `quantcore.stop_plan` downgraded a `StopPlan`'s `quality` to
+`"degraded"` whenever the stop distance was floored or capped — a
+deliberate risk-management bound — even when the underlying volatility
+estimate was itself `"ok"`. `size_position` then read that as a genuine
+data-quality problem and applied the 40% `degraded` scaler. Since floor and
+cap trigger on nothing more than "unusually quiet" or "unusually wild"
+volatility, this quietly gutted sizing for exactly the stocks it fires on
+most often: XOM (1 September and 2 September) and AAPL (1 September) both
+sized toward zero shares for this reason, not because their data was
+untrustworthy. Fixed by leaving `quality` alone when floor/cap fires —
+`floored`/`capped` already carry that fact on their own dedicated fields and
+never needed to double up onto `quality` — with a regression test proving
+an `"ok"`-quality estimate stays `"ok"`, and sizes identically, whether or
+not its stop got floored or capped.
+
 ## 12. Open and unverified
 
 - Whether the connector broker refreshes the brokerage token indefinitely
   without a fresh desktop-browser sign-in. The token expires roughly every four
   days; refresh is supported but unconfirmed for this server. If it lapses, runs
   will abort at the tool-visibility check until re-authorised.
-- **The self-heal loop (section 8) has been verified once, not battle-tested.**
+- **The self-heal loop (section 8) has been exercised twice, not battle-tested.**
   The redesigned memory and evidence pipeline has reached every stage, on real
-  order history, with both accounts reconciling to zero residuals — see
-  section 11. The watchdog's diagnose-fix-merge-retry path has been exercised
-  once, live, against a real Drive-connector bug (also section 11). Watch it
-  handle a few more broken days before trusting it fully unattended.
+  order history, with both accounts reconciling to zero residuals across two
+  consecutive sessions — see section 11. The watchdog's diagnose-fix-merge-retry
+  path has caught one real Drive-connector bug and one real near-miss (a
+  too-tight offset that nearly started a duplicate trading run, section 11),
+  but has never yet had to complete a full diagnose-fix-merge-retry cycle
+  against an actual `aborted` run. Watch it handle one before trusting it
+  fully unattended.
 - **A scheduled routine can stall indefinitely on a sandbox permission
   prompt with nobody present to answer it.** Observed once (31 August, an
   oversized `get_equity_orders` page), not observed since. Not understood well

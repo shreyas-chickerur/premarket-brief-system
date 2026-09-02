@@ -99,7 +99,7 @@ Write two files to Drive folder `{{DRIVE_FOLDER_ID}}` — **the connector rewrit
 
 **Who is running this procedure changes what happens next:**
 
-- **If the 06:20 scheduled routine fired this directly** and the run **ABORTED**: do not render or send any email. Write the manifest and journal as above and stop. The watchdog (fires 30 minutes later, reads `WATCHDOG_PROCEDURE.md`) owns deciding what happens next — diagnosing, attempting a fix, and re-running this same procedure. Sending a partial "sorry, broken" email here would just be a second email the user didn't ask for once the watchdog's retry lands.
+- **If the 06:20 scheduled routine fired this directly** and the run **ABORTED**: do not render or send any email. Write the manifest and journal as above and stop. The watchdog (fires 60 minutes later, reads `WATCHDOG_PROCEDURE.md`) owns deciding what happens next — diagnosing, attempting a fix, and re-running this same procedure. Sending a partial "sorry, broken" email here would just be a second email the user didn't ask for once the watchdog's retry lands.
 - **If the run SUCCEEDED or the market was CLOSED**, or **if you are the watchdog re-running this procedure after a diagnosis/fix attempt** (regardless of whether that retry itself succeeds or aborts): render and send the email now. This is the only place email-sending logic lives; both callers funnel through it.
 
 **When you do send, keep it to exactly three sections — the user does not want a market-commentary newsletter, only what the agentic account did, what to consider for the individual account, and whether the system is healthy:**
