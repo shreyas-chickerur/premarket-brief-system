@@ -12,18 +12,21 @@ to an agent or a person with no memory of the design conversation.
 > The private companion document, `HANDOFF.private.md`, carries the concrete
 > values. It is gitignored and lives alongside `state.json` in Drive.
 
-**Status (2 September 2026):** 274 tests passing. The system is scheduled and
+**Status (3 September 2026):** 274 tests passing. The system is scheduled and
 running daily in dry-run mode (weekdays, 06:20 Central) — see section 8. It has
-reached every stage on real order history twice in a row, both times with
-both accounts reconciling to zero residuals — see section 11 for the path to
-that point, including a corporate-split bug, a missed order state, a
-too-tight watchdog offset that nearly started a duplicate trading run, and a
-sizing bug that conflated a mechanically-bounded stop with untrustworthy
-data, all found and fixed against itself along the way. A watchdog routine
-(section 8) now diagnoses, fixes, and retries a broken day automatically. The
-agentic account has not been traded except for one deliberate throwaway test
-order and the 27 August GLDM/XLE loss sales recorded in section 11; live order
-placement remains gated behind the `THIS IS A DRY RUN` guard described in
+reached every stage on real order history three times in a row, every time
+with both accounts reconciling to zero residuals — see section 11 for the
+path to that point, including a corporate-split bug, a missed order state, a
+too-tight watchdog offset that nearly started a duplicate trading run (fixed
+and validated live the next morning), and a sizing bug that conflated a
+mechanically-bounded stop with untrustworthy data. That last fix produced the
+system's first-ever idea to clear all five gate conditions the very next
+session — buy 2 OXY, matures 24 September 2026 — verified against live data,
+not assumed. A watchdog routine (section 8) now diagnoses, fixes, and retries
+a broken day automatically. The agentic account has not been traded except
+for one deliberate throwaway test order and the 27 August GLDM/XLE loss sales
+recorded in section 11; live order placement remains gated behind the
+`THIS IS A DRY RUN` guard described in
 section 8's "Path to live trading."
 
 ---
@@ -521,6 +524,19 @@ What should be true before that paragraph comes out, roughly in order:
    the watchdog's silence-on-healthy immediately; a quiet watchdog on day one
    of real trading is worth a manual double-check regardless.
 
+#### Status snapshot (updated after each material change; latest 3 September 2026)
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Self-heal proves itself, including a real fix-and-retry cycle | **Not yet.** One near-miss caught and fixed (2 September — a too-tight watchdog offset), but that was found in a dev session, not by the watchdog completing a real diagnose-fix-merge-retry against a genuinely `aborted` run. 3 September validated the *healthy* path only: the widened 60-minute offset gave the watchdog a clean first-listing read, no recheck or retry needed. |
+| 2 | Call quality over a stretch of days | **Improving, still early.** 3 research sessions now (1, 2, 3 September). 3 September produced the **first idea ever to clear all five gate conditions** — buy 2 OXY, limit 61.80, stop 58.09 — with a genuinely two-sided read (it flagged Brent falling on the same Iran-diplomacy news it was buying into, rather than one-sided reasoning). Three days is not a track record yet. |
+| 3 | Don't wait for full statistical power | **On track, unchanged.** Still `n=0`, correctly not gating on this. The OXY thesis opened 3 September is the first real open position the evidence framework has ever tracked; it matures **24 September 2026**, which will be the first genuine test of the settlement/scoring path end to end — worth a checkpoint on that date, not because one trade proves anything. |
+| 4 | Shrink the risk budget for the first live stretch | **Not done.** |
+| 5 | Confirm circuit breaker / hard stop actually halt trading | **Not done.** |
+| 6 | The mechanical flip | **Not done, as it shouldn't be yet.** |
+
+Net: nothing here clears the bar to go live. Item 2 is the one that moved — from "two empty sessions" to "one real, defensible idea, found for the right reason" — everything else is unchanged from when this section was first written (1 September 2026).
+
 ---
 
 ## 9. The email
@@ -982,6 +998,25 @@ untrustworthy. Fixed by leaving `quality` alone when floor/cap fires —
 never needed to double up onto `quality` — with a regression test proving
 an `"ok"`-quality estimate stays `"ok"`, and sizes identically, whether or
 not its stop got floored or capped.
+
+### 3 September 2026 — both fixes proved themselves on the first real morning after
+
+**The watchdog offset fix held.** The 06:20 run finished and wrote its
+manifest at 12:07:43 UTC; the watchdog fired at 12:24:23 UTC (the new 60-minute
+gap, drifted 4 minutes) and found that manifest on its very first Drive
+listing — no recheck-wait needed, no premature `no_run`, no unnecessary
+retry. The boring, correct outcome.
+
+**The sizing fix produced the system's first-ever gate-clearing idea.** Third
+consecutive zero-residual reconciliation, then OXY sized to 2 shares — buy,
+limit 61.80, stop 58.09, 12.48% weight, $7.42 at risk, `review_equity_order`
+clean — where the same inputs would have sized to 0 the day before the fix.
+The run did not take this on faith: it re-derived the sizing by hand against
+live data and confirmed the difference traced to commit `583d027`, not to a
+change in market conditions. No order was placed (DRY RUN held). The thesis
+opened the same run and matures 24 September 2026 — the first real position
+the evidence framework has ever tracked end to end, and the first date worth
+checking back on for that reason specifically.
 
 ## 12. Open and unverified
 
