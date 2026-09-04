@@ -399,3 +399,54 @@ def test_expired_holiday_table_is_flagged_rather_than_silently_trusted():
                       expected_local_hhmm=(6, 20), self_test=GOOD_TEST)
     c = next(c for c in log.checks if c.name == "holiday_table_current")
     assert not c.passed and "expired" in c.detail
+
+
+# ---------------------------------------------------------- circuit breaker
+
+def test_circuit_breaker_is_silent_above_both_thresholds():
+    v = R.circuit_breaker_check(1000.0, circuit_breaker_usd=700.0, hard_stop_usd=500.0)
+    assert not v.halt_new_positions and not v.liquidate and not v.tripped_by_this_run
+    assert v.reason == ""
+
+
+def test_circuit_breaker_halts_new_positions_only_between_the_two_thresholds():
+    """The soft threshold never liquidates -- that is the hard stop's job, and
+    conflating the two would unwind a book over a warning-level breach."""
+    v = R.circuit_breaker_check(600.0, circuit_breaker_usd=700.0, hard_stop_usd=500.0)
+    assert v.halt_new_positions and not v.liquidate and v.tripped_by_this_run
+    assert "600.00" in v.reason and "700.00" in v.reason
+
+
+def test_hard_stop_liquidates():
+    v = R.circuit_breaker_check(400.0, circuit_breaker_usd=700.0, hard_stop_usd=500.0)
+    assert v.halt_new_positions and v.liquidate and v.tripped_by_this_run
+    assert "not a suggestion" in v.reason
+
+
+def test_circuit_breaker_rejects_an_inverted_threshold_pair():
+    """hard_stop_usd is the lower, harder threshold by definition -- a config
+    that puts it above circuit_breaker_usd is a config error, not a valid
+    (if unusual) setup, and must fail loudly rather than silently misfire."""
+    with pytest.raises(ValueError, match="hard_stop_usd"):
+        R.circuit_breaker_check(600.0, circuit_breaker_usd=500.0, hard_stop_usd=700.0)
+
+
+def test_recovered_equity_alone_does_not_clear_a_standing_trip():
+    """The whole point of requiring a human to clear a trip: a V-shaped bounce
+    the very next morning must not silently resume trading on its own."""
+    v = R.circuit_breaker_check(900.0, circuit_breaker_usd=700.0, hard_stop_usd=500.0,
+                                standing_trip={"reason": "hit hard stop 2 September"})
+    assert v.halt_new_positions and not v.liquidate
+    assert not v.tripped_by_this_run, "recovery isn't a new trip, it's an old one still standing"
+    assert "recovered equity is not itself a clearance" in v.reason
+
+
+def test_a_fresh_trip_this_run_is_distinguished_from_a_standing_one():
+    """`tripped_by_this_run` lets the email say "this just happened" instead of
+    "still waiting on you from before" -- they read very differently."""
+    fresh = R.circuit_breaker_check(600.0, circuit_breaker_usd=700.0, hard_stop_usd=500.0,
+                                    standing_trip=None)
+    assert fresh.tripped_by_this_run
+    standing = R.circuit_breaker_check(900.0, circuit_breaker_usd=700.0, hard_stop_usd=500.0,
+                                       standing_trip={"reason": "prior trip"})
+    assert not standing.tripped_by_this_run

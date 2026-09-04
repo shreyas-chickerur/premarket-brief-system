@@ -206,3 +206,59 @@ def test_body_stays_small_enough_to_read():
     """Gmail clips messages past ~102KB; a failure note has no excuse to be big."""
     _, html = E.render_email(aborted_manifest())
     assert len(html.encode()) < 12_000
+
+
+# ------------------------------------------------------------- idea cards
+
+def test_idea_card_puts_symbol_action_and_quantity_up_front():
+    html = E.idea_card("OXY", "buy", "2 shares", "limit 61.80, stop 58.09")
+    assert "OXY" in html and "BUY" in html.upper()
+    assert "2 shares" in html and "61.80" in html
+
+
+def test_idea_card_bullets_carry_a_source_tag():
+    html = E.idea_card("OXY", "buy", bullets=[
+        ("Iran ceasefire talks stalled overnight", "Reuters"),
+        ("OPEC+ meets 6 September, output cut expected", "EIA STEO"),
+    ])
+    assert "Iran ceasefire talks stalled overnight" in html
+    assert "Reuters" in html and "EIA STEO" in html
+
+
+def test_idea_card_bullet_with_no_source_still_renders():
+    """A synthesis of several inputs has no single attributable source --
+    it must still show up, just without a dangling attribution tag."""
+    html = E.idea_card("VTI", "trim", bullets=[("Over the 15% single-name cap", "")])
+    assert "Over the 15% single-name cap" in html
+
+
+def test_idea_card_with_no_bullets_still_renders_the_head():
+    html = E.idea_card("SGOV", "hold")
+    assert "SGOV" in html and "HOLD" in html.upper()
+
+
+def test_idea_card_escapes_everything():
+    html = E.idea_card("<img src=x>", "buy", "1", "a & b",
+                       bullets=[("<script>bad</script>", "a & b co")])
+    assert "<img src=x>" not in html and "<script>bad</script>" not in html
+    assert "&amp;" in html
+
+
+def test_idea_cards_empty_list_says_nothing_today_not_silence():
+    html = E.idea_cards([])
+    assert "nothing today" in html.lower()
+
+
+def test_idea_cards_renders_one_card_per_idea():
+    html = E.idea_cards([
+        {"symbol": "OXY", "action": "buy", "quantity": "2 shares",
+         "bullets": [("Dated energy catalyst", "EIA STEO")]},
+        {"symbol": "VTI", "action": "trim", "quantity": "2.29 shares",
+         "bullets": [("Over the 15% cap", "")]},
+    ])
+    assert "OXY" in html and "VTI" in html
+    assert "Dated energy catalyst" in html and "Over the 15% cap" in html
+
+
+def test_idea_cards_is_part_of_the_public_api():
+    assert "idea_card" in E.__all__ and "idea_cards" in E.__all__

@@ -76,6 +76,87 @@ class Decision:
     def to_dict(self): return asdict(self)
 
 
+@dataclass
+class CircuitBreakerVerdict:
+    """What `circuit_breaker_usd` / `hard_stop_usd` actually do, enforced
+    rather than merely reported. Before this existed, the daily procedure's
+    only instruction was to "report where equity sits relative to" these two
+    numbers -- nothing in the codebase ever stopped an order because of them,
+    which is not a circuit breaker, it is a status line."""
+    halt_new_positions: bool
+    liquidate: bool
+    reason: str
+    tripped_by_this_run: bool   # False when a prior, still-unresolved trip is
+                                 # why -- distinguishes "this crossed a line
+                                 # just now" from "someone still needs to clear
+                                 # yesterday's trip", which reads very
+                                 # differently in an email.
+
+    def to_dict(self): return asdict(self)
+
+
+def circuit_breaker_check(equity: float, circuit_breaker_usd: float,
+                           hard_stop_usd: float, *,
+                           standing_trip: Optional[dict] = None
+                           ) -> CircuitBreakerVerdict:
+    """Two distinct thresholds, two distinct actions -- never conflate them.
+
+    `circuit_breaker_usd` (the higher, softer threshold): stop opening NEW
+    positions. Existing positions and their stops are untouched -- this is
+    the same "pause, don't unwind" shape as `evidence.trading_policy`'s
+    `stop` verdict, and for the same reason: a false alarm that liquidates a
+    healthy book is worse than a few missed days.
+
+    `hard_stop_usd` (the lower, harder threshold): liquidate the agentic
+    account to cash and halt entirely. This is not a suggestion and not
+    reversible by inaction -- it is the catastrophe backstop for a mistake
+    everything upstream of this function failed to catch.
+
+    **Both require a human to clear them before the run resumes normal
+    operation, even after equity recovers above the threshold that tripped
+    it** -- `standing_trip` is the payload of an unresolved
+    `circuit_breaker_tripped` journal entry (see `ledger.Journal`), or None
+    if the last such entry was a `circuit_breaker_cleared`. A V-shaped bounce
+    the very next morning is exactly the case a human should look at once,
+    not the case that should silently un-halt itself.
+    """
+    if hard_stop_usd > circuit_breaker_usd:
+        raise ValueError(
+            f"hard_stop_usd ({hard_stop_usd}) must be <= circuit_breaker_usd "
+            f"({circuit_breaker_usd}) -- the hard stop is the lower, harder "
+            f"threshold, checked first")
+
+    if equity < hard_stop_usd:
+        return CircuitBreakerVerdict(
+            halt_new_positions=True, liquidate=True, tripped_by_this_run=True,
+            reason=(f"equity {equity:.2f} is below the hard stop "
+                    f"{hard_stop_usd:.2f} -- liquidating the agentic account "
+                    f"to cash and halting entirely. This is not a suggestion. "
+                    f"A human must review and record a "
+                    f"'circuit_breaker_cleared' journal entry before any "
+                    f"future run resumes trading."))
+    if equity < circuit_breaker_usd:
+        return CircuitBreakerVerdict(
+            halt_new_positions=True, liquidate=False, tripped_by_this_run=True,
+            reason=(f"equity {equity:.2f} is below the circuit breaker "
+                    f"{circuit_breaker_usd:.2f} -- no new positions until a "
+                    f"human reviews and records a 'circuit_breaker_cleared' "
+                    f"journal entry. Existing positions and their stops are "
+                    f"untouched."))
+    if standing_trip:
+        prior_reason = standing_trip.get("reason", "no reason recorded")
+        return CircuitBreakerVerdict(
+            halt_new_positions=True, liquidate=False, tripped_by_this_run=False,
+            reason=(f"equity has recovered to {equity:.2f}, but a prior trip "
+                    f"was never cleared ({prior_reason}) -- new positions "
+                    f"stay paused until a human records a "
+                    f"'circuit_breaker_cleared' entry, "
+                    f"recovered equity is not itself a clearance."))
+    return CircuitBreakerVerdict(
+        halt_new_positions=False, liquidate=False, tripped_by_this_run=False,
+        reason="")
+
+
 # --------------------------------------------------------------------------
 # the run log
 # --------------------------------------------------------------------------

@@ -523,3 +523,52 @@ def test_no_opening_balance_entries_gives_an_empty_map_not_an_error():
     j = L.fold_journal([_file("journal-2026-09-01.json",
                               [{"run_id": "a", "kind": "run", "payload": {}}])])
     assert j.opening_balances == {}
+
+
+# ---------------------------------------------------- standing circuit breaker
+
+def test_no_circuit_breaker_entries_means_clear():
+    j = L.fold_journal([_file("journal-2026-09-01.json",
+                              [{"run_id": "a", "kind": "run", "payload": {}}])])
+    assert j.standing_circuit_breaker is None
+
+
+def test_an_unresolved_trip_is_standing():
+    j = L.fold_journal([_file("journal-2026-09-02.json", [
+        {"run_id": "b", "kind": "circuit_breaker_tripped",
+         "payload": {"reason": "equity below hard stop"}},
+    ])])
+    assert j.standing_circuit_breaker == {"reason": "equity below hard stop"}
+
+
+def test_a_clear_after_a_trip_resolves_it():
+    j = L.fold_journal([
+        _file("journal-2026-09-02.json", [
+            {"run_id": "b", "kind": "circuit_breaker_tripped",
+             "payload": {"reason": "equity below hard stop"}},
+        ]),
+        _file("journal-2026-09-05.json", [
+            {"run_id": "c", "kind": "circuit_breaker_cleared",
+             "payload": {"reason": "reviewed, cause identified and fixed"}},
+        ]),
+    ])
+    assert j.standing_circuit_breaker is None
+
+
+def test_a_second_trip_after_a_clear_is_standing_again():
+    """Clearing one trip does not grant blanket immunity -- a fresh trip after
+    a clear must still halt the run."""
+    j = L.fold_journal([
+        _file("journal-2026-09-02.json", [
+            {"run_id": "b", "kind": "circuit_breaker_tripped",
+             "payload": {"reason": "first trip"}},
+        ]),
+        _file("journal-2026-09-05.json", [
+            {"run_id": "c", "kind": "circuit_breaker_cleared", "payload": {}},
+        ]),
+        _file("journal-2026-09-10.json", [
+            {"run_id": "d", "kind": "circuit_breaker_tripped",
+             "payload": {"reason": "second trip"}},
+        ]),
+    ])
+    assert j.standing_circuit_breaker == {"reason": "second trip"}

@@ -74,6 +74,14 @@ Research overnight news, macro events, earnings, and filings by web search. Run 
 
 **STAGE 5 — AGENTIC ACCOUNT (execute).** Rules, all mandatory, with every threshold taken from `state.json.config` unless `max_new_positions_per_day` was overridden to 0 in Stage 0.5:
 
+**Before sizing or placing anything, call `runlog.circuit_breaker_check(equity, config.circuit_breaker_usd, config.hard_stop_usd, standing_trip=journal.standing_circuit_breaker)`, using the same `equity` as `get_portfolio`'s `total_value`.** This is enforcement, not a status line — the procedure used to say only "report where equity sits relative to" these two numbers, which is not what a circuit breaker is for.
+
+- If `verdict.liquidate` is true: **sell every agentic position to cash this run, place no new positions, and stop.** Write a `"circuit_breaker_tripped"` journal entry (`payload: {"reason": verdict.reason, "equity": equity, "hard_stop_usd": ..., "circuit_breaker_usd": ...}`) — the run writes the trip, it never writes the clear. Report this as the headline of the email, above everything else Stage 5 would normally report.
+- Else if `verdict.halt_new_positions` is true: **place no new positions this run** — existing positions and their stops are untouched. If `verdict.tripped_by_this_run` is true, this is a fresh trip: write the same `"circuit_breaker_tripped"` journal entry as above (without liquidating). If it is false, a prior trip is still standing even though equity has recovered — write nothing new to the journal (the existing trip already covers it), just report plainly that new positions remain paused pending a human's `"circuit_breaker_cleared"` entry.
+- Otherwise (`verdict.halt_new_positions` is false): proceed normally with the rest of this stage.
+
+**A `circuit_breaker_cleared` journal entry is written only by a human, reviewing after a trip — never by an automated run, self-heal retry included.** If asked to clear one as part of a fix, that is exactly the kind of thing `WATCHDOG_PROCEDURE.md`'s hard limits already forbid touching autonomously; refuse and report it instead.
+
 - Stocks and exchange-traded funds only. No options, cryptocurrency, leveraged or inverse funds.
 - **Whole shares only** (`whole_shares_required: true`). A fractional position cannot hold a stop; verified against the live API. (`quantcore.size_position` also supports a fractional path now, for a future account that does not need this constraint — it is not used here.)
 - Respect `max_weight_agentic` and `target_holdings_agentic`.
@@ -84,7 +92,6 @@ Research overnight news, macro events, earnings, and filings by web search. Run 
 - Never add to a losing position. Cash account: proceeds settle T+1; do not attempt to redeploy same-day proceeds.
 - Call `review_equity_order` first, then `place_equity_order`. The review passing is not proof the placement will succeed.
 - After every order, **re-read the account** and report what the broker says, not what was intended. Never assume a fill.
-- Report where equity sits relative to `circuit_breaker_usd` and `hard_stop_usd`.
 - Note explicitly which existing positions are fractional and therefore cannot be protected by a stop.
 - If an order is rejected for a reason other than a stale resting order, do not retry in a loop. Report the rejection verbatim.
 
@@ -102,22 +109,22 @@ Write two files to Drive folder `{{DRIVE_FOLDER_ID}}` — **the connector rewrit
 - **If the 06:20 scheduled routine fired this directly** and the run **ABORTED**: do not render or send any email. Write the manifest and journal as above and stop. The watchdog (fires 60 minutes later, reads `WATCHDOG_PROCEDURE.md`) owns deciding what happens next — diagnosing, attempting a fix, and re-running this same procedure. Sending a partial "sorry, broken" email here would just be a second email the user didn't ask for once the watchdog's retry lands.
 - **If the run SUCCEEDED or the market was CLOSED**, or **if you are the watchdog re-running this procedure after a diagnosis/fix attempt** (regardless of whether that retry itself succeeds or aborts): render and send the email now. This is the only place email-sending logic lives; both callers funnel through it.
 
-**When you do send, keep it to exactly three sections — the user does not want a market-commentary newsletter, only what the agentic account did, what to consider for the individual account, and whether the system is healthy:**
+**When you do send, keep it to exactly three sections — the user does not want a market-commentary newsletter, only what the agentic account did, what to consider for the individual account, and whether the system is healthy. The first two are cards, one per symbol, never a paragraph — a name, an action, and a quantity buried in a sentence are slower to scan than the same three things in a card's first line:**
 
 ```python
 import emailer
 subject, html = emailer.render_email(
     log.manifest(),
-    sections=[("Agentic account — activity", agentic_frag),
-              ("Individual account — suggestions", suggestions_frag),
+    sections=[("Agentic account — activity", emailer.idea_cards(agentic_ideas)),
+              ("Individual account — suggestions", emailer.idea_cards(suggestion_ideas)),
               ("System health", health_frag)],
     prefix=prefix,  # "[DRY RUN]" while the DRY RUN guard above is in effect; "" once removed
 )
 ```
 
-- **"Agentic account — activity"**: every order placed (or, under the DRY RUN guard, every order that *would* have been placed) this run — symbol, side, quantity, limit/stop, resulting weight, and the broker's actual response where an order was really sent. Existing positions and their stops, briefly.
-- **"Individual account — suggestions"**: for every idea that cleared the gate in Stage 4 — symbol, buy or sell, how many shares, and a short (one to two sentence) plain-English reason. Skip anything that didn't clear the gate; an empty section on a do-nothing day is correct.
-- **"System health"**: the run's overall status, the Stage 0.5 evidence verdict and policy in one or two sentences (full detail stays in the journal/manifest, not the email), and — **only when this run was a watchdog retry** — a plain-English note on what was diagnosed and, if a fix was written and merged to `main`, a one-line description of the fix and the commit it landed in. Never omit this note when a fix happened; the user reads this section specifically to know the system fixed itself.
+- **"Agentic account — activity"**: build `agentic_ideas` as a list of dicts, one per symbol touched this run (or, under the DRY RUN guard, one per order that *would* have been placed) — `{"symbol": ..., "action": "buy"|"sell"|"trim"|"hold", "quantity": "2 shares", "detail": "limit 61.80, stop 58.09, 12.48% weight", "bullets": [(text, source), ...]}`. Every bullet is one concrete reason the idea moved in the direction of the call, each tagged with **the specific source that supports it** — a named data provider (`"Alpha Vantage"`), a specific report (`"EIA STEO, 9 Sep"`), a computed check (`"quantcore.stop_plan"`), a tool result (`"review_equity_order"`) — not a vague "research suggests". Include existing held positions too (`action: "hold"`), briefly, with the broker's actual response as a bullet where an order was really sent.
+- **"Individual account — suggestions"**: same `idea_card` shape, one card per idea that cleared the gate in Stage 4 — symbol, buy or sell, how many shares, and bullets sourced the same way as above. Skip anything that didn't clear the gate; `emailer.idea_cards([])` on a do-nothing day renders "Nothing today," which is a correct, expected output, not an omission to explain away.
+- **"System health"**: the run's overall status, the Stage 0.5 evidence verdict and policy in one or two sentences (full detail stays in the journal/manifest, not the email), **the circuit breaker's status from Stage 5 whenever it is not fully clear** (a fresh trip, a standing unresolved one, or — say so explicitly — fully clear), and — **only when this run was a watchdog retry** — a plain-English note on what was diagnosed and, if a fix was written and merged to `main`, a one-line description of the fix and the commit it landed in. Never omit either note when it applies; the user reads this section specifically to know the system stopped itself or fixed itself.
 
 The renderer still supplies the verdict banner, health line, decisions table, and footer, and still escapes everything passed to it — write plain prose, no markup. Send with Gmail as **HTML** (`contentType: text/html`) using the returned `subject` and `html`, to `state.json.config.email_to`.
 

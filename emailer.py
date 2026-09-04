@@ -29,7 +29,7 @@ from __future__ import annotations
 from html import escape
 from typing import Any, Iterable, Optional, Sequence
 
-__all__ = ["diagnose", "render_email", "subject_for"]
+__all__ = ["diagnose", "render_email", "subject_for", "idea_card", "idea_cards"]
 
 # --------------------------------------------------------------------------
 # palette
@@ -190,6 +190,73 @@ def _well(inner: str, *, accent: str = RULE) -> str:
 def _code(text: str) -> str:
     return (f'<span style="font:400 13px/1.5 {MONO};color:{INK};'
             f'word-break:break-word;">{escape(text)}</span>')
+
+
+_ACTION_COLORS = {
+    "buy":  ("#1e6b3a", "#eaf5ee"),
+    "sell": ("#b3261e", "#fdeceb"),
+    "trim": ("#8a5a00", "#fdf4e3"),
+    "hold": (MUTED, WELL),
+}
+
+
+def _action_badge(action: str) -> str:
+    fg, bg = _ACTION_COLORS.get(action.lower(), (MUTED, WELL))
+    return (f'<span style="display:inline-block;padding:2px 8px;'
+            f'border-radius:3px;background:{bg};color:{fg};font:700 12px/1.5 '
+            f'{FONT};letter-spacing:.04em;text-transform:uppercase;">'
+            f'{escape(action)}</span>')
+
+
+def idea_card(symbol: str, action: str, quantity: str = "", detail: str = "",
+             bullets: Sequence[tuple[str, str]] = ()) -> str:
+    """One symbol, rendered so the reader sees the call before the reasoning:
+    symbol and action first, then each supporting point as its own bullet,
+    tagged with the source behind it. Replaces hand-written prose paragraphs
+    for exactly the reason a reader complained about them: a name, an
+    action, and a quantity buried in a sentence are slower to scan than the
+    same three things in the first line of a card.
+
+    `bullets` are `(text, source)` pairs — `source` names what the point
+    came from (a data provider, a named report, a computed check, a
+    specific tool call) so the reasoning trail is visible, not just
+    asserted. Pass an empty `source` string for a bullet with no single
+    attributable source (a synthesis of several); it still renders, just
+    without an attribution tag.
+    """
+    qty_html = (f'&nbsp;<strong style="font:700 14px/1.4 {FONT};color:{INK};">'
+                f'{escape(str(quantity))}</strong>' if quantity else "")
+    detail_html = (f'&nbsp;<span style="font:400 13px/1.5 {FONT};'
+                   f'color:{MUTED};">{escape(detail)}</span>' if detail else "")
+    head = (f'<div style="margin:0 0 8px;">'
+            f'<strong style="font:700 16px/1.3 {FONT};color:{INK};">'
+            f'{escape(symbol)}</strong>&nbsp; {_action_badge(action)}'
+            f'{qty_html}{detail_html}</div>')
+
+    items = []
+    for text, source in bullets:
+        tag = (f' <span style="color:{MUTED};font-size:12px;">— '
+               f'{escape(source)}</span>' if source else "")
+        items.append(f'<li style="margin:0 0 5px;font:400 14px/1.55 {FONT};'
+                     f'color:{INK};">{escape(text)}{tag}</li>')
+    body = (f'<ul style="margin:0;padding-left:18px;">{"".join(items)}</ul>'
+            if items else "")
+    return _well(head + body)
+
+
+def idea_cards(ideas: Sequence[dict]) -> str:
+    """Render a whole section (e.g. the individual account's suggestions, or
+    the agentic account's activity) as one card per symbol instead of a
+    paragraph. Each dict in `ideas` needs `symbol` and `action`; `quantity`,
+    `detail`, and `bullets` (a list of `(text, source)` pairs) are optional.
+    An empty list renders a plain "nothing today" line — a do-nothing day is
+    a correct, expected output, not an omission to explain away."""
+    if not ideas:
+        return _p("Nothing today.", color=MUTED)
+    return "".join(
+        idea_card(i["symbol"], i["action"], i.get("quantity", ""),
+                 i.get("detail", ""), i.get("bullets", ()))
+        for i in ideas)
 
 
 # --------------------------------------------------------------------------

@@ -12,7 +12,7 @@ to an agent or a person with no memory of the design conversation.
 > The private companion document, `HANDOFF.private.md`, carries the concrete
 > values. It is gitignored and lives alongside `state.json` in Drive.
 
-**Status (3 September 2026):** 274 tests passing. The system is scheduled and
+**Status (4 September 2026):** 292 tests passing. The system is scheduled and
 running daily in dry-run mode (weekdays, 06:20 Central) — see section 8. It has
 reached every stage on real order history three times in a row, every time
 with both accounts reconciling to zero residuals — see section 11 for the
@@ -136,8 +136,8 @@ The live values are in `state.json` under `config`. The keys and their meaning:
 | `stop_floor`, `stop_cap` | Bounds on stop distance as a fraction of entry. |
 | `stop_time_in_force` | `gfd`. Never `gtc` — there is no cancel tool. |
 | `whole_shares_required` | `true`. A fractional position cannot hold a stop. |
-| `circuit_breaker_usd` | Agentic equity below this: stop opening positions, drop to level 4, require review before resuming. |
-| `hard_stop_usd` | Agentic equity below this: liquidate to cash, halt entirely, email. Not a suggestion. |
+| `circuit_breaker_usd` | Agentic equity below this: stop opening new positions, existing positions and stops untouched, require a human `circuit_breaker_cleared` journal entry before resuming — enforced by `runlog.circuit_breaker_check` (section 3), not just reported. The "drop to level 4" refinement this line used to describe is not yet built; today it is a flat halt, not a demotion. |
+| `hard_stop_usd` | Agentic equity below this: liquidate the agentic account to cash, halt entirely, email — same enforcement function, the harder of its two thresholds. Not a suggestion. |
 | `wash_sale_block_enabled`, `wash_sale_window_days` | Cross-account wash-sale enforcement, 30-day window each side. |
 | `asset_scope` | Stocks and exchange-traded funds only. |
 | `tax_optimization`, `scheduled_contributions` | Off. |
@@ -229,13 +229,13 @@ by default. Two properties of the connector, and the fix each one forced:
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
-| `test_quantcore.py` | 76 tests, including known-answer volatility and correlation recovery |
-| `test_runlog.py` | 45 tests, including daylight-saving drift and market-calendar integrity |
+| `test_quantcore.py` | 81 tests, including known-answer volatility and correlation recovery, and the floor/cap quality-conflation regression |
+| `test_runlog.py` | 52 tests, including daylight-saving drift, market-calendar integrity, and circuit-breaker enforcement |
 | `test_washsale.py` | 32 tests |
-| `test_ledger.py` | 45 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, and the opening-balance mechanism |
-| `test_evidence.py` | 24 tests, including known-answer edge detection and futility |
+| `test_ledger.py` | 50 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, and the standing circuit-breaker fold |
+| `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
 | `test_watchdog.py` | 15 tests |
-| `test_emailer.py` | 26 tests, including escaping and no-research-on-abort |
+| `test_emailer.py` | 34 tests, including escaping, no-research-on-abort, and the `idea_card`/`idea_cards` bulleted format |
 
 Key API surface:
 
@@ -288,7 +288,7 @@ caller to check.
 ```bash
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 273 tests
+python -m pytest -q          # 292 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
@@ -505,16 +505,24 @@ What should be true before that paragraph comes out, roughly in order:
    watching the evidence section after that; `trading_policy` will pause new
    positions on its own if the data turns against it.
 4. **Shrink the risk budget below what `state.json.config` currently allows**
-   for the first stretch of real trading — a smaller `risk_budget_fraction`,
-   `max_weight_agentic`, and tighter `circuit_breaker_usd` / `hard_stop_usd`
-   than the dry-run config uses, specifically so a bug that slips past both
-   the test suite and the self-heal loop costs little while it's found.
-   Widen these back only after real trading has run cleanly for a while.
-5. **Confirm the circuit breaker and hard stop actually halt trading**, not
-   just log a warning — read the code path in `DAILY_PROCEDURE.md` Stage 5
-   that checks `circuit_breaker_usd` / `hard_stop_usd` and make sure it's
-   wired to actually block new orders, not just report where equity sits
-   relative to them.
+   — revisit at the moment of going live, not before. On an account this
+   small (~$1,000), `risk_budget_fraction` (2%) and `max_weight_agentic`
+   (18%) are already tiny in absolute dollars (~$20 risked, ~$180 capped per
+   position); cutting them further risks pricing the whole-share constraint
+   out of nearly every position, the same failure mode the 2 September
+   sizing bug caused for a different reason. The lever that actually matters
+   at this size is `circuit_breaker_usd` / `hard_stop_usd` (currently 700 /
+   500 — roughly 30% / 50% down from today's equity): decide how much of
+   the account you're willing to risk before flipping the guard, and set
+   these two numbers to that, not to an arbitrary fraction of the current
+   ones.
+5. **Confirm the circuit breaker and hard stop actually halt trading** — done
+   4 September 2026. `runlog.circuit_breaker_check` is real enforcement, not
+   a status line: `DAILY_PROCEDURE.md` Stage 5 calls it before sizing or
+   placing anything, halts new positions or liquidates as the two
+   thresholds require, and requires a human-written
+   `circuit_breaker_cleared` journal entry before a future run resumes —
+   equity recovering on its own is explicitly not enough. See section 11.
 6. **When ready, the mechanical change is small:** in the live main-routine
    trigger, delete the `THIS IS A DRY RUN` paragraph (and the `prefix`
    argument in Stage 6's email call) and rename the trigger away from
@@ -524,18 +532,18 @@ What should be true before that paragraph comes out, roughly in order:
    the watchdog's silence-on-healthy immediately; a quiet watchdog on day one
    of real trading is worth a manual double-check regardless.
 
-#### Status snapshot (updated after each material change; latest 3 September 2026)
+#### Status snapshot (updated after each material change; latest 4 September 2026)
 
 | # | Item | Status |
 |---|---|---|
 | 1 | Self-heal proves itself, including a real fix-and-retry cycle | **Not yet.** One near-miss caught and fixed (2 September — a too-tight watchdog offset), but that was found in a dev session, not by the watchdog completing a real diagnose-fix-merge-retry against a genuinely `aborted` run. 3 September validated the *healthy* path only: the widened 60-minute offset gave the watchdog a clean first-listing read, no recheck or retry needed. |
 | 2 | Call quality over a stretch of days | **Improving, still early.** 3 research sessions now (1, 2, 3 September). 3 September produced the **first idea ever to clear all five gate conditions** — buy 2 OXY, limit 61.80, stop 58.09 — with a genuinely two-sided read (it flagged Brent falling on the same Iran-diplomacy news it was buying into, rather than one-sided reasoning). Three days is not a track record yet. |
 | 3 | Don't wait for full statistical power | **On track, unchanged.** Still `n=0`, correctly not gating on this. The OXY thesis opened 3 September is the first real open position the evidence framework has ever tracked; it matures **24 September 2026**, which will be the first genuine test of the settlement/scoring path end to end — worth a checkpoint on that date, not because one trade proves anything. |
-| 4 | Shrink the risk budget for the first live stretch | **Not done.** |
-| 5 | Confirm circuit breaker / hard stop actually halt trading | **Not done.** |
+| 4 | Shrink the risk budget for the first live stretch | **Reframed, not applied.** At this account size the sizing knobs are already near their practical floor; the meaningful decision is the two dollar thresholds in item 5, made at the moment of going live — see the item's own text above. |
+| 5 | Confirm circuit breaker / hard stop actually halt trading | **Done, 4 September 2026.** Real enforcement (`runlog.circuit_breaker_check`), tested, wired into Stage 5, human-clear-only by design. See section 11. |
 | 6 | The mechanical flip | **Not done, as it shouldn't be yet.** |
 
-Net: nothing here clears the bar to go live. Item 2 is the one that moved — from "two empty sessions" to "one real, defensible idea, found for the right reason" — everything else is unchanged from when this section was first written (1 September 2026).
+Net: item 5 is now genuinely done, and item 2 has one real data point in its favor (found for a traceable reason, not luck). Items 1, 4 (in its reframed form), and 6 are still open — a real self-heal cycle has never happened, the go-live risk thresholds haven't been decided, and the guard itself is untouched. **Next scheduled reassessment: 3 weeks out (around 25 September 2026), after the OXY thesis has settled.**
 
 ---
 
@@ -548,9 +556,10 @@ successful one.
 
 ```python
 import emailer
-subject, html = emailer.render_email(log.manifest(),
-                                     sections=[("Agentic account — activity", html)],
-                                     prefix="[DRY RUN]")
+subject, html = emailer.render_email(
+    log.manifest(),
+    sections=[("Agentic account — activity", emailer.idea_cards(ideas))],
+    prefix="[DRY RUN]")
 ```
 
 **It is always HTML**, inline-styled, table-laid-out, with no external assets —
@@ -576,6 +585,12 @@ Rules the renderer enforces, each because the opposite is a real failure mode:
 - **The subject carries the headline fact**, so the run can be triaged from a
   lock screen: `Pre-Market Brief 2026-08-29 — ABORTED (connectors not attached)`
   or `Pre-Market Brief 2026-09-02 — 2 ideas, 2 orders`.
+- **A suggestion or activity item is a card, never a paragraph** (`emailer.idea_card`
+  / `idea_cards`, 4 September 2026). Symbol, action, and quantity on one line;
+  reasoning as bullets below it, each tagged with the specific source that
+  backs it. A name and a number buried in a sentence are slower to scan than
+  the same two things in a card's first line — this replaced hand-written
+  prose after exactly that complaint.
 
 A completed run keeps the full brief: health line, then exactly three
 sections — **"Agentic account — activity," "Individual account —
@@ -1017,6 +1032,38 @@ change in market conditions. No order was placed (DRY RUN held). The thesis
 opened the same run and matures 24 September 2026 — the first real position
 the evidence framework has ever tracked end to end, and the first date worth
 checking back on for that reason specifically.
+
+### 4 September 2026 — the circuit breaker went from reported to enforced, and the email from prose to cards
+
+Two pieces of prep work for the eventual live decision, neither touching the
+`THIS IS A DRY RUN` guard itself.
+
+**The circuit breaker and hard stop are now real.** Every prior version of
+this system only ever *reported* where equity sat relative to
+`circuit_breaker_usd` and `hard_stop_usd` — nothing in the codebase actually
+stopped an order because of them. `runlog.circuit_breaker_check` fixes that:
+called before any sizing or placement in Stage 5, it returns
+`halt_new_positions` and `liquidate` as separate, correctly-ordered
+thresholds (the hard stop is checked first and liquidates; the softer
+circuit breaker only pauses new positions, existing ones and their stops
+untouched), and — deliberately — **neither one un-halts on its own once
+equity recovers.** A `circuit_breaker_tripped` journal entry is written
+automatically when either threshold is crossed; only a human ever writes the
+matching `circuit_breaker_cleared` entry (`ledger.Journal.standing_circuit_breaker`
+reads whichever came later), and `WATCHDOG_PROCEDURE.md`'s existing hard
+limits already forbid the self-heal path from writing one on its own. 10 new
+tests.
+
+**The suggestion and activity sections moved from prose to cards.** A
+complaint about the email: paragraphs buried the one thing worth scanning
+for — which symbol, which action, how many shares — inside sentences.
+`emailer.idea_card` / `idea_cards` render each idea as symbol, action badge,
+and quantity on one line, then the reasoning as bullets, **each tagged with
+the specific source that supports it** (a data provider, a named report, a
+computed check) rather than an unattributed paragraph of synthesis.
+`DAILY_PROCEDURE.md` Stage 6 now builds both the "Agentic account —
+activity" and "Individual account — suggestions" sections this way. 8 new
+tests.
 
 ## 12. Open and unverified
 

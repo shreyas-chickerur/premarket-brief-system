@@ -471,6 +471,24 @@ class Journal:
                 out[str(sym).upper()] = float(qty)
         return out
 
+    @property
+    def standing_circuit_breaker(self) -> Optional[dict]:
+        """The payload of the most recent unresolved `circuit_breaker_tripped`
+        entry, or `None` if clear. `self.entries` is already folded
+        oldest-first, so the last matching entry — trip or clear — is
+        chronologically the most recent; a trip with no later clear (or a
+        clear with no later trip) is exactly what determines the current
+        state. Only a human ever writes `circuit_breaker_cleared` — the
+        automated run itself never does, by design (see
+        `runlog.circuit_breaker_check`)."""
+        latest = None
+        for e in self.entries:
+            if e.kind in ("circuit_breaker_tripped", "circuit_breaker_cleared"):
+                latest = e
+        if latest is None or latest.kind == "circuit_breaker_cleared":
+            return None
+        return latest.payload
+
     def open_theses(self, asof: date) -> list[dict]:
         """Theses whose horizon has not yet elapsed and which are not closed."""
         closed = {e.payload.get("thesis_id") for e in self.of_kind("close")}

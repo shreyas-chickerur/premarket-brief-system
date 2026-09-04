@@ -76,7 +76,7 @@ Python 3.11 or newer.
 ```
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 273 tests
+python -m pytest -q          # 292 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
