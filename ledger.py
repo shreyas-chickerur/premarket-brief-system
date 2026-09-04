@@ -35,6 +35,8 @@ __all__ = [
     "positions_from_fills", "cost_basis", "loss_sales", "reconcile_positions",
     "to_washsale_trades", "JournalEntry", "Journal", "fold_journal",
     "journal_filename", "JOURNAL_RE",
+    "journal_monthly_filename", "MONTHLY_JOURNAL_RE", "month_is_compactable",
+    "compact_journal_month",
     "FILLS_CACHE_HORIZON_DAYS", "fills_cache_filename", "FILLS_CACHE_RE",
     "fold_fills_cache", "fills_cache_watermark", "fills_ready_to_cache",
     "SPLITS_CACHE_HORIZON_DAYS", "splits_cache_filename", "SPLITS_CACHE_RE",
@@ -745,28 +747,64 @@ def fold_journal(files: Iterable[dict]) -> Journal:
     recorded in `unreadable` and skipped rather than killing the fold: losing
     one day of theses is bad, losing the whole history because of one bad write
     is much worse.
+
+    A monthly-compacted file (`journal-monthly-YYYY-MM[-N].json`, see
+    `compact_journal_month`) is the sole source for its calendar month —
+    any daily `journal-YYYY-MM-DD[-N].json` file for that same month is
+    skipped rather than folded, even if it is still sitting in Drive (the
+    connector can create a file but not delete one, so old daily files
+    left behind after compaction are expected, not an error). This is what
+    makes compaction reduce file COUNT without changing what a fold
+    produces: `fold_journal(daily_files_for_a_month)` and
+    `fold_journal([the_monthly_compacted_file])` are exactly equivalent,
+    and mixing both in one call still returns the monthly result, never a
+    doubled one.
     """
-    dated: list[tuple[str, int, dict]] = []
+    files = list(files)
+    compacted_months: set[str] = set()
+    for f in files:
+        m = MONTHLY_JOURNAL_RE.match(str(f.get("title", "")))
+        if m:
+            compacted_months.add(f"{m.group(1)}-{m.group(2)}")
+
+    # (sort_key, tie_break, body, source_filename) -- tie_break -1 for a
+    # monthly file guarantees it sorts before any same-month daily file
+    # that might otherwise share its "YYYY-MM-01" sort key; in practice
+    # this never matters since a compacted month's daily files are already
+    # excluded above, but it keeps the ordering well-defined regardless.
+    dated: list[tuple[str, int, dict, str]] = []
     bad: list[str] = []
 
     for f in files:
         title = str(f.get("title", ""))
-        m = JOURNAL_RE.match(title)
-        if not m:
-            continue
-        try:
-            body = json.loads(f.get("content") or "{}")
-        except (ValueError, TypeError):
-            bad.append(title)
-            continue
-        dated.append((m.group(1), int(m.group(2) or 0), body))
+        dm = JOURNAL_RE.match(title)
+        mm = MONTHLY_JOURNAL_RE.match(title)
+        if dm:
+            iso, seq = dm.group(1), int(dm.group(2) or 0)
+            if iso[:7] in compacted_months:
+                continue
+            try:
+                body = json.loads(f.get("content") or "{}")
+            except (ValueError, TypeError):
+                bad.append(title)
+                continue
+            dated.append((iso, seq, body, journal_filename(date.fromisoformat(iso), seq)))
+        elif mm:
+            year, month, seq = int(mm.group(1)), int(mm.group(2)), int(mm.group(3) or 0)
+            try:
+                body = json.loads(f.get("content") or "{}")
+            except (ValueError, TypeError):
+                bad.append(title)
+                continue
+            dated.append((f"{year:04d}-{month:02d}-01", -1, body,
+                          journal_monthly_filename(year, month, seq)))
 
     dated.sort(key=lambda t: (t[0], t[1]))
 
     entries: list[JournalEntry] = []
     sources: list[str] = []
-    for iso, seq, body in dated:
-        sources.append(journal_filename(date.fromisoformat(iso), seq))
+    for iso, seq, body, source in dated:
+        sources.append(source)
         for raw in body.get("entries", []):
             try:
                 entries.append(JournalEntry(
@@ -778,3 +816,57 @@ def fold_journal(files: Iterable[dict]) -> Journal:
             except (TypeError, ValueError):
                 bad.append(f"{iso} entry")
     return Journal(entries=entries, sources=sources, unreadable=bad)
+
+
+def journal_monthly_filename(year: int, month: int, seq: int = 0) -> str:
+    """One compacted file per calendar month, same create-only convention
+    as `journal_filename`. Named `journal-monthly-` rather than reusing the
+    daily `journal-YYYY-MM-DD` prefix with an omitted day so the two can
+    never be mistaken for each other by a regex — `journal-2026-09.json`
+    would otherwise be ambiguous with a daily file whose day happens to
+    look like a sequence number (`journal-2026-09-01.json`)."""
+    stem = f"journal-monthly-{year:04d}-{month:02d}"
+    return f"{stem}.json" if seq == 0 else f"{stem}-{seq}.json"
+
+
+MONTHLY_JOURNAL_RE = re.compile(r"^journal-monthly-(\d{4})-(\d{2})(?:-(\d+))?\.json$")
+
+
+def month_is_compactable(year: int, month: int, *, today: Optional[date] = None) -> bool:
+    """Whether a calendar month is safe to compact: strictly before the
+    CURRENT month, never today's still-accumulating one. Compacting a
+    month that could still receive a new daily file would let that later
+    file silently disappear from the fold once the monthly file exists —
+    `fold_journal` treats a compacted month as complete and skips any
+    daily file for it, including one written after compaction ran. This
+    is the guard against compacting too early, not a scheduling mechanism;
+    compaction is an occasional maintenance step, not part of the daily
+    routine."""
+    today = today or date.today()
+    return (year, month) < (today.year, today.month)
+
+
+def compact_journal_month(daily_files: Iterable[dict]) -> dict:
+    """Fold a set of daily journal files — expected to be every daily file
+    for exactly one calendar month — into the body of one monthly-compacted
+    file. Entry order and content are unchanged; compaction reduces file
+    COUNT, never information, which is what makes it exactly equivalent to
+    folding the daily files it replaces (see `fold_journal`'s docstring).
+
+    Raises `ValueError` if the given files span more than one calendar
+    month — `fold_journal`'s supersede-by-month logic requires a monthly
+    file to be a complete, exact replacement for exactly the days it
+    claims to cover, never a partial one.
+    """
+    daily_files = list(daily_files)
+    months = {
+        m.group(1)[:7]
+        for f in daily_files
+        if (m := JOURNAL_RE.match(str(f.get("title", ""))))
+    }
+    if len(months) > 1:
+        raise ValueError(
+            f"compact_journal_month given files spanning multiple months: {sorted(months)} "
+            "-- compact one month at a time")
+    j = fold_journal(daily_files)
+    return {"entries": [e.to_dict() for e in j.entries]}

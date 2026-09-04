@@ -244,7 +244,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
 | `runlog.py` | Run manifests, staged timing, preflight self-audit, verified market calendar, regression review, optimization proposals, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
-| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached) |
+| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
 | `emailer.py` | HTML brief rendering, failure diagnosis, subject lines |
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
@@ -253,7 +253,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_quantcore.py` | 81 tests, including known-answer volatility and correlation recovery, and the floor/cap quality-conflation regression |
 | `test_runlog.py` | 52 tests, including daylight-saving drift, market-calendar integrity, and circuit-breaker enforcement |
 | `test_washsale.py` | 32 tests |
-| `test_ledger.py` | 73 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, and the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch) |
+| `test_ledger.py` | 84 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), and monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee) |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
 | `test_watchdog.py` | 15 tests |
 | `test_research.py` | 45 tests, against recorded fixtures in `fixtures/research/`, never the live API |
@@ -1300,6 +1300,41 @@ produce the exact same derived positions as fetching everything fresh
 every time, proven against the real 31 August 2026 order fixture.
 `ledger.py`: 50 → 73 tests. Full suite: 381 → 404.
 
+### 4 September 2026 — monthly journal compaction
+
+As the journal accumulates one dated file per run indefinitely, folding it
+means listing and reading every file that has ever existed, every run,
+forever. `ledger.compact_journal_month` folds a calendar month's worth of
+daily `journal-YYYY-MM-DD[-N].json` files into one
+`journal-monthly-YYYY-MM[-N].json` file, entry order and content
+unchanged — compaction reduces file COUNT, never information.
+
+`fold_journal` treats a monthly-compacted file as the sole source for its
+calendar month: any daily file left over from before compaction is skipped
+rather than folded, which matters because the connector can create a file
+but not delete one, so the old daily files stay in the folder forever
+after compaction runs. `test_fold_journal_prefers_the_monthly_file_over_leftover_daily_files`
+proves this directly — folding the daily files, the monthly file, and both
+together all produce the exact same entry list, never a doubled one.
+
+The monthly file is named `journal-monthly-YYYY-MM`, not
+`journal-YYYY-MM` with the day omitted, specifically to avoid a regex
+collision: `journal-2026-09.json` would be genuinely ambiguous against
+a daily file whose day happens to look like a sequence number
+(`journal-2026-09-01.json`) — `test_monthly_filename_regex_never_matches_a_daily_filename`
+guards this directly.
+
+`month_is_compactable` guards against compacting the current, still-
+accumulating month or a future one — compacting a month that could still
+receive a new daily file would let that later file silently disappear
+from every future fold. **Compaction is a deliberate, occasional
+maintenance operation, not part of the automated daily routine** — nothing
+in `DAILY_PROCEDURE.md` calls it, and it is not scheduled anywhere. It is
+meant to be run by hand (or by a future dedicated maintenance task) on a
+closed month, e.g. once a quarter, not wired into every run's own logic.
+
+`ledger.py`: 73 → 84 tests. Full suite: 404 → 415.
+
 ## 12. Open and unverified
 
 - **`research.py` has now been live-checked feed by feed for every channel
@@ -1365,6 +1400,13 @@ every time, proven against the real 31 August 2026 order fixture.
   proves the reconstruction logic against the real 31 August order fixture,
   but nothing has proven the actual dated-file read/write cycle against a
   live Drive folder yet.
+- **Monthly journal compaction has never been run, live or otherwise, by a
+  human or by any procedure.** The logic is tested to exact equivalence
+  against synthetic multi-file journals, but no `journal-monthly-*.json`
+  file has ever actually been written to the real Drive folder, and since
+  it is a deliberate manual/occasional operation (not part of the daily
+  routine), it may not be for some time — see section 11's 4 September
+  entry.
 
 ## 13. Standing honesty rules
 

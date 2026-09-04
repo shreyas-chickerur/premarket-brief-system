@@ -245,6 +245,105 @@ def test_an_empty_folder_folds_to_an_empty_journal():
     assert j.runs == [] and j.entries == [] and j.unreadable == []
 
 
+# ------------------------------------------------------- journal compaction
+
+def _daily_files_for_august():
+    return [
+        _file("journal-2026-08-01.json", [{"run_id": "a1", "kind": "run", "payload": {"i": 1}}]),
+        _file("journal-2026-08-15.json", [{"run_id": "a2", "kind": "run", "payload": {"i": 2}}]),
+        _file("journal-2026-08-15-1.json", [{"run_id": "a3", "kind": "run", "payload": {"i": 3}}]),
+        _file("journal-2026-08-31.json", [{"run_id": "a4", "kind": "run", "payload": {"i": 4}}]),
+    ]
+
+
+def test_journal_monthly_filename_convention():
+    assert L.journal_monthly_filename(2026, 8) == "journal-monthly-2026-08.json"
+    assert L.journal_monthly_filename(2026, 8, 1) == "journal-monthly-2026-08-1.json"
+
+
+def test_monthly_filename_regex_never_matches_a_daily_filename():
+    """The exact collision this naming scheme exists to avoid: a daily
+    file's day component must never be misread as a monthly file's
+    sequence number."""
+    assert L.MONTHLY_JOURNAL_RE.match("journal-2026-09-01.json") is None
+    assert L.MONTHLY_JOURNAL_RE.match("journal-2026-09-01-1.json") is None
+    assert L.JOURNAL_RE.match("journal-monthly-2026-09.json") is None
+
+
+def test_compact_journal_month_is_entry_for_entry_equivalent_to_the_daily_fold():
+    """The equivalence the whole feature depends on: compacting must not
+    change what a fold produces, only how many files it has to read."""
+    daily = _daily_files_for_august()
+    direct = L.fold_journal(daily)
+    compacted_body = L.compact_journal_month(daily)
+    compacted = L.fold_journal([{"title": "journal-monthly-2026-08.json",
+                                 "content": json.dumps(compacted_body)}])
+    assert [e.to_dict() for e in compacted.entries] == [e.to_dict() for e in direct.entries]
+
+
+def test_compact_journal_month_rejects_files_spanning_multiple_months():
+    with pytest.raises(ValueError, match="multiple months"):
+        L.compact_journal_month(_daily_files_for_august() + [
+            _file("journal-2026-09-01.json", [{"run_id": "s", "kind": "run", "payload": {}}]),
+        ])
+
+
+def test_compact_journal_month_ignores_unrelated_files():
+    body = L.compact_journal_month(_daily_files_for_august() + [
+        {"title": "state.json", "content": "{}"},
+    ])
+    assert len(body["entries"]) == 4
+
+
+def test_fold_journal_prefers_the_monthly_file_over_leftover_daily_files():
+    """The connector cannot delete the old daily files once compacted --
+    fold_journal must still treat the monthly file as authoritative and
+    skip them, not double-count."""
+    daily = _daily_files_for_august()
+    compacted_body = L.compact_journal_month(daily)
+    monthly_file = {"title": "journal-monthly-2026-08.json", "content": json.dumps(compacted_body)}
+
+    mixed = L.fold_journal(daily + [monthly_file])
+    monthly_only = L.fold_journal([monthly_file])
+    daily_only = L.fold_journal(daily)
+
+    assert [e.to_dict() for e in mixed.entries] == [e.to_dict() for e in monthly_only.entries]
+    assert [e.to_dict() for e in mixed.entries] == [e.to_dict() for e in daily_only.entries]
+    assert len(mixed.entries) == 4  # not 8 -- the daily files were not double-counted
+
+
+def test_fold_journal_leaves_other_months_daily_files_alone():
+    """Compacting August must not touch September's still-accumulating
+    daily files."""
+    august_daily = _daily_files_for_august()
+    monthly_file = {"title": "journal-monthly-2026-08.json",
+                    "content": json.dumps(L.compact_journal_month(august_daily))}
+    september_daily = _file("journal-2026-09-01.json",
+                            [{"run_id": "s1", "kind": "run", "payload": {"i": 5}}])
+
+    j = L.fold_journal([monthly_file, september_daily])
+    assert [r["i"] for r in j.runs] == [1, 2, 3, 4, 5]
+
+
+def test_fold_journal_sources_reports_the_monthly_file_not_the_daily_ones():
+    monthly_file = {"title": "journal-monthly-2026-08.json",
+                    "content": json.dumps(L.compact_journal_month(_daily_files_for_august()))}
+    j = L.fold_journal(_daily_files_for_august() + [monthly_file])
+    assert j.sources == ["journal-monthly-2026-08.json"]
+
+
+def test_month_is_compactable_rejects_the_current_month():
+    assert L.month_is_compactable(2026, 9, today=date(2026, 9, 4)) is False
+
+
+def test_month_is_compactable_accepts_a_past_month():
+    assert L.month_is_compactable(2026, 8, today=date(2026, 9, 4)) is True
+
+
+def test_month_is_compactable_rejects_a_future_month():
+    assert L.month_is_compactable(2026, 10, today=date(2026, 9, 4)) is False
+
+
 # ------------------------------------------------------------- split adjustment
 
 def test_a_pre_split_fill_is_rescaled_to_current_share_terms():
