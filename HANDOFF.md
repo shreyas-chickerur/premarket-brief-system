@@ -1121,15 +1121,94 @@ calls `research.candidates()` and `research.gather()` instead of describing
 an unstructured web search. **Not yet run against the live Alpha Vantage or
 Robinhood connectors** — see section 12.
 
+### 4 September 2026 — the fixtures were fabricated, and live checking found what that hid
+
+The prediction in section 12 above came true within a day: a live check of
+three feeds against the real Alpha Vantage and Robinhood connectors found two
+parsers reading field names that do not exist, because every fixture
+`research.py`'s first version shipped with was hand-written, not a response
+either API had ever actually returned.
+
+- **`CONGRESS_TRADES` and `INSIDER_TRANSACTIONS` had their field names
+  swapped against each other.** The real congress response is `{"trades":
+  [...]}` with `symbol`/`transaction_type`/`amount_min`/`amount_max` already
+  on each row (no `POLITICIAN_METADATA` join needed) and no bulk pull — one
+  call per symbol. The real insider response keys rows on `ticker`, not
+  `symbol`. The first version of each parser used the other one's real field
+  name, so both always produced zero items against genuine data — OXY alone
+  has 58 real congressional trades that would have rendered as "nothing
+  here" every single morning, with every check still green, because
+  `ResearchBundle.skipped` could not tell "not fetched" apart from "fetched,
+  parsed to zero." Fixed by rewriting both to the confirmed real per-symbol
+  shape, and by adding `ResearchBundle.coverage`/`coverage_issues()`:
+  rows-seen vs. items-produced per feed, so a field-name mismatch shows up
+  as a coverage issue rather than a quiet day.
+- **Oversized payloads were entirely unhandled**, and both mechanisms
+  reproduced live on the first real call: Alpha Vantage's own "preview"
+  envelope (triggered on `INSIDER_TRANSACTIONS` for OXY — 27,944 lines,
+  248,328 tokens) and the harness's separate file-spill (triggered on
+  `NEWS_SENTIMENT(tickers="OXY", limit=2)` at 77,376 characters). Fixed with
+  `_is_preview_envelope`/`_preview_item`, which reports what was truncated
+  and where the full data lives rather than parsing the lossy
+  `sample_data` sample — and this needed a second correction mid-fix: the
+  real envelope keys are `total_lines`/`full_data_tokens`, not the
+  `data_total_count`/`data_truncated` keys the first attempt assumed, which
+  would have made every degraded item report `None` for the one number that
+  makes it useful.
+- **No shape-drift guard existed anywhere.** Added `ResearchShapeError` and
+  `_shape_guard`, raised on any missing required key and caught per-feed
+  inside `gather()`, converted to one loud `quality="failed"` item rather
+  than crashing the whole gather. A parallel gap in `commodity_items` — one
+  bad channel's response could abort every other symbol/channel pair sharing
+  its single `gather()` call — got the same per-channel isolation.
+  `_row_count`'s generic list-valued-key scan also missed the Robinhood news
+  shape (`{"data": {"articles": [...]}}}`, a dict under `"data"`, not a
+  list), silently under-counting rows-seen without ever being able to
+  produce a false coverage pass; fixed for accuracy regardless.
+- **Macro and commodity channels assumed the wrong response family
+  entirely.** The real default for `CPI`/`WTI`/etc. is `{"result": "<CSV
+  text>"}`, not `{"data": [...]}` — confirmed live, including a genuine
+  malformed value (`"."` for a not-yet-published CPI month) now handled as
+  `degraded` rather than crashing or silently passing through.
+  `EARNINGS_CALENDAR` has the same CSV-wrapper shape and no `datatype`
+  parameter at all. `IPO_CALENDAR`'s real schema has no `sector` field,
+  so the sector-based attachment this parser tried to do was never actually
+  possible — `ipo_calendar_items` now always returns `[]`, documented as a
+  structural limit rather than deleted. `REALTIME_PUT_CALL_RATIO`'s real key
+  is `put_call_ratio_full_chain`, not `ratio`. Robinhood's real news key is
+  `data.articles`, not `data.news`.
+- Every fixture in `fixtures/research/` was replaced with a genuinely
+  recorded response (or a real, representative truncated slice of one) —
+  the fabricated `congress_trades.json`, `insider_transactions.json`, and
+  `politician_metadata.json` are gone. `research.py` grew from 45 to 76
+  tests, every one against a recorded real fixture, none hand-written.
+  Full suite: 376, up from 292 at handoff.
+- **Still not independently live-verified**: 8 of the 9 macro channels and
+  10 of the 11 commodity channels beyond the one representative example
+  each (`CPI`, `WTI`) — assumed to share the same response family by
+  provider and documented `datatype` toggle, not individually confirmed;
+  `HISTORICAL_PUT_CALL_RATIO`; `EARNINGS_CALL_TRANSCRIPT`; Robinhood
+  `get_sec_filing`/`get_sec_filing_facts`. See section 12.
+
 ## 12. Open and unverified
 
-- **`research.py` has never run against the live Alpha Vantage or Robinhood
-  connectors.** Every one of its 45 tests is against a recorded fixture; the
-  actual API responses for `CONGRESS_TRADES`, `INSIDER_TRANSACTIONS`, the
-  nine macro channels, the eleven commodity channels, and the rest have
-  never been fetched and fed through it for real. The parsing code is only
-  as good as the fixtures' fidelity to the real response shapes — a live run
-  is the first genuine test of that, and has not happened yet.
+- **`research.py` has been live-checked feed by feed, not yet run end to end
+  inside a real scheduled brief.** As of 4 September 2026, `NEWS_SENTIMENT`,
+  Robinhood `get_equity_news`, `CONGRESS_TRADES`, `INSIDER_TRANSACTIONS`
+  (both the full-data and preview-envelope paths), `CPI`, `WTI`
+  (`datatype=json`), `EARNINGS_CALENDAR` (both an empty and a populated
+  response), `EARNINGS_ESTIMATES`, `IPO_CALENDAR`, `MARKET_STATUS`,
+  `REALTIME_PUT_CALL_RATIO`, and `TOP_GAINERS_LOSERS` have each been called
+  live at least once and their parsers rewritten against the real response
+  (see section 11's "the fixtures were fabricated" entry — two parsers were
+  wrong and one payload class was entirely unhandled before this). **Not
+  independently re-verified live**: 8 of the 9 macro channels and 10 of the
+  11 commodity channels beyond `CPI`/`WTI` (assumed to share the same
+  response family, not confirmed individually), `HISTORICAL_PUT_CALL_RATIO`,
+  `EARNINGS_CALL_TRANSCRIPT`, and Robinhood `get_sec_filing`/
+  `get_sec_filing_facts`. And even the verified feeds have never all run
+  together inside one real `DAILY_PROCEDURE.md` execution — first real
+  contact is the next scheduled trading day.
 - Whether the connector broker refreshes the brokerage token indefinitely
   without a fresh desktop-browser sign-in. The token expires roughly every four
   days; refresh is supported but unconfirmed for this server. If it lapses, runs

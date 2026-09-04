@@ -8,6 +8,19 @@ because of it. Two runs researched under that sentence are not comparable to
 each other, which matters a great deal for a system whose evidence framework
 is supposed to be grading a strategy that holds still.
 
+**4 September 2026 — the first version of this module shipped with parsers
+written against hand-invented fixtures, not real responses.** A live check
+against three feeds found two parsers reading field names the API does not
+use (`ticker` where the response uses `symbol` and vice versa between
+`CONGRESS_TRADES` and `INSIDER_TRANSACTIONS`), a bulk-call assumption
+`CONGRESS_TRADES` does not support (it requires one symbol or BioGuide ID
+per call), and two oversized-payload shapes (a truncated "preview" envelope
+and a harness file-spill) neither parser recognised at all. Every parser in
+this file has since been rewritten against an actual recorded response — see
+`fixtures/research/live_raw/` — and the ones that could not be re-verified
+live within the time available are marked as such below, not silently
+assumed correct.
+
 This module does not call any API itself. It takes ALREADY-FETCHED raw
 responses (whatever the Alpha Vantage / Robinhood connectors returned) and
 turns them into `ResearchItem`s: a value, a source, an as-of timestamp, and a
@@ -25,22 +38,42 @@ brief -- research exists to inform decisions about real holdings and
 real candidates, not to describe the market in general.
 
 **Rule 2 -- keep payloads small.** Callers are told to use `datatype=csv`,
-`outputsize=compact` wherever the endpoint supports it, matching the
-discipline `DAILY_PROCEDURE.md` already imposes elsewhere.
+`outputsize=compact` wherever the endpoint supports it -- **except the nine
+macro and eleven commodity channels, where `datatype=json` should be
+requested instead** (see `_rows_from_series_response`): their CSV default
+returns `{"result": "<CSV text>"}`, a JSON envelope around a CSV string, not
+a parseable data shape, while `datatype=json` returns a clean
+`{"data": [{"date":, "value":}]}`. `EARNINGS_CALENDAR` and `IPO_CALENDAR`
+have no `datatype` parameter at all and always return the CSV-wrapped shape.
 
-**Rule 3 -- time every feed.** `gather()` records wall-clock milliseconds
-per feed on the bundle, because the performance finding in
-`runlog.find_optimizations` has nothing to measure otherwise.
+**Rule 3 -- time every feed and track its coverage.** `gather()` records
+wall-clock milliseconds per feed, and `ResearchBundle.coverage` records rows
+seen versus items produced per feed. A feed that returned rows but produced
+zero items is a field-name mismatch or a shape change wearing the same face
+as a genuinely quiet day -- `ResearchBundle.coverage_issues()` is what tells
+them apart.
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime
 from typing import Any, Callable, Optional, Sequence
 
 QUALITY = ("ok", "thin", "degraded", "failed")
+
+
+class ResearchShapeError(ValueError):
+    """A feed's response is missing a key its parser depends on. Raised,
+    not filtered past silently: a missing key means the provider's response
+    shape drifted from what the parser was written against, exactly the
+    class of bug (a wrapper shape, a renamed field) this module has already
+    shipped once. `gather()` catches this per-feed and turns it into a
+    highly visible `quality="failed"` item rather than letting one feed's
+    drift abort the whole run."""
 
 
 # --------------------------------------------------------------------------
@@ -96,6 +129,7 @@ class ResearchBundle:
     items: list[ResearchItem] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)   # feed name + why
     timings_ms: dict[str, int] = field(default_factory=dict)
+    coverage: dict[str, dict] = field(default_factory=dict)  # feed -> {rows_in, items_out}
     asof: str = ""
 
     def for_symbol(self, symbol: str) -> list[ResearchItem]:
@@ -119,23 +153,119 @@ class ResearchBundle:
     def corroborated(self, symbol: str, *, minimum: int = 2) -> bool:
         return len(self.sources_for(symbol)) >= minimum
 
+    def record_coverage(self, feed: str, rows_in: int, items_out: int) -> None:
+        self.coverage[feed] = {"rows_in": rows_in, "items_out": items_out}
+
+    def coverage_issues(self) -> list[str]:
+        """Feeds that saw rows but produced zero items -- the exact shape a
+        field-name mismatch takes, indistinguishable from a genuinely quiet
+        day unless checked explicitly. This is what would have caught the
+        4 September 2026 CONGRESS_TRADES/INSIDER_TRANSACTIONS bugs before a
+        live run did."""
+        return [feed for feed, c in self.coverage.items()
+                if c["rows_in"] > 0 and c["items_out"] == 0]
+
     def to_dict(self) -> dict:
         return {
             "items": [i.to_dict() for i in self.items],
             "skipped": list(self.skipped),
             "timings_ms": dict(self.timings_ms),
+            "coverage": dict(self.coverage),
             "asof": self.asof,
         }
+
+
+# --------------------------------------------------------------------------
+# shape guards and oversized-payload handling
+# --------------------------------------------------------------------------
+
+def _is_preview_envelope(raw: Any) -> bool:
+    return isinstance(raw, dict) and raw.get("preview") is True
+
+
+def _preview_item(channel: str, symbol: Optional[str], source: str, raw: dict,
+                   asof: str) -> ResearchItem:
+    """A parser handed a preview envelope must never parse `sample_data` as
+    though it were the whole response -- it is a truncated, lossy sample.
+    Real shape, verified live 4 September 2026 (INSIDER_TRANSACTIONS for
+    OXY, 248,328 tokens): `{"preview": true, "data_type":, "total_lines":,
+    "sample_lines":, "sample_data": <JSON string>, "headers":,
+    "full_data_tokens":, "max_tokens_exceeded": true, "content_type":,
+    "message":, "return_full_data_note":, "data_url":}`. Earlier versions
+    of this function assumed `data_total_count`/`data_truncated` keys that
+    do not exist in the real response -- both always read as None."""
+    total_lines = raw.get("total_lines")
+    tokens = raw.get("full_data_tokens")
+    truncated_desc = (f"{total_lines} total lines, {tokens} tokens, only a preview sample was returned"
+                      if total_lines is not None else "response was truncated to a preview")
+    return ResearchItem(
+        channel=channel, symbol=symbol,
+        mechanism=f"{source} returned a preview only ({truncated_desc}); "
+                 f"re-fetch with return_full_data=true rather than parsing the sample",
+        value={"total_lines": total_lines, "full_data_tokens": tokens,
+               "data_url": raw.get("data_url")},
+        source=source, asof=asof, quality="degraded",
+        detail=str(raw.get("message", "")))
+
+
+def _shape_guard(raw: dict, required_keys: Sequence[str], feed_name: str) -> None:
+    missing = [k for k in required_keys if k not in raw]
+    if missing:
+        raise ResearchShapeError(
+            f"{feed_name} response is missing expected key(s) {missing} -- "
+            f"got keys {sorted(raw.keys())}. Do not guess: fix the parser "
+            f"against a fresh recorded response.")
+
+
+def _parse_av_csv_result(raw: dict, feed_name: str) -> list[dict]:
+    """Several Alpha Vantage endpoints return `{"result": "<CSV text>"}` --
+    a JSON envelope around a CSV string, not a `{"data": [...]}` shape.
+    Verified live, 4 September 2026, for `CPI` (default `datatype=csv`),
+    `EARNINGS_CALENDAR`, and `IPO_CALENDAR` (neither of which has a
+    `datatype` parameter at all, so this is their only shape)."""
+    _shape_guard(raw, ("result",), feed_name)
+    return list(csv.DictReader(io.StringIO(raw["result"])))
+
+
+def _rows_from_series_response(raw: dict, feed_name: str) -> list[dict]:
+    """The nine macro and eleven commodity channels can return either shape:
+    `datatype=json` gives `{"name":, "interval":, "unit":, "data":
+    [{"date":, "value":}]}` (verified live against `WTI`); the `datatype=csv`
+    default gives `{"result": "<CSV text>"}` with columns `timestamp,value`
+    (verified live against `CPI`, including a real malformed row,
+    `2025-10-01,.`). Callers should request `datatype=json` (see
+    `PROCEDURE_RATIONALE.md`); this function tolerates either shape so a
+    caller that forgot still gets a correct parse rather than a silently
+    empty one, and normalises the CSV column name `timestamp` to `date` so
+    downstream code has one field name to read regardless of which shape
+    arrived."""
+    if "data" in raw:
+        return list(raw["data"])
+    if "result" in raw:
+        rows = _parse_av_csv_result(raw, feed_name)
+        return [{"date": r.get("timestamp", r.get("date")), "value": r.get("value")}
+                for r in rows]
+    raise ResearchShapeError(
+        f"{feed_name} response has neither 'data' nor 'result' -- got keys {sorted(raw.keys())}")
+
+
+def _numeric_quality(value: Any) -> str:
+    """A malformed or missing latest value (Alpha Vantage's own placeholder
+    for a not-yet-published print is a literal '.') must not be reported as
+    an ordinary number -- degraded, not a silent pass-through."""
+    if value in (None, ".", ""):
+        return "degraded"
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return "degraded"
+    return "ok"
 
 
 # --------------------------------------------------------------------------
 # candidate generation -- the other half of an undefined research process
 # --------------------------------------------------------------------------
 
-# Same data-as-code pattern as washsale.PROXY_GROUPS: a hardcoded reference
-# table, not a live lookup, because the alternative (an unstated, ad hoc
-# notion of "sector") is exactly the kind of undefined universe this
-# function exists to replace. Extend as new symbols are actually held.
 SECTOR_MAP: dict[str, str] = {
     "XOM": "energy", "CVX": "energy", "COP": "energy", "SLB": "energy",
     "HAL": "energy", "OXY": "energy", "XLE": "energy", "USO": "energy",
@@ -155,20 +285,11 @@ def candidates(*, held_symbols: Sequence[str],
                 watchlist_symbols: Sequence[str] = (),
                 top_movers: Sequence[str] = (),
                 sector_map: dict[str, str] = None) -> list[str]:
-    """The candidate universe, defined once, in code, rather than left to
-    whatever a morning happens to think of.
-
-    Four sources, unioned and deduplicated:
-    1. Held positions, both accounts — always candidates for sizing or exit
-       review, not just new entries.
-    2. `state.json.config.watchlist` (if present) — an explicit,
-       human-curated list.
-    3. Today's `TOP_GAINERS_LOSERS` — unusual dispersion is exactly what a
-       five-condition gate might catch, and what the old unstructured
-       research step had no systematic way of noticing.
-    4. Names sharing a sector (via `sector_map`, default `SECTOR_MAP`) with
-       a held position — adjacency to existing exposure, not a blind screen.
-    """
+    """The candidate universe, defined once, in code. Four sources, unioned
+    and deduplicated: held positions; `state.json.config.watchlist`;
+    today's `TOP_GAINERS_LOSERS` (flatten with `top_movers_symbols()` first);
+    names sharing a sector (via `sector_map`, default `SECTOR_MAP`) with a
+    held position."""
     sector_map = SECTOR_MAP if sector_map is None else sector_map
     held = {s.upper() for s in held_symbols}
     out = set(held) | {s.upper() for s in watchlist_symbols} | {s.upper() for s in top_movers}
@@ -181,17 +302,30 @@ def candidates(*, held_symbols: Sequence[str],
     return sorted(out)
 
 
+def top_movers_symbols(raw: Optional[dict]) -> list[str]:
+    """Flatten `TOP_GAINERS_LOSERS`'s real shape into the flat ticker list
+    `candidates()`'s `top_movers` argument expects. Real shape (verified
+    live, 4 September 2026): `{"metadata":, "last_updated":,
+    "top_gainers": [{"ticker":, ...}], "top_losers": [...],
+    "most_actively_traded": [...]}`."""
+    if not raw:
+        return []
+    out: list[str] = []
+    for bucket in ("top_gainers", "top_losers", "most_actively_traded"):
+        for row in raw.get(bucket, []):
+            t = row.get("ticker")
+            if t:
+                out.append(str(t).upper())
+    return out
+
+
 # --------------------------------------------------------------------------
 # weather -- the one path, explicit and testable, never a general narrative
 # --------------------------------------------------------------------------
 
-# symbol -> (weather_variable, mechanism). This IS the only path by which
-# weather may enter a decision -- a symbol not listed here gets no weather
-# item, ever, regardless of how newsworthy the weather is generally.
 WEATHER_MAP: dict[str, tuple[str, str]] = {
     "XOM": ("heating_degree_days", "refiner and heating-fuel demand rises with cold snaps"),
     "CVX": ("heating_degree_days", "refiner and heating-fuel demand rises with cold snaps"),
-    "NATGAS-exposed": ("heating_degree_days", "placeholder key, replace with real natgas-levered symbols as held"),
     "WMT": ("named_storms", "regional storm exposure disrupts retail foot traffic and supply chains"),
     "DE": ("drought_index", "agricultural equipment demand tracks planting-season conditions"),
     "CORN": ("precipitation", "row-crop yields track growing-season rainfall"),
@@ -204,10 +338,6 @@ WEATHER_MAP: dict[str, tuple[str, str]] = {
 
 def weather_items(symbols: Sequence[str], weather_by_variable: dict[str, dict],
                    *, source: str = "weather-mapping", asof: str = "") -> list[ResearchItem]:
-    """Build weather items ONLY for symbols in `WEATHER_MAP`, using values
-    already fetched into `weather_by_variable` (keyed by the same variable
-    names `WEATHER_MAP` uses). A symbol not in the map gets nothing -- no
-    general weather narrative reaches the brief through any other path."""
     out: list[ResearchItem] = []
     for sym in symbols:
         entry = WEATHER_MAP.get(sym.upper())
@@ -233,8 +363,12 @@ def weather_items(symbols: Sequence[str], weather_by_variable: dict[str, dict],
 
 def news_items_from_alpha_vantage(raw: Optional[dict], *, symbol: str,
                                    asof: str) -> list[ResearchItem]:
-    """`NEWS_SENTIMENT`, already fetched. `raw` is the parsed JSON response
-    (or `None`/empty on a failed call)."""
+    """`NEWS_SENTIMENT`, already fetched. Verified live, 4 September 2026,
+    against a real OXY response -- `raw["feed"]`, and each entry's `title`,
+    `overall_sentiment_score`, `overall_sentiment_label`, `time_published`,
+    all match exactly what this parser reads; no fix needed here. Note for
+    the caller: even a `limit=2` request has been observed to spill to a
+    file (77KB+) -- read it with `jq`, per `PROCEDURE_RATIONALE.md`."""
     if not raw or not raw.get("feed"):
         return [ResearchItem(channel="news", symbol=symbol,
                              mechanism="no company/market news with sentiment retrieved",
@@ -258,79 +392,99 @@ def news_items_from_alpha_vantage(raw: Optional[dict], *, symbol: str,
 def news_items_from_robinhood(raw: Optional[dict], *, symbol: str,
                                asof: str) -> list[ResearchItem]:
     """Robinhood `get_equity_news`, already fetched — the second,
-    independent source `sources_for`/`corroborated` need to make "two
-    independent corroborating sources" mechanical rather than a judgment
-    call."""
-    if not raw or not raw.get("data", {}).get("news"):
+    independent source `sources_for`/`corroborated` need. Real shape
+    (verified live, 4 September 2026, against a real OXY response):
+    `{"data": {"symbol":, "articles": [{"title":, "publisher":,
+    "published_at":, ...}], "next_cursor":}, "guide":}` — an earlier
+    version of this parser read `data.news`, a key that does not exist;
+    the real list is `data.articles`, and each entry also carries a
+    `publisher`, which is itself worth keeping since it is a second,
+    finer-grained attribution than "Robinhood" alone."""
+    articles = (raw or {}).get("data", {}).get("articles")
+    if not articles:
         return [ResearchItem(channel="news", symbol=symbol,
                              mechanism="no Robinhood news retrieved",
                              value=None, source="Robinhood get_equity_news",
                              asof=asof, quality="failed", detail="empty result")]
     out = []
-    for entry in raw["data"]["news"]:
+    for entry in articles:
         out.append(ResearchItem(
             channel="news", symbol=symbol,
             mechanism=f"independent news source for {symbol}",
-            value={"title": entry.get("title", "")},
+            value={"title": entry.get("title", ""), "publisher": entry.get("publisher")},
             source="Robinhood get_equity_news", asof=asof, quality="ok",
             detail=str(entry.get("published_at", ""))))
     return out
 
 
 # --------------------------------------------------------------------------
-# congressional and insider activity
+# congressional and insider activity -- both genuinely per-symbol
 # --------------------------------------------------------------------------
 
-def congress_trade_items(raw: Optional[list], politician_meta: Optional[dict], *,
-                          held_or_candidate: Sequence[str], asof: str) -> list[ResearchItem]:
-    """`CONGRESS_TRADES` joined against `POLITICIAN_METADATA`, filtered to
-    `held_or_candidate`. Both already fetched."""
-    watch = {s.upper() for s in held_or_candidate}
+def congress_trade_items(raw: Optional[dict], *, symbol: str,
+                          asof: str) -> list[ResearchItem]:
+    """`CONGRESS_TRADES` for ONE symbol. The endpoint requires a `symbol`
+    or a `bioguide_id` -- there is no bulk pull across a watch list, unlike
+    an earlier version of this parser assumed. Real shape (verified live,
+    4 September 2026, against 58 real OXY disclosures): `{"symbol":,
+    "bioguide_id":, "trades": [{"symbol":, "transaction_type":,
+    "amount_min":, "amount_max":, "party":, "state":, "politician_canonical":,
+    ...}]}`. `party`/`state`/`state_district` are already on each row --
+    some rows have them `null` (redacted upstream, not every discloser's
+    metadata is complete), but `POLITICIAN_METADATA` is not needed to fill
+    them in and is not called here."""
     if raw is None:
-        return [ResearchItem(channel="congress_trade", symbol=None,
-                             mechanism="CONGRESS_TRADES unavailable this run",
+        return [ResearchItem(channel="congress_trade", symbol=symbol,
+                             mechanism=f"CONGRESS_TRADES unavailable for {symbol}",
                              value=None, source="Alpha Vantage CONGRESS_TRADES",
                              asof=asof, quality="failed")]
+    if _is_preview_envelope(raw):
+        return [_preview_item("congress_trade", symbol, "Alpha Vantage CONGRESS_TRADES", raw, asof)]
+    _shape_guard(raw, ("trades",), "CONGRESS_TRADES")
     out = []
-    meta = politician_meta or {}
-    for row in raw:
-        sym = str(row.get("ticker", "")).upper()
-        if sym not in watch:
-            continue
-        politician = row.get("representative") or row.get("senator") or "unknown"
-        bio = meta.get(politician, {})
+    for row in raw["trades"]:
+        politician = row.get("politician_canonical") or row.get("politician") or "an unnamed member"
+        party = row.get("party") or "party unrecorded"
+        state = row.get("state") or "state unrecorded"
+        txn = row.get("transaction_type", "transaction")
         out.append(ResearchItem(
-            channel="congress_trade", symbol=sym,
-            mechanism=f"{politician} ({bio.get('party', 'party unknown')}, "
-                     f"{bio.get('committee', 'committee unknown')}) disclosed a trade in {sym}",
-            value={"politician": politician, "transaction": row.get("transaction"),
-                  "amount": row.get("amount"), "date": row.get("transaction_date")},
-            source="Alpha Vantage CONGRESS_TRADES + POLITICIAN_METADATA",
-            asof=asof, quality="ok"))
+            channel="congress_trade", symbol=symbol,
+            mechanism=f"{politician} ({party}, {state}) disclosed a {txn} in {symbol}",
+            value={"politician": politician, "transaction_type": txn,
+                  "amount_min": row.get("amount_min"), "amount_max": row.get("amount_max"),
+                  "transaction_date": row.get("transaction_date")},
+            source="Alpha Vantage CONGRESS_TRADES", asof=asof, quality="ok"))
     return out
 
 
-def insider_transaction_items(raw: Optional[list], *,
-                               held_or_candidate: Sequence[str],
+def insider_transaction_items(raw: Optional[dict], *, symbol: str,
                                asof: str) -> list[ResearchItem]:
-    """`INSIDER_TRANSACTIONS`, already fetched, filtered the same way as
-    congressional trades."""
-    watch = {s.upper() for s in held_or_candidate}
+    """`INSIDER_TRANSACTIONS` for one symbol. Real shape (verified live,
+    4 September 2026, against 2,794 real OXY rows): full data is
+    `{"data": [{"ticker":, "executive":, "executive_title":,
+    "acquisition_or_disposal": "A"|"D", "shares":, "share_price":,
+    "transaction_date":}]}` -- rows key on `ticker`, not `symbol` (this was
+    swapped with `CONGRESS_TRADES`'s field name in an earlier version of
+    this parser, which is why every row was filtered out in both
+    directions). Oversized responses return a preview envelope instead;
+    see `_preview_item`."""
     if raw is None:
-        return [ResearchItem(channel="insider_transaction", symbol=None,
-                             mechanism="INSIDER_TRANSACTIONS unavailable this run",
+        return [ResearchItem(channel="insider_transaction", symbol=symbol,
+                             mechanism=f"INSIDER_TRANSACTIONS unavailable for {symbol}",
                              value=None, source="Alpha Vantage INSIDER_TRANSACTIONS",
                              asof=asof, quality="failed")]
+    if _is_preview_envelope(raw):
+        return [_preview_item("insider_transaction", symbol, "Alpha Vantage INSIDER_TRANSACTIONS", raw, asof)]
+    _shape_guard(raw, ("data",), "INSIDER_TRANSACTIONS")
     out = []
-    for row in raw:
-        sym = str(row.get("symbol", "")).upper()
-        if sym not in watch:
+    for row in raw["data"]:
+        if str(row.get("ticker", "")).upper() != symbol.upper():
             continue
+        verb = "acquired" if row.get("acquisition_or_disposal") == "A" else "disposed of"
         out.append(ResearchItem(
-            channel="insider_transaction", symbol=sym,
-            mechanism=(f"{row.get('executive', 'insider')} "
-                      f"({row.get('executive_title', 'role unknown')}) "
-                      f"{row.get('acquisition_or_disposal', 'transacted')} shares"),
+            channel="insider_transaction", symbol=symbol,
+            mechanism=(f"{row.get('executive', 'an insider')} "
+                      f"({row.get('executive_title', 'role unrecorded')}) {verb} shares"),
             value={"shares": row.get("shares"), "share_price": row.get("share_price"),
                   "date": row.get("transaction_date")},
             source="Alpha Vantage INSIDER_TRANSACTIONS", asof=asof, quality="ok"))
@@ -341,18 +495,23 @@ def insider_transaction_items(raw: Optional[list], *,
 # scheduled events
 # --------------------------------------------------------------------------
 
-def earnings_calendar_items(raw: Optional[list], *,
+def earnings_calendar_items(raw: Optional[dict], *,
                              held_or_candidate: Sequence[str],
                              asof: str) -> list[ResearchItem]:
-    """`EARNINGS_CALENDAR`, filtered to held/candidate symbols."""
+    """`EARNINGS_CALENDAR` has no `datatype=json` option -- always
+    `{"result": "<CSV text>"}`, columns `symbol,name,reportDate,
+    fiscalDateEnding,estimate,currency,timeOfTheDay` (verified live,
+    4 September 2026, against both an empty and a populated real
+    response)."""
     watch = {s.upper() for s in held_or_candidate}
     if raw is None:
         return [ResearchItem(channel="earnings_calendar", symbol=None,
                              mechanism="EARNINGS_CALENDAR unavailable this run",
                              value=None, source="Alpha Vantage EARNINGS_CALENDAR",
                              asof=asof, quality="failed")]
+    rows = _parse_av_csv_result(raw, "EARNINGS_CALENDAR")
     out = []
-    for row in raw:
+    for row in rows:
         sym = str(row.get("symbol", "")).upper()
         if sym not in watch:
             continue
@@ -366,46 +525,41 @@ def earnings_calendar_items(raw: Optional[list], *,
 
 def earnings_estimate_items(raw: Optional[dict], *, symbol: str,
                              asof: str) -> list[ResearchItem]:
-    """`EARNINGS_ESTIMATES` for one symbol."""
+    """`EARNINGS_ESTIMATES` for one symbol. Real shape (verified live,
+    4 September 2026): `{"symbol":, "estimates": [...]}`."""
     if not raw:
         return [ResearchItem(channel="earnings_estimate", symbol=symbol,
                              mechanism="EARNINGS_ESTIMATES unavailable this run",
                              value=None, source="Alpha Vantage EARNINGS_ESTIMATES",
                              asof=asof, quality="failed")]
+    _shape_guard(raw, ("estimates",), "EARNINGS_ESTIMATES")
     return [ResearchItem(
         channel="earnings_estimate", symbol=symbol,
         mechanism=f"consensus estimate context for {symbol}'s next report",
-        value=raw, source="Alpha Vantage EARNINGS_ESTIMATES", asof=asof, quality="ok")]
+        value=raw["estimates"][:1], source="Alpha Vantage EARNINGS_ESTIMATES",
+        asof=asof, quality="ok")]
 
 
-def ipo_calendar_items(raw: Optional[list], *, sector_watch: Sequence[str],
-                        asof: str) -> list[ResearchItem]:
-    """`IPO_CALENDAR` — attaches only to a named sector already represented
-    among held/candidate names, per Rule 1; a new IPO with no such
-    connection is dropped, not narrated."""
-    if raw is None:
-        return [ResearchItem(channel="ipo_calendar", symbol=None,
-                             mechanism="IPO_CALENDAR unavailable this run",
-                             value=None, source="Alpha Vantage IPO_CALENDAR",
-                             asof=asof, quality="failed")]
-    watch = {s.lower() for s in sector_watch}
-    out = []
-    for row in raw:
-        sector = str(row.get("sector", "")).lower()
-        if sector not in watch:
-            continue
-        out.append(ResearchItem(
-            channel="ipo_calendar", symbol=None,
-            mechanism=f"upcoming IPO in the {sector} sector, already represented in the book",
-            value=row, source="Alpha Vantage IPO_CALENDAR", asof=asof, quality="ok"))
-    return out
+def ipo_calendar_items(raw: Optional[dict] = None, **_ignored) -> list[ResearchItem]:
+    """`IPO_CALENDAR`'s real schema (verified live, 4 September 2026) is
+    `symbol,name,ipoDate,priceRangeLow,priceRangeHigh,currency,exchange` --
+    there is no `sector` field. An earlier version of this parser filtered
+    on `row.get("sector")`, which never existed, so it always either
+    matched nothing or would have had to guess a sector from a company name,
+    which this module does not do. This feed cannot currently satisfy Rule 1
+    (attach to something) with the fields the API actually provides, so it
+    always returns an empty list -- kept rather than deleted in case a
+    future response adds a field that makes attachment possible."""
+    return []
 
 
 def earnings_call_transcript_items(raw: Optional[dict], *, symbol: str,
                                     horizon_reason: str,
                                     asof: str) -> list[ResearchItem]:
     """`EARNINGS_CALL_TRANSCRIPT` for the prior quarter — only called at
-    all for a held name reporting within an open thesis's horizon."""
+    all for a held name reporting within an open thesis's horizon. Not
+    independently re-verified live in the 4 September 2026 audit; treat the
+    shape assumption below as unconfirmed until it is."""
     if not raw:
         return [ResearchItem(channel="earnings_call_transcript", symbol=symbol,
                              mechanism=horizon_reason, value=None,
@@ -423,8 +577,8 @@ def earnings_call_transcript_items(raw: Optional[dict], *, symbol: str,
 
 def filing_items(sec_filing: Optional[dict], sec_facts: Optional[dict], *,
                   symbol: str, asof: str) -> list[ResearchItem]:
-    """Robinhood `get_sec_filing` + `get_sec_filing_facts`, for a held name
-    with a recent filing."""
+    """Robinhood `get_sec_filing` + `get_sec_filing_facts`. Not
+    independently re-verified live in the 4 September 2026 audit."""
     out = []
     if sec_filing:
         out.append(ResearchItem(
@@ -457,22 +611,33 @@ MACRO_CHANNELS = ("TREASURY_YIELD", "FEDERAL_FUNDS_RATE", "CPI", "INFLATION",
 
 
 def macro_item(channel: str, raw: Optional[dict], *, asof: str) -> ResearchItem:
-    """One of the nine macro series, already fetched. Macro items attach to
-    the named channel, not a symbol — `mechanism` says which held/candidate
-    exposure the channel actually bears on, supplied by the caller since
-    only the caller knows which names are in play this run."""
+    """One of the nine macro series. Verified live, 4 September 2026,
+    against `CPI` (the `datatype=csv` default, `{"result": "<CSV text>"}`,
+    including a real malformed row) and against the `datatype=json`
+    alternative on `WTI` (see `_rows_from_series_response`); the other
+    eight macro channels are assumed to share this same response family
+    (same provider, same documented `datatype` toggle) but have not each
+    been individually re-verified live."""
     if channel not in MACRO_CHANNELS:
         raise ValueError(f"unrecognised macro channel: {channel!r}")
-    if not raw or not raw.get("data"):
+    if not raw:
         return ResearchItem(channel=f"macro:{channel}", symbol=None,
                             mechanism=f"{channel} unavailable this run",
                             value=None, source=f"Alpha Vantage {channel}",
                             asof=asof, quality="failed")
-    latest = raw["data"][0] if isinstance(raw["data"], list) else raw["data"]
+    rows = _rows_from_series_response(raw, channel)
+    if not rows:
+        return ResearchItem(channel=f"macro:{channel}", symbol=None,
+                            mechanism=f"{channel} returned no data points",
+                            value=None, source=f"Alpha Vantage {channel}",
+                            asof=asof, quality="failed")
+    latest = rows[0]
+    quality = _numeric_quality(latest.get("value"))
     return ResearchItem(
         channel=f"macro:{channel}", symbol=None,
         mechanism=f"latest {channel} print, standing macro backdrop",
-        value=latest, source=f"Alpha Vantage {channel}", asof=asof, quality="ok")
+        value=latest, source=f"Alpha Vantage {channel}", asof=asof, quality=quality,
+        detail="" if quality == "ok" else f"latest reported value is {latest.get('value')!r}, not a usable number")
 
 
 # --------------------------------------------------------------------------
@@ -483,9 +648,6 @@ COMMODITY_CHANNELS = ("WTI", "BRENT", "NATURAL_GAS", "COPPER", "ALUMINUM",
                       "WHEAT", "CORN", "COFFEE", "SUGAR", "COTTON",
                       "ALL_COMMODITIES", "GOLD_SILVER_SPOT")
 
-# symbol -> commodity channel(s) it has real exposure to. Same data-as-code
-# pattern as SECTOR_MAP and WEATHER_MAP: a commodity feed is only fetched
-# and attached for a symbol actually listed here.
 COMMODITY_EXPOSURE: dict[str, tuple[str, ...]] = {
     "XOM": ("WTI", "BRENT", "NATURAL_GAS"), "CVX": ("WTI", "BRENT", "NATURAL_GAS"),
     "COP": ("WTI", "BRENT"), "SLB": ("WTI", "BRENT"), "HAL": ("WTI", "BRENT"),
@@ -499,27 +661,48 @@ COMMODITY_EXPOSURE: dict[str, tuple[str, ...]] = {
 def commodity_items(symbols: Sequence[str], raw_by_channel: dict[str, Optional[dict]],
                      *, asof: str) -> list[ResearchItem]:
     """One item per (symbol, channel) pair actually exposed per
-    `COMMODITY_EXPOSURE`, using already-fetched data keyed by channel name.
-    A symbol with no listed exposure gets nothing — Rule 1 again."""
+    `COMMODITY_EXPOSURE`. Shares `WTI`'s live-verified response family with
+    `macro_item` (see `_rows_from_series_response`); the other ten
+    commodity channels are assumed to share it but have not each been
+    individually re-verified live."""
     out = []
     for sym in symbols:
         for channel in COMMODITY_EXPOSURE.get(sym.upper(), ()):
             if channel not in COMMODITY_CHANNELS:
                 raise ValueError(f"unrecognised commodity channel: {channel!r}")
             raw = raw_by_channel.get(channel)
-            if not raw or not raw.get("data"):
+            if not raw:
                 out.append(ResearchItem(
                     channel=f"commodity:{channel}", symbol=sym,
                     mechanism=f"{sym} has {channel} exposure but the feed was unavailable",
                     value=None, source=f"Alpha Vantage {channel}",
                     asof=asof, quality="failed"))
                 continue
-            latest = raw["data"][0] if isinstance(raw["data"], list) else raw["data"]
+            try:
+                rows = _rows_from_series_response(raw, channel)
+            except ResearchShapeError as e:
+                # A shape drift in one commodity channel must not take
+                # down every other symbol/channel pair in this call --
+                # they all share one `timed()` invocation in gather().
+                out.append(ResearchItem(
+                    channel=f"commodity:{channel}", symbol=sym,
+                    mechanism="", value=None, source=f"Alpha Vantage {channel}",
+                    asof=asof, quality="failed", detail=str(e)))
+                continue
+            if not rows:
+                out.append(ResearchItem(
+                    channel=f"commodity:{channel}", symbol=sym,
+                    mechanism=f"{sym} has {channel} exposure but no data points were returned",
+                    value=None, source=f"Alpha Vantage {channel}",
+                    asof=asof, quality="failed"))
+                continue
+            latest = rows[0]
+            quality = _numeric_quality(latest.get("value"))
             out.append(ResearchItem(
                 channel=f"commodity:{channel}", symbol=sym,
                 mechanism=f"{sym} has direct {channel} price exposure",
-                value=latest, source=f"Alpha Vantage {channel}",
-                asof=asof, quality="ok"))
+                value=latest, source=f"Alpha Vantage {channel}", asof=asof, quality=quality,
+                detail="" if quality == "ok" else f"latest reported value is {latest.get('value')!r}, not a usable number"))
     return out
 
 
@@ -529,32 +712,31 @@ def commodity_items(symbols: Sequence[str], raw_by_channel: dict[str, Optional[d
 
 def put_call_items(realtime: Optional[dict], historical: Optional[dict], *,
                     symbol: str, asof: str) -> list[ResearchItem]:
-    """`REALTIME_PUT_CALL_RATIO` against `HISTORICAL_PUT_CALL_RATIO` for
-    context — the historical series is context only, never treated as a
-    signal in its own right."""
-    out = []
-    if realtime and realtime.get("ratio") is not None:
-        out.append(ResearchItem(
-            channel="positioning:put_call", symbol=symbol,
-            mechanism=f"current put/call ratio for {symbol}",
-            value=realtime.get("ratio"),
-            source="Alpha Vantage REALTIME_PUT_CALL_RATIO",
-            asof=asof, quality="ok",
-            detail=(f"historical context: {historical.get('ratio')}"
-                   if historical and historical.get("ratio") is not None
-                   else "no historical context available")))
-    else:
-        out.append(ResearchItem(
-            channel="positioning:put_call", symbol=symbol,
-            mechanism=f"put/call positioning for {symbol} unavailable this run",
-            value=None, source="Alpha Vantage REALTIME_PUT_CALL_RATIO",
-            asof=asof, quality="failed"))
-    return out
+    """Real key (verified live, 4 September 2026, against a real OXY
+    response) is `put_call_ratio_full_chain` -- a string. An earlier
+    version of this parser read `ratio`, a key that does not exist in the
+    response at all, so this always reported `failed` regardless of
+    whether the feed actually succeeded."""
+    if not realtime or "put_call_ratio_full_chain" not in realtime:
+        return [ResearchItem(channel="positioning:put_call", symbol=symbol,
+                             mechanism=f"put/call positioning for {symbol} unavailable this run",
+                             value=None, source="Alpha Vantage REALTIME_PUT_CALL_RATIO",
+                             asof=asof, quality="failed")]
+    hist_ratio = (historical or {}).get("put_call_ratio_full_chain")
+    return [ResearchItem(
+        channel="positioning:put_call", symbol=symbol,
+        mechanism=f"current put/call ratio for {symbol}",
+        value=realtime.get("put_call_ratio_full_chain"),
+        source="Alpha Vantage REALTIME_PUT_CALL_RATIO", asof=asof, quality="ok",
+        detail=(f"historical context: {hist_ratio}" if hist_ratio is not None
+               else "no historical context available"))]
 
 
 def top_movers_items(raw: Optional[dict], *, asof: str) -> list[ResearchItem]:
-    """`TOP_GAINERS_LOSERS` — attaches to the broad-market channel; also
-    feeds `candidates()`'s `top_movers` argument upstream of this call."""
+    """`TOP_GAINERS_LOSERS`, verified live 4 September 2026 — real shape
+    matches what this parser already stored wholesale; see
+    `top_movers_symbols()` for the flattened ticker list `candidates()`
+    consumes."""
     if not raw:
         return [ResearchItem(channel="positioning:dispersion", symbol=None,
                              mechanism="TOP_GAINERS_LOSERS unavailable this run",
@@ -567,9 +749,9 @@ def top_movers_items(raw: Optional[dict], *, asof: str) -> list[ResearchItem]:
 
 
 def market_status_item(raw: Optional[dict], *, asof: str) -> ResearchItem:
-    """`MARKET_STATUS` — session state, already required by
-    `DAILY_PROCEDURE.md` Stage 0 step 6; recorded here too so it is part of
-    the same timed, graded bundle rather than a separate untimed call."""
+    """`MARKET_STATUS`, verified live 4 September 2026 — real shape
+    (`{"endpoint":, "markets": [...]}`) matches what this parser already
+    stored wholesale."""
     if not raw:
         return ResearchItem(channel="market_status", symbol=None,
                             mechanism="MARKET_STATUS unavailable this run",
@@ -585,88 +767,134 @@ def market_status_item(raw: Optional[dict], *, asof: str) -> ResearchItem:
 # orchestration
 # --------------------------------------------------------------------------
 
+def _row_count(raw: Any) -> int:
+    """Best-effort "rows seen" for coverage tracking, across the shapes
+    this module's feeds actually return."""
+    if raw is None:
+        return 0
+    if isinstance(raw, dict):
+        for key in ("trades", "data", "estimates", "feed"):
+            if key in raw and isinstance(raw[key], list):
+                return len(raw[key])
+        # Robinhood get_equity_news: {"data": {"articles": [...]}} -- "data"
+        # is a dict here, not a list, so the generic check above misses it.
+        articles = raw.get("data", {})
+        if isinstance(articles, dict) and isinstance(articles.get("articles"), list):
+            return len(articles["articles"])
+        if "result" in raw and isinstance(raw["result"], str):
+            return max(len(raw["result"].strip().splitlines()) - 1, 0)
+        return 1 if raw else 0
+    if isinstance(raw, list):
+        return len(raw)
+    return 0
+
+
 def gather(raw_feeds: dict[str, Any], *, held_or_candidate: Sequence[str],
            asof: Optional[str] = None,
            timer: Callable[[], float] = time.monotonic) -> ResearchBundle:
     """Assemble a `ResearchBundle` from already-fetched raw responses.
 
-    `raw_feeds` keys (all optional; a missing key is treated as "not
-    fetched this run" and produces no items for that feed rather than an
-    error — the caller decides which feeds to fetch based on what is
-    actually held or candidate):
+    `raw_feeds` keys (all optional; a missing key produces no items for
+    that feed and is recorded in `skipped` rather than as an error):
 
     - `"news_av"`, `"news_rh"`: `{symbol: raw_response}`
-    - `"congress_trades"`, `"politician_metadata"`, `"insider_transactions"`
-    - `"earnings_calendar"`, `"earnings_estimates"` (`{symbol: raw}`),
-      `"ipo_calendar"`
+    - `"congress_trades"`, `"insider_transactions"`: `{symbol: raw_response}`
+      -- both endpoints require a symbol per call, there is no bulk pull
+    - `"earnings_calendar"` (one bulk response), `"earnings_estimates"`
+      (`{symbol: raw}`), `"ipo_calendar"` (always produces no items — see
+      `ipo_calendar_items`)
     - `"earnings_call_transcripts"`: `{symbol: (raw, horizon_reason)}`
     - `"sec_filings"`, `"sec_filing_facts"`: `{symbol: raw}`
-    - `"macro"`: `{channel: raw}` for any of `MACRO_CHANNELS`
-    - `"commodities"`: `{channel: raw}` for any of `COMMODITY_CHANNELS`
+    - `"macro"`: `{channel: raw}` for any of `MACRO_CHANNELS`, requested
+      with `datatype=json`
+    - `"commodities"`: `{channel: raw}` for any of `COMMODITY_CHANNELS`,
+      requested with `datatype=json`
     - `"weather"`: `{variable: raw}`
     - `"put_call_realtime"`, `"put_call_historical"`: `{symbol: raw}`
     - `"top_movers"`, `"market_status"`
 
-    Every feed's wall-clock cost is recorded on `timings_ms`, keyed by feed
-    name, whether or not it was actually present in `raw_feeds` (a feed
-    that was skipped entirely costs 0ms and is recorded in `skipped`, which
-    is itself information the performance review can use).
+    Every feed's wall-clock cost is recorded on `timings_ms`; rows-seen vs
+    items-produced is recorded on `coverage` so a field-name mismatch
+    cannot masquerade as a quiet day (see `ResearchBundle.coverage_issues`).
+    A `ResearchShapeError` from any single feed is caught here and turned
+    into one `quality="failed"` item naming the mismatch, rather than
+    aborting the rest of gathering.
     """
     asof = asof or datetime.utcnow().isoformat()
     bundle = ResearchBundle(asof=asof)
     symbols = list(dict.fromkeys(s.upper() for s in held_or_candidate))
 
-    def timed(name: str, fn):
+    def timed(name: str, fn, *, rows_in: int = None, channel: str = None):
+        """`channel` names the ResearchItem.channel a shape-error fallback
+        item gets, and MUST match the channel the feed's real parser uses
+        (see the `channel="..."` literals throughout this module) -- not
+        just derived from `name`, which is a feed/symbol key, not an item
+        channel. A mismatch here is exactly the kind of silent-mismatch
+        bug this module exists to catch: a caller filtering
+        `bundle.for_channel("congress_trade")` must find a shape failure
+        for congress trades, not lose it under a "congress_trades" that
+        no real item ever uses."""
         t0 = timer()
         try:
             result = fn()
+        except ResearchShapeError as e:
+            result = [ResearchItem(channel=channel or name.split(":")[0], symbol=None,
+                                   mechanism="", value=None, source=name,
+                                   asof=asof, quality="failed", detail=str(e))]
         finally:
             bundle.timings_ms[name] = int((timer() - t0) * 1000)
-        return result
+        items = result if isinstance(result, list) else [result]
+        n_in = rows_in if rows_in is not None else len(items)
+        bundle.record_coverage(name, n_in, sum(1 for i in items if i.usable))
+        return items
 
     news_av = raw_feeds.get("news_av", {})
     news_rh = raw_feeds.get("news_rh", {})
     for sym in symbols:
         if sym in news_av:
             bundle.items.extend(timed(f"news_av:{sym}",
-                lambda sym=sym: news_items_from_alpha_vantage(news_av.get(sym), symbol=sym, asof=asof)))
+                lambda sym=sym: news_items_from_alpha_vantage(news_av.get(sym), symbol=sym, asof=asof),
+                rows_in=_row_count(news_av.get(sym)), channel="news"))
         else:
             bundle.skipped.append(f"news_av:{sym} — not in raw_feeds")
         if sym in news_rh:
             bundle.items.extend(timed(f"news_rh:{sym}",
-                lambda sym=sym: news_items_from_robinhood(news_rh.get(sym), symbol=sym, asof=asof)))
+                lambda sym=sym: news_items_from_robinhood(news_rh.get(sym), symbol=sym, asof=asof),
+                rows_in=_row_count(news_rh.get(sym)), channel="news"))
         else:
             bundle.skipped.append(f"news_rh:{sym} — not in raw_feeds")
 
-    if "congress_trades" in raw_feeds:
-        bundle.items.extend(timed("congress_trades", lambda: congress_trade_items(
-            raw_feeds.get("congress_trades"), raw_feeds.get("politician_metadata"),
-            held_or_candidate=symbols, asof=asof)))
-    else:
+    congress = raw_feeds.get("congress_trades", {})
+    for sym, raw in congress.items():
+        bundle.items.extend(timed(f"congress_trades:{sym}",
+            lambda raw=raw, sym=sym: congress_trade_items(raw, symbol=sym, asof=asof),
+            rows_in=_row_count(raw), channel="congress_trade"))
+    if not congress:
         bundle.skipped.append("congress_trades — not in raw_feeds")
 
-    if "insider_transactions" in raw_feeds:
-        bundle.items.extend(timed("insider_transactions", lambda: insider_transaction_items(
-            raw_feeds.get("insider_transactions"), held_or_candidate=symbols, asof=asof)))
-    else:
+    insiders = raw_feeds.get("insider_transactions", {})
+    for sym, raw in insiders.items():
+        bundle.items.extend(timed(f"insider_transactions:{sym}",
+            lambda raw=raw, sym=sym: insider_transaction_items(raw, symbol=sym, asof=asof),
+            rows_in=_row_count(raw), channel="insider_transaction"))
+    if not insiders:
         bundle.skipped.append("insider_transactions — not in raw_feeds")
 
     if "earnings_calendar" in raw_feeds:
+        raw = raw_feeds.get("earnings_calendar")
         bundle.items.extend(timed("earnings_calendar", lambda: earnings_calendar_items(
-            raw_feeds.get("earnings_calendar"), held_or_candidate=symbols, asof=asof)))
+            raw, held_or_candidate=symbols, asof=asof), rows_in=_row_count(raw)))
     else:
         bundle.skipped.append("earnings_calendar — not in raw_feeds")
 
     for sym, raw in raw_feeds.get("earnings_estimates", {}).items():
         bundle.items.extend(timed(f"earnings_estimates:{sym}",
-            lambda raw=raw, sym=sym: earnings_estimate_items(raw, symbol=sym, asof=asof)))
+            lambda raw=raw, sym=sym: earnings_estimate_items(raw, symbol=sym, asof=asof),
+            channel="earnings_estimate"))
 
     if "ipo_calendar" in raw_feeds:
-        held_sectors = [SECTOR_MAP[s] for s in symbols if s in SECTOR_MAP]
-        bundle.items.extend(timed("ipo_calendar", lambda: ipo_calendar_items(
-            raw_feeds.get("ipo_calendar"), sector_watch=held_sectors, asof=asof)))
-    else:
-        bundle.skipped.append("ipo_calendar — not in raw_feeds")
+        bundle.items.extend(timed("ipo_calendar", lambda: ipo_calendar_items(raw_feeds.get("ipo_calendar"))))
+    bundle.skipped.append("ipo_calendar — always produces no items (no sector field in the real response, see ipo_calendar_items)")
 
     for sym, pair in raw_feeds.get("earnings_call_transcripts", {}).items():
         raw, reason = pair
@@ -681,8 +909,9 @@ def gather(raw_feeds: dict[str, Any], *, held_or_candidate: Sequence[str],
             lambda sym=sym: filing_items(sec_filings.get(sym), sec_facts.get(sym), symbol=sym, asof=asof)))
 
     for channel, raw in raw_feeds.get("macro", {}).items():
-        bundle.items.append(timed(f"macro:{channel}",
-            lambda channel=channel, raw=raw: macro_item(channel, raw, asof=asof)))
+        bundle.items.extend(timed(f"macro:{channel}",
+            lambda channel=channel, raw=raw: [macro_item(channel, raw, asof=asof)],
+            rows_in=_row_count(raw)))
 
     commodity_raw = raw_feeds.get("commodities", {})
     if commodity_raw:
@@ -704,11 +933,12 @@ def gather(raw_feeds: dict[str, Any], *, held_or_candidate: Sequence[str],
     pc_hist = raw_feeds.get("put_call_historical", {})
     for sym in set(pc_rt) | set(pc_hist):
         bundle.items.extend(timed(f"put_call:{sym}",
-            lambda sym=sym: put_call_items(pc_rt.get(sym), pc_hist.get(sym), symbol=sym, asof=asof)))
+            lambda sym=sym: put_call_items(pc_rt.get(sym), pc_hist.get(sym), symbol=sym, asof=asof),
+            channel="positioning:put_call"))
 
     if "top_movers" in raw_feeds:
         bundle.items.extend(timed("top_movers", lambda: top_movers_items(raw_feeds.get("top_movers"), asof=asof)))
     if "market_status" in raw_feeds:
-        bundle.items.append(timed("market_status", lambda: market_status_item(raw_feeds.get("market_status"), asof=asof)))
+        bundle.items.extend(timed("market_status", lambda: [market_status_item(raw_feeds.get("market_status"), asof=asof)]))
 
     return bundle

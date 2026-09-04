@@ -1,16 +1,1 @@
-{
-  "feed": [
-    {
-      "title": "OPEC+ output cut expected to lift oil producers",
-      "time_published": "20260903T113000",
-      "overall_sentiment_score": 0.31,
-      "overall_sentiment_label": "Somewhat-Bullish"
-    },
-    {
-      "title": "Iran ceasefire talks stall, energy premium persists",
-      "time_published": "20260903T091500",
-      "overall_sentiment_score": 0.18,
-      "overall_sentiment_label": "Somewhat-Bullish"
-    }
-  ]
-}
+{"feed":[{"title":"Why Is Occidental Petroleum (NYSE:OXY) Lifting Its Payout and Trimming Debt After a Strong Quarter?","time_published":"20260904T070807","overall_sentiment_score":0.048834,"overall_sentiment_label":"Neutral"},{"title":"Why Is ConocoPhillips (NYSE:COP) Trading At Record Levels As Executive Transition Takes Effect?","time_published":"20260904T065408","overall_sentiment_score":0.339401,"overall_sentiment_label":"Somewhat-Bullish"}]}

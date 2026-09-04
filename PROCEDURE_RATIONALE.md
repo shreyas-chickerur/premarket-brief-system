@@ -123,6 +123,30 @@ characters uncompacted and will blow the tool output budget.
 `"thin"`, because a number this system itself cannot verify must not
 influence sizing or the gate.
 
+**Why `research.py` calls `CONGRESS_TRADES`/`INSIDER_TRANSACTIONS` per
+symbol, and why `INSIDER_TRANSACTIONS` needs `return_full_data=true`.**
+`research.py`'s first version was written against fixtures the author
+hand-wrote, not responses either API had actually returned, and a live
+check on 4 September 2026 found both endpoints do not support a bulk
+multi-symbol pull the way the first version assumed — one call per symbol,
+full stop (`HANDOFF.md` section 11, "the fixtures were fabricated"). The
+same live check hit `INSIDER_TRANSACTIONS`'s real preview truncation on the
+very first call for a name with a long transaction history (OXY: 27,944
+lines, 248,328 tokens) — `return_full_data=true` converts that into a
+genuine harness file-spill instead of Alpha Vantage's own lossy
+`sample_data` sample, which is why Stage 1 says to read it back with
+`jq`/`json.load`, the same convention already established for oversized
+`get_equity_orders` pages, rather than treating the preview as the answer.
+
+**Why `bundle.coverage_issues()` gets checked after every gather.** The
+same live check showed `ResearchBundle.skipped` alone cannot tell "feed not
+fetched" apart from "feed fetched, parsed to zero items because a field
+name was wrong" — OXY had 58 real congressional trades that a
+field-name mismatch would have silently rendered as nothing, with every
+check staying green. `coverage_issues()` (rows seen, zero items produced)
+is the check that catches that class of bug instead of a human catching it
+by accident.
+
 ## Stage 2 — why the concentration recalibration
 
 `correlation_concentration` reports both a shrunk and an unshrunk view and

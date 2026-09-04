@@ -1,7 +1,1 @@
-{
-  "data": {
-    "news": [
-      {"title": "Occidental Petroleum shares rise premarket on OPEC+ signal", "published_at": "2026-09-03T11:10:00Z"}
-    ]
-  }
-}
+{"data":{"symbol":"OXY","articles":[{"id":"f5e7e474-a7d9-4e3c-805b-5d164d9b67d2","title":"This Occidental Petroleum Analyst Begins Coverage On A Bullish Note; Here Are Top 5 Initiations For Thursday","publisher":"Benzinga","preview_text":"Analysts initiated coverage: Neutral COP; Buy TLSA ($7), OXY ($73), NRSN ($8); Sell SM ($35).","published_at":"2026-09-03T08:10:06-04:00","source_type":"benzinga"},{"id":"c667b0c3-88e8-4598-99fb-c30a829474f7","title":"Seaport Global Initiates Occidental Petroleum at Buy With $73 Price Target","publisher":"MT Newswires","published_at":"2026-09-03T05:39:00-04:00","source_type":"mt_newswires"}],"next_cursor":"MjAyNi0wOS0wM1QwNTozOTowMC0wNDowMHxjNjY3YjBjMy04OGU4LTQ1OTgtOTlmYi1jMzBhODI5NDc0Zjc="},"guide":"Articles are newest-first."}

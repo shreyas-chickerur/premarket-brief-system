@@ -1,7 +1,13 @@
-"""Tests for research.py — all against recorded fixtures, never the live API.
+"""Tests for research.py — every parser against a recorded REAL response.
 
-research.py is pure functions over already-fetched data, the same boundary
-quantcore.py draws against DataFrames, which is what makes this possible.
+4 September 2026: the first version of this module shipped with fixtures
+the author wrote by hand, not responses the live API actually returned.
+A live check against three feeds found two parsers reading field names
+that do not exist; every fixture in fixtures/research/ was replaced with
+an actual recorded response (or a genuine truncated slice of one) before
+this test file was rewritten against them. Never hand-write a fixture here
+again -- if a new feed needs a test, call it live once, save what comes
+back, and write the parser against that.
 """
 
 import json
@@ -18,7 +24,7 @@ def _load(name):
     return json.loads((FIXTURES / name).read_text())
 
 
-ASOF = "2026-09-03T11:00:00Z"
+ASOF = "2026-09-04T13:00:00Z"
 
 
 # --------------------------------------------------------------- ResearchItem
@@ -36,13 +42,9 @@ def test_item_requires_a_channel():
 
 
 def test_item_requires_a_mechanism_unless_failed():
-    """Rule 1: everything must attach to something. A failed item is the one
-    exception -- it has nothing to attach because the feed produced
-    nothing, and that is itself reportable."""
     with pytest.raises(ValueError, match="attach"):
         RS.ResearchItem(channel="news", symbol="OXY", mechanism="",
                         value=1, source="s", asof=ASOF, quality="ok")
-    # does not raise:
     RS.ResearchItem(channel="news", symbol="OXY", mechanism="",
                     value=None, source="s", asof=ASOF, quality="failed")
 
@@ -97,6 +99,35 @@ def test_corroborated_does_not_count_two_items_from_the_same_source():
     assert not _bundle_with(a1, a2).corroborated("OXY")
 
 
+def test_coverage_issues_flags_rows_seen_but_zero_items_produced():
+    """This is the exact defect the 4 September audit found: a feed that
+    was fetched and parsed but produced nothing distinguishable from a
+    genuinely quiet day."""
+    bundle = RS.ResearchBundle(asof=ASOF)
+    bundle.record_coverage("congress_trades:OXY", rows_in=58, items_out=0)
+    bundle.record_coverage("insider_transactions:OXY", rows_in=12, items_out=12)
+    assert bundle.coverage_issues() == ["congress_trades:OXY"]
+
+
+def test_coverage_issues_empty_when_zero_rows_and_zero_items():
+    """A feed with nothing to report is not a coverage issue -- only rows
+    seen with nothing produced is."""
+    bundle = RS.ResearchBundle(asof=ASOF)
+    bundle.record_coverage("earnings_calendar", rows_in=0, items_out=0)
+    assert bundle.coverage_issues() == []
+
+
+# --------------------------------------------------------------- shape guard
+
+def test_shape_guard_raises_on_missing_key():
+    with pytest.raises(RS.ResearchShapeError, match="missing expected key"):
+        RS._shape_guard({"foo": 1}, ("bar",), "TESTFEED")
+
+
+def test_shape_guard_passes_when_key_present():
+    RS._shape_guard({"bar": 1}, ("bar",), "TESTFEED")  # does not raise
+
+
 # --------------------------------------------------------------- candidates
 
 def test_candidates_includes_held_symbols():
@@ -111,7 +142,7 @@ def test_candidates_includes_watchlist_and_top_movers():
 
 def test_candidates_adds_sector_adjacent_names():
     out = RS.candidates(held_symbols=["XOM"])
-    assert "CVX" in out, "CVX shares XOM's energy sector and should be pulled in as adjacent"
+    assert "CVX" in out
 
 
 def test_candidates_is_deduplicated_and_sorted():
@@ -120,12 +151,23 @@ def test_candidates_is_deduplicated_and_sorted():
     assert out == sorted(out)
 
 
+def test_top_movers_symbols_flattens_the_real_response():
+    raw = _load("top_gainers_losers.json")
+    out = RS.top_movers_symbols(raw)
+    assert "CHPT" in out and "NCT" in out and "NVDA" in out
+    assert all(s == s.upper() for s in out)
+
+
+def test_top_movers_symbols_empty_for_no_response():
+    assert RS.top_movers_symbols(None) == []
+
+
 # --------------------------------------------------------------- weather
 
 def test_weather_items_only_for_mapped_symbols():
     out = RS.weather_items(["XOM", "AAPL"], {"heating_degree_days": {"value": 12}}, asof=ASOF)
     symbols = {i.symbol for i in out}
-    assert symbols == {"XOM"}, "AAPL has no weather mapping and must get no weather item at all"
+    assert symbols == {"XOM"}
 
 
 def test_weather_item_fails_loudly_when_variable_missing_from_payload():
@@ -137,14 +179,15 @@ def test_weather_items_empty_for_no_mapped_symbols():
     assert RS.weather_items(["AAPL", "MSFT"], {}, asof=ASOF) == []
 
 
-# --------------------------------------------------------------- news
+# --------------------------------------------------------------- news (real fixtures)
 
-def test_news_from_alpha_vantage_parses_the_recorded_fixture():
+def test_news_from_alpha_vantage_parses_the_real_recorded_response():
     raw = _load("news_sentiment_oxy.json")
     items = RS.news_items_from_alpha_vantage(raw, symbol="OXY", asof=ASOF)
     assert len(items) == 2
     assert all(i.symbol == "OXY" and i.quality == "ok" for i in items)
     assert items[0].source == "Alpha Vantage NEWS_SENTIMENT"
+    assert "Occidental" in items[0].value["title"]
 
 
 def test_news_from_alpha_vantage_fails_on_empty_feed():
@@ -157,77 +200,201 @@ def test_news_from_alpha_vantage_fails_on_none():
     assert items[0].quality == "failed"
 
 
-def test_news_from_robinhood_parses_the_recorded_fixture():
+def test_news_from_robinhood_parses_the_real_recorded_response():
+    """4 September 2026: the real key is data.articles, not data.news --
+    the original parser read the wrong key and would have reported
+    'failed' on every real Robinhood response, including this one."""
     raw = _load("robinhood_news_oxy.json")
     items = RS.news_items_from_robinhood(raw, symbol="OXY", asof=ASOF)
-    assert len(items) == 1 and items[0].source == "Robinhood get_equity_news"
+    assert len(items) == 2
+    assert items[0].quality == "ok"
+    assert items[0].value["publisher"] == "Benzinga"
+
+
+def test_news_from_robinhood_fails_on_the_old_wrong_key_shape():
+    """Guards the exact regression: a response shaped like the one this
+    parser used to assume (data.news) must not be silently accepted."""
+    items = RS.news_items_from_robinhood({"data": {"news": [{"title": "x"}]}}, symbol="OXY", asof=ASOF)
+    assert items[0].quality == "failed"
 
 
 def test_two_news_sources_together_satisfy_corroboration():
-    """This is the mechanical version of the five-condition gate's "two
-    independent corroborating sources" requirement."""
     av = RS.news_items_from_alpha_vantage(_load("news_sentiment_oxy.json"), symbol="OXY", asof=ASOF)
     rh = RS.news_items_from_robinhood(_load("robinhood_news_oxy.json"), symbol="OXY", asof=ASOF)
     bundle = _bundle_with(*av, *rh)
     assert bundle.corroborated("OXY")
 
 
-# --------------------------------------------------------------- congress / insider
+# --------------------------------------------------------------- congress (real, per-symbol)
 
-def test_congress_trade_items_filters_to_watched_symbols():
-    raw = _load("congress_trades.json")
-    meta = _load("politician_metadata.json")
-    items = RS.congress_trade_items(raw, meta, held_or_candidate=["OXY", "NVDA"], asof=ASOF)
-    symbols = {i.symbol for i in items}
-    assert symbols == {"OXY", "NVDA"}, "ZZZZ is not watched and must be filtered out"
+def test_congress_trade_items_parses_the_real_recorded_response():
+    """4 September 2026: CONGRESS_TRADES is a dict with a `trades` list,
+    not a bulk list across symbols; rows key on `symbol`, `transaction_type`,
+    `amount_min`/`amount_max` -- an earlier version of this parser read
+    `ticker`, `transaction`, and `amount`, none of which exist, so every
+    row was filtered out."""
+    raw = _load("congress_trades_oxy.json")
+    items = RS.congress_trade_items(raw, symbol="OXY", asof=ASOF)
+    assert len(items) == 4
+    assert all(i.symbol == "OXY" and i.quality == "ok" for i in items)
+    assert "Gilbert" in items[0].mechanism or "Cisneros" in items[0].mechanism
 
 
-def test_congress_trade_item_names_the_politician_and_committee():
-    raw = _load("congress_trades.json")
-    meta = _load("politician_metadata.json")
-    items = RS.congress_trade_items(raw, meta, held_or_candidate=["OXY"], asof=ASOF)
-    assert "Jane Example" in items[0].mechanism and "Energy and Commerce" in items[0].mechanism
+def test_congress_trade_items_uses_party_and_state_already_on_the_row():
+    """No POLITICIAN_METADATA join is needed for these fields -- they are
+    already present on each trade row."""
+    raw = _load("congress_trades_oxy.json")
+    items = RS.congress_trade_items(raw, symbol="OXY", asof=ASOF)
+    assert "D" in items[0].mechanism or "R" in items[0].mechanism
+    assert "CA" in items[0].mechanism or any(
+        s in items[0].mechanism for s in ("CA", "DE", "PA"))
+
+
+def test_congress_trade_items_handles_a_row_with_null_politician_metadata():
+    """One real row (Rob Bresnahan) has null bioguide_id/party/state --
+    must not crash, and must fall back to a readable "unrecorded" label."""
+    raw = _load("congress_trades_oxy.json")
+    items = RS.congress_trade_items(raw, symbol="OXY", asof=ASOF)
+    bresnahan = [i for i in items if "Bresnahan" in i.mechanism]
+    assert bresnahan and "unrecorded" in bresnahan[0].mechanism
 
 
 def test_congress_trades_fails_loudly_when_feed_unavailable():
-    items = RS.congress_trade_items(None, None, held_or_candidate=["OXY"], asof=ASOF)
-    assert len(items) == 1 and items[0].quality == "failed" and items[0].symbol is None
+    items = RS.congress_trade_items(None, symbol="OXY", asof=ASOF)
+    assert len(items) == 1 and items[0].quality == "failed"
 
 
-def test_insider_transaction_items_filters_to_watched_symbols():
-    raw = _load("insider_transactions.json")
-    items = RS.insider_transaction_items(raw, held_or_candidate=["OXY"], asof=ASOF)
-    assert len(items) == 1 and items[0].symbol == "OXY"
-    assert "Chief Financial Officer" in items[0].mechanism
+def test_congress_trades_handles_a_preview_envelope():
+    """Modeled on the real envelope shape confirmed live via
+    INSIDER_TRANSACTIONS -- CONGRESS_TRADES never actually returned a
+    preview for OXY (58 rows is well under the token limit), so this
+    exercises the same code path with a constructed envelope."""
+    fake_preview = {"preview": True, "total_lines": 500, "full_data_tokens": 40000,
+                    "data_url": "https://example.test/x.json", "message": "truncated"}
+    items = RS.congress_trade_items(fake_preview, symbol="OXY", asof=ASOF)
+    assert len(items) == 1 and items[0].quality == "degraded"
+    assert items[0].value["total_lines"] == 500
+
+
+def test_congress_trades_raises_a_shape_error_on_a_missing_trades_key():
+    with pytest.raises(RS.ResearchShapeError):
+        RS.congress_trade_items({"symbol": "OXY"}, symbol="OXY", asof=ASOF)
+
+
+# --------------------------------------------------------------- insider (real, per-symbol)
+
+def test_insider_transaction_items_parses_the_real_full_data_response():
+    """4 September 2026: rows key on `ticker`, not `symbol` -- swapped
+    with CONGRESS_TRADES's field name in the original parser, so every row
+    was filtered out in both directions."""
+    raw = _load("insider_transactions_oxy_full.json")
+    items = RS.insider_transaction_items(raw, symbol="OXY", asof=ASOF)
+    assert len(items) == 5
+    assert all(i.symbol == "OXY" and i.quality == "ok" for i in items)
+
+
+def test_insider_transaction_items_distinguishes_acquisitions_from_disposals():
+    raw = _load("insider_transactions_oxy_full.json")
+    items = RS.insider_transaction_items(raw, symbol="OXY", asof=ASOF)
+    assert any("acquired" in i.mechanism for i in items)
+    assert any("disposed" in i.mechanism for i in items)
+
+
+def test_insider_transactions_handles_the_real_preview_envelope():
+    """The exact response OXY returned live: 27,944 total_lines, 248,328
+    full_data_tokens, truncated to a 26-line sample_data string this
+    parser must never parse as though it were the whole response. An
+    earlier version of this function assumed data_total_count/
+    data_truncated keys that don't exist in the real envelope -- both
+    always read as None."""
+    raw = _load("insider_transactions_oxy_preview.json")
+    items = RS.insider_transaction_items(raw, symbol="OXY", asof=ASOF)
+    assert len(items) == 1
+    assert items[0].quality == "degraded"
+    assert items[0].value["total_lines"] == 27944
+    assert items[0].value["full_data_tokens"] == 248328
+    assert "return_full_data" in items[0].mechanism
 
 
 def test_insider_transactions_fails_loudly_when_feed_unavailable():
-    items = RS.insider_transaction_items(None, held_or_candidate=["OXY"], asof=ASOF)
+    items = RS.insider_transaction_items(None, symbol="OXY", asof=ASOF)
     assert items[0].quality == "failed"
 
 
-# --------------------------------------------------------------- scheduled events
-
-def test_earnings_calendar_filters_and_names_the_date():
-    raw = [{"symbol": "OXY", "reportDate": "2026-11-04", "estimate": "1.20"},
-          {"symbol": "ZZZZ", "reportDate": "2026-11-05"}]
-    items = RS.earnings_calendar_items(raw, held_or_candidate=["OXY"], asof=ASOF)
-    assert len(items) == 1 and "2026-11-04" in items[0].mechanism
+def test_insider_transactions_raises_a_shape_error_on_a_missing_data_key():
+    with pytest.raises(RS.ResearchShapeError):
+        RS.insider_transaction_items({"unexpected": []}, symbol="OXY", asof=ASOF)
 
 
-def test_earnings_estimate_items_ok_and_failed():
-    ok = RS.earnings_estimate_items({"eps": "1.20"}, symbol="OXY", asof=ASOF)
-    assert ok[0].quality == "ok"
-    failed = RS.earnings_estimate_items(None, symbol="OXY", asof=ASOF)
-    assert failed[0].quality == "failed"
+# --------------------------------------------------------------- earnings calendar (real, CSV-wrapped)
 
-
-def test_ipo_calendar_only_attaches_to_a_held_sector():
-    raw = [{"sector": "Energy", "name": "New Driller Co"}, {"sector": "Biotech", "name": "New Bio Co"}]
-    items = RS.ipo_calendar_items(raw, sector_watch=["energy"], asof=ASOF)
+def test_earnings_calendar_parses_the_real_csv_wrapped_response():
+    """4 September 2026: EARNINGS_CALENDAR has no datatype=json option --
+    always {"result": "<CSV text>"}. An earlier version of this parser
+    assumed a bare list of dicts and would have crashed or matched nothing
+    against the real response."""
+    raw = _load("earnings_calendar_aapl.json")
+    items = RS.earnings_calendar_items(raw, held_or_candidate=["AAPL"], asof=ASOF)
     assert len(items) == 1
-    assert items[0].value["name"] == "New Driller Co"
+    assert items[0].symbol == "AAPL"
+    assert "2026-10-29" in items[0].mechanism
 
+
+def test_earnings_calendar_real_empty_response_produces_no_items():
+    """OXY's real response for its own horizon was header-only (no
+    earnings due) -- a correct empty result, not a parse failure."""
+    raw = _load("earnings_calendar_oxy.json")
+    items = RS.earnings_calendar_items(raw, held_or_candidate=["OXY"], asof=ASOF)
+    assert items == []
+
+
+def test_earnings_calendar_filters_to_watched_symbols():
+    raw = _load("earnings_calendar_aapl.json")
+    items = RS.earnings_calendar_items(raw, held_or_candidate=["OXY"], asof=ASOF)
+    assert items == [], "AAPL's row must not attach when AAPL isn't held or candidate"
+
+
+def test_earnings_calendar_fails_loudly_when_feed_unavailable():
+    items = RS.earnings_calendar_items(None, held_or_candidate=["OXY"], asof=ASOF)
+    assert items[0].quality == "failed"
+
+
+# --------------------------------------------------------------- earnings estimates (real)
+
+def test_earnings_estimate_items_parses_the_real_response():
+    raw = _load("earnings_estimates_oxy.json")
+    items = RS.earnings_estimate_items(raw, symbol="OXY", asof=ASOF)
+    assert items[0].quality == "ok"
+    assert items[0].value[0]["date"] == "2026-12-31"
+
+
+def test_earnings_estimate_items_failed_on_none():
+    assert RS.earnings_estimate_items(None, symbol="OXY", asof=ASOF)[0].quality == "failed"
+
+
+# --------------------------------------------------------------- IPO calendar (real -- no sector field)
+
+def test_ipo_calendar_always_returns_no_items():
+    """4 September 2026: the real schema has no `sector` field at all
+    (symbol,name,ipoDate,priceRangeLow,priceRangeHigh,currency,exchange) --
+    the sector-based attachment this parser used to attempt was never
+    actually possible."""
+    raw = _load("ipo_calendar.json")
+    assert RS.ipo_calendar_items(raw) == []
+    assert RS.ipo_calendar_items(None) == []
+    assert RS.ipo_calendar_items() == []
+
+
+def test_ipo_calendar_real_response_has_no_sector_key():
+    """Documents the actual real shape so a future change is caught."""
+    raw = _load("ipo_calendar.json")
+    rows = RS._parse_av_csv_result(raw, "IPO_CALENDAR")
+    assert "sector" not in rows[0]
+    assert set(rows[0].keys()) == {"symbol", "name", "ipoDate", "priceRangeLow",
+                                    "priceRangeHigh", "currency", "exchange"}
+
+
+# --------------------------------------------------------------- filings / transcripts (not live-verified)
 
 def test_earnings_call_transcript_requires_explicit_horizon_reason():
     items = RS.earnings_call_transcript_items(
@@ -236,8 +403,6 @@ def test_earnings_call_transcript_requires_explicit_horizon_reason():
     assert items[0].mechanism == "OXY reports within the open thesis's 21-day horizon"
 
 
-# --------------------------------------------------------------- filings
-
 def test_filing_items_ok_and_failed_independently():
     items = RS.filing_items({"form": "10-Q"}, {"revenue": "123"}, symbol="OXY", asof=ASOF)
     assert len(items) == 2 and all(i.quality == "ok" for i in items)
@@ -245,32 +410,74 @@ def test_filing_items_ok_and_failed_independently():
     assert items2[0].quality == "failed"
 
 
-# --------------------------------------------------------------- macro
+# --------------------------------------------------------------- macro (real, CSV + JSON shapes)
 
 def test_macro_item_rejects_unknown_channel():
     with pytest.raises(ValueError, match="macro channel"):
         RS.macro_item("NOT_A_CHANNEL", {"data": [{}]}, asof=ASOF)
 
 
-def test_macro_item_ok_and_failed():
-    ok = RS.macro_item("CPI", {"data": [{"value": "312.3"}]}, asof=ASOF)
-    assert ok.quality == "ok" and ok.channel == "macro:CPI"
-    failed = RS.macro_item("CPI", None, asof=ASOF)
-    assert failed.quality == "failed"
+def test_macro_item_parses_the_real_csv_wrapped_response():
+    """4 September 2026: CPI's default response is {"result": "<CSV
+    text>"}, not {"data": [...]} -- an earlier version of this parser
+    would have raised a KeyError on every real macro response."""
+    raw = _load("cpi_csv.json")
+    item = RS.macro_item("CPI", raw, asof=ASOF)
+    assert item.quality == "ok"
+    assert item.value["date"] == "2026-07-01"
+    assert item.value["value"] == "333.918"
+
+
+def test_macro_item_flags_a_real_malformed_value_as_degraded():
+    """The real CPI response contains a genuine malformed row,
+    `2025-10-01,.` -- Alpha Vantage's own placeholder for a not-yet-final
+    print. Only the LATEST row is used, so build a response whose latest
+    row is the malformed one to exercise this path."""
+    raw = {"result": "timestamp,value\r\n2025-10-01,.\r\n2025-09-01,324.800\r\n"}
+    item = RS.macro_item("CPI", raw, asof=ASOF)
+    assert item.quality == "degraded"
+    assert "not a usable number" in item.detail
+
+
+def test_macro_item_parses_the_real_json_shape():
+    """WTI is a commodity channel, not a macro one (see commodity tests
+    below) -- but it shares the same `datatype=json` response family
+    handled by `_rows_from_series_response`, which is what this checks."""
+    raw = _load("wti_json.json")
+    rows = RS._rows_from_series_response(raw, "WTI")
+    assert rows[0] == {"date": "2026-08-01", "value": "83.9"}
+
+
+def test_macro_item_failed_on_none():
+    assert RS.macro_item("CPI", None, asof=ASOF).quality == "failed"
 
 
 def test_every_documented_macro_channel_is_recognised():
     for channel in RS.MACRO_CHANNELS:
-        item = RS.macro_item(channel, {"data": [{"value": "1"}]}, asof=ASOF)
+        item = RS.macro_item(channel, {"data": [{"date": "2026-01-01", "value": "1"}]}, asof=ASOF)
         assert item.quality == "ok"
 
 
-# --------------------------------------------------------------- commodities
+def test_series_response_raises_shape_error_on_neither_shape():
+    with pytest.raises(RS.ResearchShapeError):
+        RS._rows_from_series_response({"unexpected": 1}, "CPI")
+
+
+# --------------------------------------------------------------- commodities (real WTI)
+
+def test_commodity_items_parses_the_real_wti_response():
+    raw = _load("wti_json.json")
+    out = RS.commodity_items(["XOM"], {"WTI": raw, "BRENT": None, "NATURAL_GAS": None}, asof=ASOF)
+    wti_item = [i for i in out if i.channel == "commodity:WTI"][0]
+    assert wti_item.quality == "ok"
+    assert wti_item.value["date"] == "2026-08-01"
+
 
 def test_commodity_items_only_for_exposed_symbols():
-    out = RS.commodity_items(["XOM", "AAPL"], {"WTI": {"data": [{"value": "82.1"}]}}, asof=ASOF)
+    raw = _load("wti_json.json")
+    out = RS.commodity_items(["XOM", "AAPL"], {"WTI": raw}, asof=ASOF)
     symbols = {i.symbol for i in out}
-    assert "AAPL" not in symbols, "AAPL has no commodity exposure and must get nothing"
+    assert "AAPL" not in symbols
     assert "XOM" in symbols
 
 
@@ -279,35 +486,91 @@ def test_commodity_items_reports_failed_for_exposed_symbol_with_no_data():
     assert any(i.quality == "failed" for i in out)
 
 
+def test_commodity_items_isolates_a_shape_error_to_its_own_channel():
+    """A shape drift in one commodity channel's response must not take
+    down the other channels sharing this same call -- XOM has WTI/BRENT/
+    NATURAL_GAS exposure, all gathered through a single commodity_items()
+    call in gather()."""
+    good = _load("wti_json.json")
+    broken = {"unexpected_key": []}  # missing both "result" and "data"
+    out = RS.commodity_items(["XOM"], {"WTI": good, "BRENT": broken, "NATURAL_GAS": None}, asof=ASOF)
+    by_channel = {i.channel: i for i in out}
+    assert by_channel["commodity:WTI"].quality == "ok"
+    assert by_channel["commodity:BRENT"].quality == "failed"
+    assert by_channel["commodity:NATURAL_GAS"].quality == "failed"
+
+
 def test_commodity_items_rejects_unknown_channel_in_exposure_table(monkeypatch):
-    """If COMMODITY_EXPOSURE is ever edited to reference a channel not in
-    COMMODITY_CHANNELS, that must fail loudly rather than silently produce
-    an item tagged with a channel name nothing else recognises."""
     monkeypatch.setitem(RS.COMMODITY_EXPOSURE, "ZZZZ", ("NOT_A_CHANNEL",))
     with pytest.raises(ValueError, match="commodity channel"):
         RS.commodity_items(["ZZZZ"], {}, asof=ASOF)
 
 
-# --------------------------------------------------------------- positioning / session
+# --------------------------------------------------------------- positioning (real)
 
-def test_put_call_items_ok_with_historical_context():
-    items = RS.put_call_items({"ratio": 0.8}, {"ratio": 0.75}, symbol="OXY", asof=ASOF)
-    assert items[0].quality == "ok" and "0.75" in items[0].detail
+def test_put_call_items_parses_the_real_response():
+    """4 September 2026: the real key is put_call_ratio_full_chain, a
+    string -- an earlier version of this parser read `ratio`, which does
+    not exist, so it always reported 'failed' regardless of whether the
+    feed actually succeeded."""
+    raw = _load("put_call_realtime_oxy.json")
+    items = RS.put_call_items(raw, None, symbol="OXY", asof=ASOF)
+    assert items[0].quality == "ok"
+    assert items[0].value == "0.46"
 
 
-def test_put_call_items_failed_when_realtime_missing():
-    items = RS.put_call_items(None, {"ratio": 0.75}, symbol="OXY", asof=ASOF)
+def test_put_call_items_with_historical_context():
+    raw = _load("put_call_realtime_oxy.json")
+    items = RS.put_call_items(raw, {"put_call_ratio_full_chain": "0.75"}, symbol="OXY", asof=ASOF)
+    assert "0.75" in items[0].detail
+
+
+def test_put_call_items_failed_on_the_old_wrong_key():
+    """Guards the exact regression."""
+    items = RS.put_call_items({"ratio": 0.8}, None, symbol="OXY", asof=ASOF)
     assert items[0].quality == "failed"
 
 
-def test_top_movers_items_ok_and_failed():
-    assert RS.top_movers_items({"top_gainers": []}, asof=ASOF)[0].quality == "ok"
+def test_put_call_items_failed_when_realtime_missing():
+    items = RS.put_call_items(None, {"put_call_ratio_full_chain": "0.75"}, symbol="OXY", asof=ASOF)
+    assert items[0].quality == "failed"
+
+
+# --------------------------------------------------------------- top movers / market status (real)
+
+def test_top_movers_items_parses_the_real_response():
+    raw = _load("top_gainers_losers.json")
+    items = RS.top_movers_items(raw, asof=ASOF)
+    assert items[0].quality == "ok"
+
+
+def test_top_movers_items_failed_on_none():
     assert RS.top_movers_items(None, asof=ASOF)[0].quality == "failed"
 
 
-def test_market_status_item_ok_and_failed():
-    assert RS.market_status_item({"markets": []}, asof=ASOF).quality == "ok"
+def test_market_status_item_parses_the_real_response():
+    raw = _load("market_status.json")
+    item = RS.market_status_item(raw, asof=ASOF)
+    assert item.quality == "ok"
+
+
+def test_market_status_item_failed_on_none():
     assert RS.market_status_item(None, asof=ASOF).quality == "failed"
+
+
+# --------------------------------------------------------------- _row_count
+
+def test_row_count_handles_the_real_robinhood_news_shape():
+    """{"data": {"articles": [...]}} has a dict, not a list, under "data"
+    -- the generic list-valued-key scan misses it, so this needs its own
+    branch or every Robinhood news coverage count silently reads as 1
+    regardless of how many articles actually came back."""
+    raw = _load("robinhood_news_oxy.json")
+    assert RS._row_count(raw) == 2
+
+
+def test_row_count_zero_for_none():
+    assert RS._row_count(None) == 0
 
 
 # --------------------------------------------------------------- gather()
@@ -315,7 +578,7 @@ def test_market_status_item_ok_and_failed():
 def test_gather_records_timing_for_every_feed_it_touches():
     raw_feeds = {
         "news_av": {"OXY": _load("news_sentiment_oxy.json")},
-        "market_status": {"markets": []},
+        "market_status": _load("market_status.json"),
     }
     bundle = RS.gather(raw_feeds, held_or_candidate=["OXY"])
     assert "news_av:OXY" in bundle.timings_ms
@@ -329,25 +592,58 @@ def test_gather_records_skipped_feeds_rather_than_silently_omitting_them():
     assert any("congress_trades" in s for s in bundle.skipped)
 
 
+def test_gather_always_records_ipo_calendar_as_producing_nothing():
+    bundle = RS.gather({}, held_or_candidate=["OXY"])
+    assert any("ipo_calendar" in s for s in bundle.skipped)
+
+
 def test_gather_skips_weather_cleanly_when_nothing_maps():
     bundle = RS.gather({}, held_or_candidate=["AAPL"])
     assert any("no held/candidate symbol maps to a weather variable" in s for s in bundle.skipped)
 
 
-def test_gather_end_to_end_produces_a_usable_bundle():
+def test_gather_uses_per_symbol_congress_and_insider_maps():
+    raw_feeds = {
+        "congress_trades": {"OXY": _load("congress_trades_oxy.json")},
+        "insider_transactions": {"OXY": _load("insider_transactions_oxy_full.json")},
+    }
+    bundle = RS.gather(raw_feeds, held_or_candidate=["OXY"])
+    assert bundle.for_channel("congress_trade")
+    assert bundle.for_channel("insider_transaction")
+    assert bundle.coverage["congress_trades:OXY"]["rows_in"] == 4
+    assert bundle.coverage["insider_transactions:OXY"]["rows_in"] == 5
+
+
+def test_gather_catches_a_shape_error_from_one_feed_without_aborting_others():
+    """A single feed's shape drift must not take down the whole gather --
+    it becomes one loud failed item, and everything else still runs."""
+    raw_feeds = {
+        "congress_trades": {"OXY": {"unexpected_key": []}},  # missing "trades"
+        "news_av": {"OXY": _load("news_sentiment_oxy.json")},
+    }
+    bundle = RS.gather(raw_feeds, held_or_candidate=["OXY"])
+    congress_items = bundle.for_channel("congress_trade")
+    assert congress_items and congress_items[0].quality == "failed"
+    assert bundle.for_symbol("OXY"), "the news feed must still have produced items"
+
+
+def test_gather_end_to_end_produces_a_usable_bundle_from_real_fixtures():
     raw_feeds = {
         "news_av": {"OXY": _load("news_sentiment_oxy.json")},
         "news_rh": {"OXY": _load("robinhood_news_oxy.json")},
-        "congress_trades": _load("congress_trades.json"),
-        "politician_metadata": _load("politician_metadata.json"),
-        "insider_transactions": _load("insider_transactions.json"),
-        "macro": {"CPI": {"data": [{"value": "312.3"}]}},
-        "commodities": {"WTI": {"data": [{"value": "82.1"}]}},
-        "market_status": {"markets": []},
+        "congress_trades": {"OXY": _load("congress_trades_oxy.json")},
+        "insider_transactions": {"OXY": _load("insider_transactions_oxy_full.json")},
+        "macro": {"CPI": _load("cpi_csv.json")},
+        "commodities": {"WTI": _load("wti_json.json")},
+        "market_status": _load("market_status.json"),
+        "top_movers": _load("top_gainers_losers.json"),
+        "put_call_realtime": {"OXY": _load("put_call_realtime_oxy.json")},
     }
     bundle = RS.gather(raw_feeds, held_or_candidate=["OXY"])
     assert bundle.corroborated("OXY")
     assert bundle.for_channel("congress_trade")
+    assert bundle.for_channel("insider_transaction")
     assert bundle.for_channel("commodity:WTI")
     assert bundle.for_channel("macro:CPI")
+    assert not bundle.coverage_issues(), f"unexpected coverage issues: {bundle.coverage_issues()}"
     assert bundle.asof
