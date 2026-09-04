@@ -43,6 +43,18 @@ def test_stage_records_failure_and_reraises():
     assert log.health() == "critical"
 
 
+def test_abort_keeps_the_first_reason_not_the_last():
+    """4 September 2026: a second call to abort() used to overwrite the
+    first reason entirely, so whichever blocking check happened to run
+    LAST decided what the run reported -- not the actual root cause.
+    Preflight relies on the first call winning (see journal_fully_readable
+    running before ledger_reconciled)."""
+    log = base_log()
+    log.abort("root cause")
+    log.abort("downstream symptom")
+    assert log.abort_reason == "root cause"
+
+
 # ---------------------------------------------------------------- health
 
 def test_health_nominal_when_everything_passes():
@@ -195,6 +207,54 @@ def test_preflight_survives_first_ever_run_with_no_history():
                       history=[])
     assert log.may_trade
     assert next(c for c in log.checks if c.name == "history_depth").passed
+
+
+def test_preflight_passes_journal_readability_by_default():
+    """No unreadable files reported is the common case and must not block."""
+    log = R.preflight(base_log(), available_tools=TOOLS, required_tools=REQUIRED,
+                      local_time=NORMAL_TIME, expected_local_hhmm=(6, 20), self_test=GOOD_TEST)
+    c = next(c for c in log.checks if c.name == "journal_fully_readable")
+    assert c.passed and c.severity == "block"
+    assert log.may_trade
+
+
+def test_preflight_aborts_on_an_unreadable_journal_file():
+    """4 September 2026: before this check existed, a file that failed to
+    parse was silently recorded and dropped -- a hidden thesis, opening
+    balance, or standing circuit-breaker trip had no other way to be
+    noticed. This must abort, not warn."""
+    log = R.preflight(base_log(), available_tools=TOOLS, required_tools=REQUIRED,
+                      local_time=NORMAL_TIME, expected_local_hhmm=(6, 20), self_test=GOOD_TEST,
+                      unreadable_files=["journal-2026-08-30.json"])
+    c = next(c for c in log.checks if c.name == "journal_fully_readable")
+    assert not c.passed and c.severity == "block"
+    assert log.aborted and not log.may_trade
+    assert "journal-2026-08-30.json" in log.abort_reason
+
+
+def test_preflight_aborts_on_an_unreadable_fills_or_splits_cache_file():
+    """The same risk category Task 3's fold_fills_cache/fold_splits_cache
+    introduced -- their `bad` lists feed this same check."""
+    log = R.preflight(base_log(), available_tools=TOOLS, required_tools=REQUIRED,
+                      local_time=NORMAL_TIME, expected_local_hhmm=(6, 20), self_test=GOOD_TEST,
+                      unreadable_files=["fills-cache-2026-08-20.json fill",
+                                        "splits-cache-2026-08-20.json entry"])
+    assert log.aborted
+    assert "fills-cache-2026-08-20.json fill" in log.abort_reason
+
+
+def test_journal_readability_check_runs_before_ledger_reconciliation():
+    """If the hidden file was the one carrying an opening balance, a
+    reconciliation failure reported instead would misdiagnose a real,
+    already-explained gap as spurious drift -- the readability check must
+    be the one that fires, naming the actual cause."""
+    log = R.preflight(base_log(), available_tools=TOOLS, required_tools=REQUIRED,
+                      local_time=NORMAL_TIME, expected_local_hhmm=(6, 20), self_test=GOOD_TEST,
+                      unreadable_files=["journal-2026-08-30.json"],
+                      ledger_positions={"AAA": 3, "BBB": 2},
+                      broker_positions={"AAA": 3})
+    assert "journal-2026-08-30.json" in log.abort_reason
+    assert "BBB" not in log.abort_reason
 
 
 # ---------------------------------------------------------------- regressions

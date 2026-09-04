@@ -200,8 +200,17 @@ class RunLog:
         self.metrics[key] = value
 
     def abort(self, reason: str) -> None:
+        """Record why the run stopped. The FIRST call wins -- `preflight`
+        runs its blocking checks in a deliberate order (e.g. journal
+        readability before ledger reconciliation, so a hidden opening
+        balance is named directly rather than surfacing as a confusing
+        downstream reconciliation failure), and a later block is very
+        often a consequence of an earlier one rather than an independent
+        second cause. Overwriting the reason on every call would report
+        whichever check happened to run last, not the actual root cause."""
         self.aborted = True
-        self.abort_reason = reason
+        if not self.abort_reason:
+            self.abort_reason = reason
 
     def stage(self, name: str):
         return _StageCtx(self, name)
@@ -328,7 +337,8 @@ def preflight(log: RunLog, *,
               history: Sequence[dict] = (),
               self_test: Optional[dict] = None,
               ledger_positions: Optional[dict] = None,
-              broker_positions: Optional[dict] = None) -> RunLog:
+              broker_positions: Optional[dict] = None,
+              unreadable_files: Sequence[str] = ()) -> RunLog:
     """Run before any research. Fills `log` with checks and may abort the run.
 
     Ordered cheapest-and-most-fatal first, so a broken run dies in milliseconds
@@ -393,7 +403,28 @@ def preflight(log: RunLog, *,
               value={"weekend": is_weekend, "holiday": is_holiday,
                      "early_close": iso in EARLY_CLOSE_2026_2027})
 
-    # 5. Does the ledger agree with the broker? Disagreement means our memory of
+    # 5. Was every journal, fills-cache, and splits-cache file actually
+    #    readable? Before 4 September 2026 a file that failed to parse was
+    #    silently recorded in `Journal.unreadable` (or the fills/splits
+    #    cache fold's `bad` list) and dropped without ever aborting the
+    #    run -- a corrupt or truncated write could hide a thesis that
+    #    would have matured, an opening balance a human recorded, or a
+    #    standing circuit-breaker trip, none of which have any other way
+    #    to be noticed. This runs BEFORE the ledger-reconciliation check
+    #    below on purpose: if the hidden file was the one carrying an
+    #    opening balance, reconciliation would otherwise misdiagnose a
+    #    real, explained gap as spurious drift instead of naming the
+    #    actual cause.
+    unreadable_files = list(unreadable_files)
+    log.check("journal_fully_readable", not unreadable_files, "block",
+              "every journal/fills-cache/splits-cache file parsed"
+              if not unreadable_files else
+              f"{len(unreadable_files)} unreadable file(s): {unreadable_files}",
+              value=unreadable_files)
+    if unreadable_files:
+        log.abort(f"unreadable journal/cache file(s): {unreadable_files}")
+
+    # 6. Does the ledger agree with the broker? Disagreement means our memory of
     #    the world is wrong, and every sizing decision downstream is wrong too.
     if ledger_positions is not None and broker_positions is not None:
         drift = _reconcile(ledger_positions, broker_positions)
@@ -403,11 +434,11 @@ def preflight(log: RunLog, *,
         if drift:
             log.abort(f"ledger and broker disagree on {list(drift)}")
 
-    # 6. Regression against recent runs.
+    # 7. Regression against recent runs.
     for c in _regressions(history):
         log.checks.append(c)
 
-    # 7. Standing improvement opportunities from the record.
+    # 8. Standing improvement opportunities from the record.
     log.metric("optimizations", find_optimizations(history))
     return log
 

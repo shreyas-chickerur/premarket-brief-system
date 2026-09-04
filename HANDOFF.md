@@ -242,7 +242,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `WATCHDOG_PROCEDURE.md` | The watchdog's own procedure: assess today's manifest, and on a real problem, diagnose, attempt a fix, merge it, and re-run `DAILY_PROCEDURE.md` once |
 | `research.py` | Deterministic Stage 1 research — replaces "research by web search" with a defined candidate universe and one parser per feed (news, congressional/insider activity, scheduled events, filings, macro, commodities, positioning), every item graded `ok`/`thin`/`degraded`/`failed` and required to attach to a symbol or channel |
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
-| `runlog.py` | Run manifests, staged timing, preflight self-audit, verified market calendar, regression review, optimization proposals, honest scoring |
+| `runlog.py` | Run manifests, staged timing, preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
@@ -251,7 +251,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
 | `test_quantcore.py` | 81 tests, including known-answer volatility and correlation recovery, and the floor/cap quality-conflation regression |
-| `test_runlog.py` | 52 tests, including daylight-saving drift, market-calendar integrity, and circuit-breaker enforcement |
+| `test_runlog.py` | 57 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, and `abort()`'s first-reason-wins semantics |
 | `test_washsale.py` | 32 tests |
 | `test_ledger.py` | 84 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), and monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee) |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
@@ -1334,6 +1334,28 @@ meant to be run by hand (or by a future dedicated maintenance task) on a
 closed month, e.g. once a quarter, not wired into every run's own logic.
 
 `ledger.py`: 73 → 84 tests. Full suite: 404 → 415.
+
+### 4 September 2026 — an unreadable journal file now aborts the run instead of vanishing
+
+`ledger.fold_journal` has recorded a file that failed to parse in
+`Journal.unreadable` since 31 August 2026 — but nothing ever read that
+list. The run proceeded as if the file had never existed. A dropped file
+could hide a thesis that would have matured, an opening balance a human
+recorded, or a standing circuit-breaker trip, none of which have any
+other way to be noticed.
+
+`runlog.preflight` gained a new blocking check, `journal_fully_readable`,
+fed by `unreadable_files` — the union of `journal.unreadable` and the
+`bad` lists Task 3's `fold_fills_cache`/`fold_splits_cache` already
+return. It runs before `ledger_reconciled` deliberately: if the hidden
+file carried an opening balance, running reconciliation anyway would
+report confusing spurious drift instead of the real, nameable cause.
+`RunLog.abort` was changed to keep the FIRST reason given rather than the
+last, so this ordering actually survives a later check also calling
+`abort()` — before this, whichever blocking check happened to run last
+decided what the run reported, not the root cause.
+
+`runlog.py`/`test_runlog.py`: 52 → 57 tests. Full suite: 415 → 420.
 
 ## 12. Open and unverified
 

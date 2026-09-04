@@ -139,6 +139,33 @@ passed since its last check, bounding detection latency to a known, small
 window instead of requiring the endpoint to run for every symbol every day
 regardless of whether anything could plausibly have changed.
 
+## Stage 0, step 7 — why an unreadable file blocks rather than warns
+
+Before 4 September 2026, `ledger.fold_journal` already recorded a file
+that failed to parse in `Journal.unreadable` — but nothing ever read that
+list. The run proceeded as if the file had never existed, silently. The
+fix is `runlog.preflight`'s `journal_fully_readable` check, `"block"`
+severity, fed by the union of `journal.unreadable` and the fills-/splits-
+cache folds' own `bad` lists (the same risk, extended to the caches Task
+3 introduced the same day).
+
+**Why this must block rather than warn.** A dropped file could hide a
+thesis that would have matured (silently corrupting the evidence sample),
+an opening balance a human recorded (making a real, already-explained
+reconciliation gap look like fresh drift), or a standing circuit-breaker
+trip (letting a halted account resume trading nobody actually cleared).
+None of these have any other way to be noticed — a warning that a human
+might not read carefully enough is not a meaningful safeguard against any
+of them.
+
+**Why it must run before ledger reconciliation, not after.** If the
+hidden file was the one carrying an opening balance, running
+reconciliation anyway would report a confusing, misleading "drift"
+failure instead of the actual, nameable cause — a human debugging the
+wrong symptom. `RunLog.abort` was changed the same day to keep the FIRST
+reason given rather than the last, specifically so this ordering is not
+undone by a later, consequential check also calling `abort()`.
+
 ## Stage 0, step 8 — the wash-sale registry is rebuilt, never stored
 
 A stored copy that has forgotten a loss sale approves the repurchase that
