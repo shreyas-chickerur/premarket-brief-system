@@ -1171,44 +1171,111 @@ either API had ever actually returned.
   malformed value (`"."` for a not-yet-published CPI month) now handled as
   `degraded` rather than crashing or silently passing through.
   `EARNINGS_CALENDAR` has the same CSV-wrapper shape and no `datatype`
-  parameter at all. `IPO_CALENDAR`'s real schema has no `sector` field,
-  so the sector-based attachment this parser tried to do was never actually
-  possible — `ipo_calendar_items` now always returns `[]`, documented as a
-  structural limit rather than deleted. `REALTIME_PUT_CALL_RATIO`'s real key
-  is `put_call_ratio_full_chain`, not `ratio`. Robinhood's real news key is
-  `data.articles`, not `data.news`.
+  parameter at all. `IPO_CALENDAR`'s real schema has no `sector` field, so
+  the sector-based attachment this parser tried to do was never actually
+  possible — first fixed by making `ipo_calendar_items` always return `[]`,
+  then removed from `gather()` entirely later the same day once that
+  turned out to just be a permanently-empty call and a `skipped` noise
+  line rather than a working feature (see the entry below).
+  `REALTIME_PUT_CALL_RATIO`'s real key is `put_call_ratio_full_chain`, not
+  `ratio`. Robinhood's real news key is `data.articles`, not `data.news`.
 - Every fixture in `fixtures/research/` was replaced with a genuinely
   recorded response (or a real, representative truncated slice of one) —
   the fabricated `congress_trades.json`, `insider_transactions.json`, and
   `politician_metadata.json` are gone. `research.py` grew from 45 to 76
   tests, every one against a recorded real fixture, none hand-written.
   Full suite: 376, up from 292 at handoff.
-- **Still not independently live-verified**: 8 of the 9 macro channels and
-  10 of the 11 commodity channels beyond the one representative example
-  each (`CPI`, `WTI`) — assumed to share the same response family by
-  provider and documented `datatype` toggle, not individually confirmed;
-  `HISTORICAL_PUT_CALL_RATIO`; `EARNINGS_CALL_TRANSCRIPT`; Robinhood
-  `get_sec_filing`/`get_sec_filing_facts`. See section 12.
+- **Still not independently live-verified as of this entry**: 8 of the 9
+  macro channels and 10 of the 11 commodity channels beyond the one
+  representative example each (`CPI`, `WTI`) — assumed to share the same
+  response family by provider and documented `datatype` toggle, not
+  individually confirmed; `HISTORICAL_PUT_CALL_RATIO`; `EARNINGS_CALL_TRANSCRIPT`;
+  Robinhood `get_sec_filing`/`get_sec_filing_facts`. **Update, same day**:
+  the remaining macro/commodity channels, `HISTORICAL_PUT_CALL_RATIO`, and
+  `GOLD_SILVER_SPOT` were verified live and fixed — see the entry directly
+  below. `EARNINGS_CALL_TRANSCRIPT` and the Robinhood filing tools remain
+  unverified; see section 12.
+
+### 4 September 2026 — the rest of the feeds verified live, and one more wrong parser found
+
+A second live check, the same day as the entry above, targeted exactly the
+feeds that entry had flagged as unverified: the eight remaining macro
+channels, the ten remaining commodity channels, `HISTORICAL_PUT_CALL_RATIO`,
+`EARNINGS_CALL_TRANSCRIPT`, and both Robinhood filing tools. This found one
+more wrong parser and produced two deliberate design changes.
+
+- **`GOLD_SILVER_SPOT` was wrong.** It sits in `COMMODITY_CHANNELS`
+  alongside ten genuine time-series channels, and `commodity_items` routed
+  every channel through `_rows_from_series_response` uniformly. The real
+  response is a live scalar quote — `{"nominal": "XAUUSD", "timestamp":
+  "2026-09-04 18:34:58", "price": "4423.7080671183"}` — with no `result`
+  and no `data` key, so it raised `ResearchShapeError` on every single
+  call. This mattered more than the other unverified channels: `GLDM` is a
+  real individual-account holding with no protective stop (section 3), and
+  `GOLD_SILVER_SPOT` is its only commodity feed — the one channel covering
+  the riskiest holding was the one that never worked. Fixed with a
+  dedicated `_gold_silver_spot_row` parser, still isolated per-channel so
+  a shape drift there can't take down `WTI`/`BRENT` for the same symbol.
+- **The other eighteen channels checked out.** All eight remaining macro
+  channels (`TREASURY_YIELD`, `FEDERAL_FUNDS_RATE`, `INFLATION`,
+  `UNEMPLOYMENT`, `NONFARM_PAYROLL`, `RETAIL_SALES`, `REAL_GDP`,
+  `DURABLES`) and all ten remaining series commodity channels (`BRENT`,
+  `NATURAL_GAS`, `COPPER`, `ALUMINUM`, `WHEAT`, `CORN`, `COFFEE`, `SUGAR`,
+  `COTTON`, `ALL_COMMODITIES`) share `CPI`/`WTI`'s response family exactly
+  as assumed, confirmed by a live `datatype=json` call to each. A second
+  real malformed value turned up along the way — `UNEMPLOYMENT`'s
+  2025-10-01 print is also `"."` — handled by the same `_numeric_quality`
+  path that already covered CPI's.
+- **`HISTORICAL_PUT_CALL_RATIO` was correct, and was carrying unused
+  information.** The real response includes `put_call_ratio_by_expiration`,
+  a per-expiration array, which the parser discarded entirely. A near-dated
+  ratio far above the full-chain number is exactly the kind of dated,
+  specific catalyst the five-condition gate's catalyst condition is meant
+  to catch, so `_near_term_put_call_signal` now carries the nearest
+  expiration as its own item — but only when it diverges from the
+  full-chain ratio by more than 50%, so a routine near-dated wobble can't
+  manufacture a signal that isn't really there (Rule 1 still applies: no
+  forced attachment).
+- **`IPO_CALENDAR` was removed from `gather()` entirely.** It had already
+  been confirmed dead on arrival (no `sector` field in the real schema,
+  so `ipo_calendar_items` could only ever return `[]`), but `gather()` was
+  still fetching it, calling it, and appending a permanent `skipped` line
+  every run — a fetch, a call, and a noise line for a guaranteed zero, which
+  reads as a working feature when it structurally cannot be one. The
+  function is deleted; the real captured shape stays in
+  `fixtures/research/ipo_calendar.json` and in this entry as the documented
+  reason, so re-adding it is a small, deliberate change if a future
+  response ever adds a usable field.
+- 83 tests in `research.py` (up from 76), full suite 381 (up from 376).
+  `EARNINGS_CALL_TRANSCRIPT` and Robinhood `get_sec_filing`/
+  `get_sec_filing_facts` remain unverified — see section 12.
 
 ## 12. Open and unverified
 
-- **`research.py` has been live-checked feed by feed, not yet run end to end
-  inside a real scheduled brief.** As of 4 September 2026, `NEWS_SENTIMENT`,
-  Robinhood `get_equity_news`, `CONGRESS_TRADES`, `INSIDER_TRANSACTIONS`
-  (both the full-data and preview-envelope paths), `CPI`, `WTI`
-  (`datatype=json`), `EARNINGS_CALENDAR` (both an empty and a populated
-  response), `EARNINGS_ESTIMATES`, `IPO_CALENDAR`, `MARKET_STATUS`,
-  `REALTIME_PUT_CALL_RATIO`, and `TOP_GAINERS_LOSERS` have each been called
-  live at least once and their parsers rewritten against the real response
-  (see section 11's "the fixtures were fabricated" entry — two parsers were
-  wrong and one payload class was entirely unhandled before this). **Not
-  independently re-verified live**: 8 of the 9 macro channels and 10 of the
-  11 commodity channels beyond `CPI`/`WTI` (assumed to share the same
-  response family, not confirmed individually), `HISTORICAL_PUT_CALL_RATIO`,
-  `EARNINGS_CALL_TRANSCRIPT`, and Robinhood `get_sec_filing`/
-  `get_sec_filing_facts`. And even the verified feeds have never all run
-  together inside one real `DAILY_PROCEDURE.md` execution — first real
-  contact is the next scheduled trading day.
+- **`research.py` has now been live-checked feed by feed for every channel
+  it calls, but never run end to end inside a real scheduled brief.** As
+  of 4 September 2026, every one of: `NEWS_SENTIMENT`, Robinhood
+  `get_equity_news`, `CONGRESS_TRADES`, `INSIDER_TRANSACTIONS` (both the
+  full-data and preview-envelope paths), all nine `MACRO_CHANNELS`
+  (`CPI` on its `datatype=csv` default, the other eight on
+  `datatype=json`), all eleven `COMMODITY_CHANNELS` (`GOLD_SILVER_SPOT`'s
+  scalar-quote shape separately from the other ten series channels),
+  `EARNINGS_CALENDAR` (both an empty and a populated response),
+  `EARNINGS_ESTIMATES`, `HISTORICAL_PUT_CALL_RATIO`,
+  `REALTIME_PUT_CALL_RATIO`, `MARKET_STATUS`, and `TOP_GAINERS_LOSERS`
+  have each been called live at least once and their parsers rewritten
+  against the real response — a double-digit count of wrong field names,
+  wrong response shapes, and unhandled payload cases were found and fixed
+  across the two 4 September entries above, out of roughly fifteen feeds
+  checked. `IPO_CALENDAR` was checked, confirmed structurally unable to
+  satisfy Rule 1, and removed rather than kept as dead code. **Still not
+  independently live-verified**: `EARNINGS_CALL_TRANSCRIPT` and Robinhood
+  `get_sec_filing`/`get_sec_filing_facts` — that defect rate is reason
+  enough not to assume these three are fine because they resemble an
+  already-fixed family; verify them the same way before relying on them.
+  And even the verified feeds have never all run together inside one real
+  `DAILY_PROCEDURE.md`
+  execution — first real contact is the next scheduled trading day.
 - Whether the connector broker refreshes the brokerage token indefinitely
   without a fresh desktop-browser sign-in. The token expires roughly every four
   days; refresh is supported but unconfirmed for this server. If it lapses, runs

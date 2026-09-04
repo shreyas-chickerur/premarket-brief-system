@@ -540,19 +540,6 @@ def earnings_estimate_items(raw: Optional[dict], *, symbol: str,
         asof=asof, quality="ok")]
 
 
-def ipo_calendar_items(raw: Optional[dict] = None, **_ignored) -> list[ResearchItem]:
-    """`IPO_CALENDAR`'s real schema (verified live, 4 September 2026) is
-    `symbol,name,ipoDate,priceRangeLow,priceRangeHigh,currency,exchange` --
-    there is no `sector` field. An earlier version of this parser filtered
-    on `row.get("sector")`, which never existed, so it always either
-    matched nothing or would have had to guess a sector from a company name,
-    which this module does not do. This feed cannot currently satisfy Rule 1
-    (attach to something) with the fields the API actually provides, so it
-    always returns an empty list -- kept rather than deleted in case a
-    future response adds a field that makes attachment possible."""
-    return []
-
-
 def earnings_call_transcript_items(raw: Optional[dict], *, symbol: str,
                                     horizon_reason: str,
                                     asof: str) -> list[ResearchItem]:
@@ -611,13 +598,14 @@ MACRO_CHANNELS = ("TREASURY_YIELD", "FEDERAL_FUNDS_RATE", "CPI", "INFLATION",
 
 
 def macro_item(channel: str, raw: Optional[dict], *, asof: str) -> ResearchItem:
-    """One of the nine macro series. Verified live, 4 September 2026,
-    against `CPI` (the `datatype=csv` default, `{"result": "<CSV text>"}`,
-    including a real malformed row) and against the `datatype=json`
-    alternative on `WTI` (see `_rows_from_series_response`); the other
-    eight macro channels are assumed to share this same response family
-    (same provider, same documented `datatype` toggle) but have not each
-    been individually re-verified live."""
+    """One of the nine macro series. Verified live, 4 September 2026:
+    `CPI` on the `datatype=csv` default (`{"result": "<CSV text>"}`,
+    including a real malformed row) and all nine channels
+    (`TREASURY_YIELD`, `FEDERAL_FUNDS_RATE`, `CPI`, `INFLATION`,
+    `UNEMPLOYMENT` -- which also has a real malformed `"."` row --
+    `NONFARM_PAYROLL`, `RETAIL_SALES`, `REAL_GDP`, `DURABLES`) on
+    `datatype=json` (`{"data": [{"date":, "value":}]}`, see
+    `_rows_from_series_response`)."""
     if channel not in MACRO_CHANNELS:
         raise ValueError(f"unrecognised macro channel: {channel!r}")
     if not raw:
@@ -658,13 +646,30 @@ COMMODITY_EXPOSURE: dict[str, tuple[str, ...]] = {
 }
 
 
+def _gold_silver_spot_row(raw: dict) -> dict:
+    """`GOLD_SILVER_SPOT` is a live scalar quote, not a time series --
+    verified live 4 September 2026: `{"nominal": "XAUUSD", "timestamp":
+    "2026-09-04 18:34:58", "price": "4423.7080671183"}`. No `result`, no
+    `data`, no rows -- routing it through `_rows_from_series_response`
+    (as the first version of this parser did, since it sits in
+    `COMMODITY_CHANNELS` alongside every series channel) raised
+    `ResearchShapeError` on every single call. Normalised to the same
+    `{"date":, "value":}` shape the series channels use so downstream
+    code (`_numeric_quality`, the email cards) doesn't need to special-case
+    it."""
+    _shape_guard(raw, ("nominal", "price"), "GOLD_SILVER_SPOT")
+    return {"date": raw.get("timestamp"), "value": raw.get("price"), "nominal": raw.get("nominal")}
+
+
 def commodity_items(symbols: Sequence[str], raw_by_channel: dict[str, Optional[dict]],
                      *, asof: str) -> list[ResearchItem]:
     """One item per (symbol, channel) pair actually exposed per
-    `COMMODITY_EXPOSURE`. Shares `WTI`'s live-verified response family with
-    `macro_item` (see `_rows_from_series_response`); the other ten
-    commodity channels are assumed to share it but have not each been
-    individually re-verified live."""
+    `COMMODITY_EXPOSURE`. All eleven series channels (`WTI`, `BRENT`,
+    `NATURAL_GAS`, `COPPER`, `ALUMINUM`, `WHEAT`, `CORN`, `COFFEE`,
+    `SUGAR`, `COTTON`, `ALL_COMMODITIES`) were verified live 4 September
+    2026 to share `WTI`'s `datatype=json` response family (see
+    `_rows_from_series_response`). `GOLD_SILVER_SPOT` is not a series and
+    is parsed separately -- see `_gold_silver_spot_row`."""
     out = []
     for sym in symbols:
         for channel in COMMODITY_EXPOSURE.get(sym.upper(), ()):
@@ -679,7 +684,10 @@ def commodity_items(symbols: Sequence[str], raw_by_channel: dict[str, Optional[d
                     asof=asof, quality="failed"))
                 continue
             try:
-                rows = _rows_from_series_response(raw, channel)
+                if channel == "GOLD_SILVER_SPOT":
+                    rows = [_gold_silver_spot_row(raw)]
+                else:
+                    rows = _rows_from_series_response(raw, channel)
             except ResearchShapeError as e:
                 # A shape drift in one commodity channel must not take
                 # down every other symbol/channel pair in this call --
@@ -698,9 +706,11 @@ def commodity_items(symbols: Sequence[str], raw_by_channel: dict[str, Optional[d
                 continue
             latest = rows[0]
             quality = _numeric_quality(latest.get("value"))
+            mechanism = (f"{sym} has direct gold-spot price exposure" if channel == "GOLD_SILVER_SPOT"
+                        else f"{sym} has direct {channel} price exposure")
             out.append(ResearchItem(
                 channel=f"commodity:{channel}", symbol=sym,
-                mechanism=f"{sym} has direct {channel} price exposure",
+                mechanism=mechanism,
                 value=latest, source=f"Alpha Vantage {channel}", asof=asof, quality=quality,
                 detail="" if quality == "ok" else f"latest reported value is {latest.get('value')!r}, not a usable number"))
     return out
@@ -710,26 +720,73 @@ def commodity_items(symbols: Sequence[str], raw_by_channel: dict[str, Optional[d
 # positioning and session state
 # --------------------------------------------------------------------------
 
+def _near_term_put_call_signal(symbol: str, historical: Optional[dict],
+                                full_chain_ratio, *, asof: str,
+                                threshold: float = 0.5) -> Optional[ResearchItem]:
+    """`HISTORICAL_PUT_CALL_RATIO`'s real shape (verified live 4 September
+    2026, OXY) carries `put_call_ratio_by_expiration`: `[{"date":
+    "YYYY-MM-DD", "value": "R"}, ...]`, nearest expiration first -- real
+    information the first version of this parser discarded entirely. Only
+    the single nearest expiration is checked (this is a near-term signal,
+    not a scan for any divergent date out the chain), and it is only
+    carried as its own item when it diverges from the full-chain ratio by
+    more than `threshold` (50% relative) -- a routine near-dated wobble
+    should not manufacture a signal that is not really there. Returns
+    None when there is nothing clean to attach, per Rule 1."""
+    if not historical or not isinstance(historical.get("put_call_ratio_by_expiration"), list):
+        return None
+    rows = historical["put_call_ratio_by_expiration"]
+    if not rows:
+        return None
+    try:
+        full_chain_val = float(full_chain_ratio)
+    except (TypeError, ValueError):
+        return None
+    date, raw_value = rows[0].get("date"), rows[0].get("value")
+    if not date or raw_value is None or full_chain_val == 0:
+        return None
+    try:
+        near_val = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    divergence = abs(near_val - full_chain_val) / full_chain_val
+    if divergence < threshold:
+        return None
+    return ResearchItem(
+        channel="positioning:put_call_nearterm", symbol=symbol,
+        mechanism=(f"{date} expiration put/call ratio of {near_val} diverges "
+                  f"{divergence:.0%} from {symbol}'s {full_chain_val} full-chain ratio"),
+        value={"date": date, "value": raw_value, "full_chain_ratio": full_chain_ratio},
+        source="Alpha Vantage HISTORICAL_PUT_CALL_RATIO", asof=asof, quality="ok")
+
+
 def put_call_items(realtime: Optional[dict], historical: Optional[dict], *,
                     symbol: str, asof: str) -> list[ResearchItem]:
     """Real key (verified live, 4 September 2026, against a real OXY
     response) is `put_call_ratio_full_chain` -- a string. An earlier
     version of this parser read `ratio`, a key that does not exist in the
     response at all, so this always reported `failed` regardless of
-    whether the feed actually succeeded."""
+    whether the feed actually succeeded. See `_near_term_put_call_signal`
+    for the near-dated expiration signal this now also carries when it's
+    genuinely divergent."""
     if not realtime or "put_call_ratio_full_chain" not in realtime:
         return [ResearchItem(channel="positioning:put_call", symbol=symbol,
                              mechanism=f"put/call positioning for {symbol} unavailable this run",
                              value=None, source="Alpha Vantage REALTIME_PUT_CALL_RATIO",
                              asof=asof, quality="failed")]
+    full_chain_ratio = realtime.get("put_call_ratio_full_chain")
     hist_ratio = (historical or {}).get("put_call_ratio_full_chain")
-    return [ResearchItem(
+    items = [ResearchItem(
         channel="positioning:put_call", symbol=symbol,
         mechanism=f"current put/call ratio for {symbol}",
-        value=realtime.get("put_call_ratio_full_chain"),
+        value=full_chain_ratio,
         source="Alpha Vantage REALTIME_PUT_CALL_RATIO", asof=asof, quality="ok",
         detail=(f"historical context: {hist_ratio}" if hist_ratio is not None
                else "no historical context available"))]
+    near_term = _near_term_put_call_signal(symbol, historical, full_chain_ratio, asof=asof)
+    if near_term is not None:
+        items.append(near_term)
+    return items
 
 
 def top_movers_items(raw: Optional[dict], *, asof: str) -> list[ResearchItem]:
@@ -801,16 +858,23 @@ def gather(raw_feeds: dict[str, Any], *, held_or_candidate: Sequence[str],
     - `"congress_trades"`, `"insider_transactions"`: `{symbol: raw_response}`
       -- both endpoints require a symbol per call, there is no bulk pull
     - `"earnings_calendar"` (one bulk response), `"earnings_estimates"`
-      (`{symbol: raw}`), `"ipo_calendar"` (always produces no items — see
-      `ipo_calendar_items`)
+      (`{symbol: raw}`)
     - `"earnings_call_transcripts"`: `{symbol: (raw, horizon_reason)}`
     - `"sec_filings"`, `"sec_filing_facts"`: `{symbol: raw}`
     - `"macro"`: `{channel: raw}` for any of `MACRO_CHANNELS`, requested
       with `datatype=json`
-    - `"commodities"`: `{channel: raw}` for any of `COMMODITY_CHANNELS`,
-      requested with `datatype=json`
+    - `"commodities"`: `{channel: raw}` for any of `COMMODITY_CHANNELS`
+      (including `GOLD_SILVER_SPOT`, a scalar quote requested with
+      `symbol=GOLD` -- not a `datatype=json` series; see
+      `_gold_silver_spot_row`); the other ten channels requested with
+      `datatype=json`
     - `"weather"`: `{variable: raw}`
-    - `"put_call_realtime"`, `"put_call_historical"`: `{symbol: raw}`
+    - `"put_call_realtime"`, `"put_call_historical"`: `{symbol: raw}` --
+      `put_call_historical` additionally carries a near-dated expiration
+      signal when genuinely divergent, see `_near_term_put_call_signal`.
+      `IPO_CALENDAR` is not fetched at all: its real schema has no
+      `sector` field and cannot satisfy Rule 1 (see
+      `fixtures/research/ipo_calendar.json` and `HANDOFF.md` section 11)
     - `"top_movers"`, `"market_status"`
 
     Every feed's wall-clock cost is recorded on `timings_ms`; rows-seen vs
@@ -891,10 +955,6 @@ def gather(raw_feeds: dict[str, Any], *, held_or_candidate: Sequence[str],
         bundle.items.extend(timed(f"earnings_estimates:{sym}",
             lambda raw=raw, sym=sym: earnings_estimate_items(raw, symbol=sym, asof=asof),
             channel="earnings_estimate"))
-
-    if "ipo_calendar" in raw_feeds:
-        bundle.items.extend(timed("ipo_calendar", lambda: ipo_calendar_items(raw_feeds.get("ipo_calendar"))))
-    bundle.skipped.append("ipo_calendar — always produces no items (no sector field in the real response, see ipo_calendar_items)")
 
     for sym, pair in raw_feeds.get("earnings_call_transcripts", {}).items():
         raw, reason = pair

@@ -372,21 +372,16 @@ def test_earnings_estimate_items_failed_on_none():
     assert RS.earnings_estimate_items(None, symbol="OXY", asof=ASOF)[0].quality == "failed"
 
 
-# --------------------------------------------------------------- IPO calendar (real -- no sector field)
-
-def test_ipo_calendar_always_returns_no_items():
-    """4 September 2026: the real schema has no `sector` field at all
-    (symbol,name,ipoDate,priceRangeLow,priceRangeHigh,currency,exchange) --
-    the sector-based attachment this parser used to attempt was never
-    actually possible."""
-    raw = _load("ipo_calendar.json")
-    assert RS.ipo_calendar_items(raw) == []
-    assert RS.ipo_calendar_items(None) == []
-    assert RS.ipo_calendar_items() == []
-
+# --------------------------------------------------------------- IPO calendar (dropped -- see below)
 
 def test_ipo_calendar_real_response_has_no_sector_key():
-    """Documents the actual real shape so a future change is caught."""
+    """`IPO_CALENDAR` was dropped from `gather()` entirely (4 September
+    2026): its real schema (symbol,name,ipoDate,priceRangeLow,
+    priceRangeHigh,currency,exchange) has no `sector` field, so it
+    structurally cannot satisfy Rule 1 (attach to something). This test
+    documents the real shape so a future response adding a usable field
+    is caught -- see HANDOFF.md section 11 for why the feed was removed
+    rather than kept as a permanently-empty call."""
     raw = _load("ipo_calendar.json")
     rows = RS._parse_av_csv_result(raw, "IPO_CALENDAR")
     assert "sector" not in rows[0]
@@ -500,6 +495,46 @@ def test_commodity_items_isolates_a_shape_error_to_its_own_channel():
     assert by_channel["commodity:NATURAL_GAS"].quality == "failed"
 
 
+def test_gold_silver_spot_parses_the_real_scalar_quote():
+    """4 September 2026: GOLD_SILVER_SPOT is a live scalar quote
+    ({"nominal":, "timestamp":, "price":}), not a time series -- the
+    first version of this parser routed it through
+    _rows_from_series_response like every other commodity channel and
+    raised ResearchShapeError on every single call, since a scalar quote
+    has neither a "result" nor a "data" key. GLDM/GLD/IAU are the only
+    real holders of this exposure (COMMODITY_EXPOSURE), all gold ETFs."""
+    raw = _load("gold_silver_spot_gold.json")
+    out = RS.commodity_items(["GLDM"], {"GOLD_SILVER_SPOT": raw}, asof=ASOF)
+    assert len(out) == 1
+    item = out[0]
+    assert item.channel == "commodity:GOLD_SILVER_SPOT"
+    assert item.quality == "ok"
+    assert item.value["value"] == "4424.4537790587"
+    assert item.value["nominal"] == "XAUUSD"
+    assert "gold-spot" in item.mechanism
+
+
+def test_gold_silver_spot_raises_a_shape_error_on_missing_price_key():
+    with pytest.raises(RS.ResearchShapeError):
+        RS._gold_silver_spot_row({"nominal": "XAUUSD"})
+
+
+def test_gold_silver_spot_shape_error_is_isolated_within_commodity_items():
+    """A malformed gold-spot response must not take down WTI/BRENT for
+    the same symbol -- same isolation guarantee as any other channel."""
+    good_wti = _load("wti_json.json")
+    broken_gold = {"nominal": "XAUUSD"}  # missing "price"
+    out = RS.commodity_items(["XOM"], {"WTI": good_wti, "GOLD_SILVER_SPOT": broken_gold}, asof=ASOF)
+    by_channel = {i.channel: i for i in out}
+    assert by_channel["commodity:WTI"].quality == "ok"
+    # XOM has no GOLD_SILVER_SPOT exposure per COMMODITY_EXPOSURE, so this
+    # also confirms the broken fixture is simply never touched for XOM.
+    assert "commodity:GOLD_SILVER_SPOT" not in by_channel
+
+    out2 = RS.commodity_items(["GLDM"], {"GOLD_SILVER_SPOT": broken_gold}, asof=ASOF)
+    assert out2[0].quality == "failed"
+
+
 def test_commodity_items_rejects_unknown_channel_in_exposure_table(monkeypatch):
     monkeypatch.setitem(RS.COMMODITY_EXPOSURE, "ZZZZ", ("NOT_A_CHANNEL",))
     with pytest.raises(ValueError, match="commodity channel"):
@@ -534,6 +569,46 @@ def test_put_call_items_failed_on_the_old_wrong_key():
 def test_put_call_items_failed_when_realtime_missing():
     items = RS.put_call_items(None, {"put_call_ratio_full_chain": "0.75"}, symbol="OXY", asof=ASOF)
     assert items[0].quality == "failed"
+
+
+def test_put_call_items_carries_no_near_term_signal_when_not_divergent():
+    """Real recorded data end to end: the realtime full-chain ratio is
+    0.46, and OXY's real nearest expiration (2026-09-04) was 0.45 -- a
+    2% difference, not a signal. This must not manufacture a near-term
+    item out of routine noise."""
+    realtime = _load("put_call_realtime_oxy.json")
+    historical = _load("put_call_historical_oxy.json")
+    items = RS.put_call_items(realtime, historical, symbol="OXY", asof=ASOF)
+    assert len(items) == 1
+    assert items[0].channel == "positioning:put_call"
+
+
+def test_put_call_items_carries_the_near_term_signal_when_genuinely_divergent():
+    """4 September 2026: HISTORICAL_PUT_CALL_RATIO carries
+    put_call_ratio_by_expiration, real information the first version of
+    this parser discarded entirely. Reusing OXY's real recorded
+    2026-09-11 row (value 2.07 against a 0.58 full-chain ratio, a 257%
+    real divergence) as the nearest entry to exercise the signal path --
+    every value here was genuinely observed live, only resequenced."""
+    real_rows = _load("put_call_historical_oxy.json")["put_call_ratio_by_expiration"]
+    divergent_first = {"put_call_ratio_full_chain": "0.58",
+                       "put_call_ratio_by_expiration": [real_rows[1]] + real_rows}
+    realtime = {"put_call_ratio_full_chain": "0.58"}
+    items = RS.put_call_items(realtime, divergent_first, symbol="OXY", asof=ASOF)
+    assert len(items) == 2
+    near_term = [i for i in items if i.channel == "positioning:put_call_nearterm"][0]
+    assert near_term.quality == "ok"
+    assert near_term.value["date"] == "2026-09-11"
+    assert "257%" in near_term.mechanism
+
+
+def test_near_term_put_call_signal_returns_none_without_by_expiration():
+    assert RS._near_term_put_call_signal("OXY", {"put_call_ratio_full_chain": "0.5"}, "0.5", asof=ASOF) is None
+
+
+def test_near_term_put_call_signal_returns_none_on_empty_list():
+    assert RS._near_term_put_call_signal(
+        "OXY", {"put_call_ratio_by_expiration": []}, "0.5", asof=ASOF) is None
 
 
 # --------------------------------------------------------------- top movers / market status (real)
@@ -590,11 +665,6 @@ def test_gather_records_skipped_feeds_rather_than_silently_omitting_them():
     bundle = RS.gather({}, held_or_candidate=["OXY"])
     assert any("news_av:OXY" in s for s in bundle.skipped)
     assert any("congress_trades" in s for s in bundle.skipped)
-
-
-def test_gather_always_records_ipo_calendar_as_producing_nothing():
-    bundle = RS.gather({}, held_or_candidate=["OXY"])
-    assert any("ipo_calendar" in s for s in bundle.skipped)
 
 
 def test_gather_skips_weather_cleanly_when_nothing_maps():
