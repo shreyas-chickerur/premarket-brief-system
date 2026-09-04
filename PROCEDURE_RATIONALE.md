@@ -139,6 +139,37 @@ passed since its last check, bounding detection latency to a known, small
 window instead of requiring the endpoint to run for every symbol every day
 regardless of whether anything could plausibly have changed.
 
+## Stage 0, step 7 — recording a stop fill for real, and what was deliberately not built
+
+Before 4 September 2026, nothing distinguished a stop-loss fill from any
+other sell fill at the Decision-recording layer — `runlog.
+find_optimizations`'s "are stops too tight" finding (keyed on `action ==
+"stop_filled"` and `inputs.recovered_within_5d`) could therefore never
+find a single matching decision. It was dead code keyed on fields nothing
+ever wrote.
+
+`runlog.stop_filled_decision` fixes the half that can be fixed cleanly:
+every real, filled `stop_market` order becomes a real `stop_filled`
+`Decision`, called once per freshly-fetched order in Stage 0 step 7 —
+never against a cached fill, since that fill was already recorded as a
+decision in whichever earlier run first fetched it fresh; recording it
+again on every later run it happens to still be cached would duplicate
+the same fill into the journal repeatedly.
+
+**The "did it recover within 5 days" half was deliberately not built.**
+That is information about what happens AFTER the decision is recorded,
+and the append-only journal has no way to retroactively enrich an
+already-written entry — the same constraint that makes a thesis's
+maturity outcome a separate `"close"`/`"outcome"` entry days later rather
+than an edit to the original `"thesis"` entry. Building it properly needs
+either that same separate-entry pattern, applied here, or a live price
+lookup `find_optimizations` does not currently take as an input — both
+real design decisions, neither implied by "record the fill." Rather than
+half-build a finding that can never actually fire, the whole
+`stop_distance` finding was removed from `find_optimizations`; the real
+`stop_filled` decisions are still in the journal for a human to review
+by hand, or for whichever of those two designs a future change picks.
+
 ## Stage 0, step 7 — why an unreadable file blocks rather than warns
 
 Before 4 September 2026, `ledger.fold_journal` already recorded a file

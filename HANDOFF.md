@@ -242,7 +242,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `WATCHDOG_PROCEDURE.md` | The watchdog's own procedure: assess today's manifest, and on a real problem, diagnose, attempt a fix, merge it, and re-run `DAILY_PROCEDURE.md` once |
 | `research.py` | Deterministic Stage 1 research — replaces "research by web search" with a defined candidate universe and one parser per feed (news, congressional/insider activity, scheduled events, filings, macro, commodities, positioning), every item graded `ok`/`thin`/`degraded`/`failed` and required to attach to a symbol or channel |
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
-| `runlog.py` | Run manifests, staged timing, preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals, honest scoring |
+| `runlog.py` | Run manifests, staged timing, preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals (`stop_distance` removed — see section 11), real `stop_filled` decisions via `stop_filled_decision`, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
@@ -251,7 +251,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
 | `test_quantcore.py` | 81 tests, including known-answer volatility and correlation recovery, and the floor/cap quality-conflation regression |
-| `test_runlog.py` | 57 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, and `abort()`'s first-reason-wins semantics |
+| `test_runlog.py` | 63 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, `abort()`'s first-reason-wins semantics, and `stop_filled_decision` against real order shapes |
 | `test_washsale.py` | 32 tests |
 | `test_ledger.py` | 88 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee), and `run_entry` (schema pinning, round-trip through a folded journal directly into `runlog.find_optimizations`) |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
@@ -1385,8 +1385,48 @@ agree — not just that both exist.
 
 `ledger.py`/`test_ledger.py`: 84 → 88 tests. Full suite: 420 → 424.
 
+### 4 September 2026 — real `stop_filled` decisions, and a dead finding removed rather than half-fixed
+
+`runlog.find_optimizations`'s "are stops too tight" finding
+(`stop_distance`) was keyed on `action == "stop_filled"` and
+`inputs.recovered_within_5d` — confirmed live that nothing in this
+codebase had ever written either field. It was permanently dead code,
+exercised only by tests that constructed the synthetic decision shape by
+hand.
+
+`runlog.stop_filled_decision(order, account=...)` fixes the half that can
+be fixed cleanly: every real, filled `stop_market` order from
+`get_equity_orders` becomes a real `stop_filled` `Decision`, recorded once
+per freshly-fetched order in `DAILY_PROCEDURE.md` Stage 0 step 7 (never
+against an already-cached fill, to avoid recording the same fill twice).
+
+The "did it recover within 5 days" half was NOT built. That is
+information about what happens after the decision is recorded, and the
+append-only journal cannot retroactively enrich an already-written entry
+— the same reason a thesis's outcome is a separate `"close"`/`"outcome"`
+entry days later, not an edit to the original `"thesis"` entry. Building
+it properly needs either that same separate-entry pattern or a live price
+lookup `find_optimizations` does not currently take as input — both real
+design decisions this fix does not make unilaterally. Rather than keep a
+finding that could structurally never fire, `stop_distance` was removed
+from `find_optimizations` entirely; the real `stop_filled` decisions are
+still in the journal for a human to review by hand, or for whichever
+design a future change picks — see section 12.
+
+`runlog.py`/`test_runlog.py`: 57 → 63 tests. Full suite: 424 → 430.
+
 ## 12. Open and unverified
 
+- **There is no "are stops too tight" optimization finding, and building
+  one needs a real design decision this codebase has not made.** Real
+  `stop_filled` decisions now accumulate in the journal (section 11's 4
+  September entry), but correlating a stop fill with whether the price
+  recovered within 5 days needs either a separate follow-up journal entry
+  written days later (the same pattern theses already use for maturity)
+  or a live price-history lookup passed into `runlog.find_optimizations`,
+  which is currently a pure function of `history` alone. Neither is built.
+  A human reviewing `stop_filled` decisions by hand is the only way to
+  answer "are stops too tight" today.
 - **`research.py` has now been live-checked feed by feed for every channel
   it calls, but never run end to end inside a real scheduled brief.** As
   of 4 September 2026, every one of: `NEWS_SENTIMENT`, Robinhood

@@ -298,21 +298,21 @@ def test_run_entry_round_trips_through_the_journal_into_find_optimizations():
     and Stage 0 step 9 read would do it, must be directly consumable by
     runlog.find_optimizations -- proving the pinned schema and the reader
     actually agree, not just that both exist."""
-    # Five runs where stops recovered promptly within 5 days -- the exact
-    # pattern find_optimizations looks for (see runlog.py "tight" stops).
+    # Ten runs dominated by one rejected gate -- the exact pattern
+    # find_optimizations looks for (see runlog.py "gate_balance").
     entries = []
-    for i in range(6):
+    for i in range(10):
         manifest = _run_log_with(decisions=[
-            {"symbol": "OXY", "action": "stop_filled", "account": "agentic",
-             "executed": True, "reason": "stop hit",
-             "inputs": {"recovered_within_5d": True}},
+            {"symbol": "OXY", "action": "reject", "account": "agentic",
+             "executed": False, "reason": "failed gate",
+             "gate_failed": "two_sources"},
         ])
         entries.append(_file(f"journal-2026-08-{i+1:02d}.json",
             [{"run_id": f"r{i}", "kind": "run", "payload": L.run_entry(manifest)}]))
 
     journal = L.fold_journal(entries)
     findings = R.find_optimizations(journal.runs)
-    assert any(f["kind"] == "stop_distance" for f in findings)
+    assert any(f["kind"] == "gate_balance" for f in findings)
 
 
 # ------------------------------------------------------- journal compaction

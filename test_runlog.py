@@ -319,13 +319,17 @@ def test_optimizer_is_silent_without_enough_history():
     assert R.find_optimizations(_hist(3)) == []
 
 
-def test_optimizer_spots_stops_that_are_too_tight():
-    dec = [{"action": "stop_filled", "inputs": {"recovered_within_5d": True}}]
+def test_optimizer_no_longer_reports_a_stop_distance_finding():
+    """4 September 2026: this finding was removed -- it was keyed on
+    action == "stop_filled" and inputs.recovered_within_5d, and nothing
+    in this codebase had ever written either field. stop_filled is now
+    emitted for real (see stop_filled_decision), but recovered_within_5d
+    cannot be without a design this fix does not make on its own (see
+    find_optimizations's docstring). A stop_filled decision alone,
+    however many times it recurs, must not produce this finding."""
+    dec = [{"action": "stop_filled", "inputs": {"fill_price": 58.09, "quantity": 2}}]
     found = R.find_optimizations([{**h, "decisions": dec} for h in _hist(8)])
-    kinds = [f["kind"] for f in found]
-    assert "stop_distance" in kinds
-    f = next(f for f in found if f["kind"] == "stop_distance")
-    assert f["confidence"] == "tentative" and f["sample"] == 8
+    assert "stop_distance" not in [f["kind"] for f in found]
 
 
 def test_optimizer_spots_a_single_dominant_gate():
@@ -349,9 +353,64 @@ def test_optimizer_spots_a_dominant_slow_stage():
 
 
 def test_every_optimization_states_its_sample_size():
-    dec = [{"action": "stop_filled", "inputs": {"recovered_within_5d": True}}]
-    for f in R.find_optimizations([{**h, "decisions": dec} for h in _hist(8)]):
+    dec = [{"action": "reject", "gate_failed": "two_sources"}]
+    for f in R.find_optimizations([{**h, "decisions": dec} for h in _hist(10)]):
         assert "sample" in f and "confidence" in f and "proposal" in f
+
+
+# ------------------------------------------------------- stop_filled_decision
+
+def _stop_order(**overrides):
+    order = {"id": "o1", "symbol": "OXY", "type": "stop_market", "state": "filled",
+             "quantity": "2.000000", "cumulative_quantity": "2.000000",
+             "average_price": "58.090000", "stop_price": "58.500000"}
+    order.update(overrides)
+    return order
+
+
+def test_stop_filled_decision_from_a_real_filled_stop_order():
+    d = R.stop_filled_decision(_stop_order(), account="agentic")
+    assert d is not None
+    assert d.symbol == "OXY" and d.action == "stop_filled" and d.executed
+    assert d.account == "agentic"
+    assert d.inputs["fill_price"] == 58.09
+    assert d.inputs["stop_price"] == 58.5
+    assert d.inputs["quantity"] == 2.0
+    assert d.inputs["order_id"] == "o1"
+    assert "58.09" in d.reason
+
+
+def test_stop_filled_decision_none_for_a_non_stop_order():
+    assert R.stop_filled_decision(_stop_order(type="market"), account="agentic") is None
+
+
+def test_stop_filled_decision_none_for_an_unfilled_stop_order():
+    order = _stop_order(state="cancelled", cumulative_quantity="0.000000")
+    assert R.stop_filled_decision(order, account="agentic") is None
+
+
+def test_stop_filled_decision_falls_back_to_limit_price_when_no_average_price():
+    order = _stop_order(average_price=None, price="58.10")
+    d = R.stop_filled_decision(order, account="individual")
+    assert d.inputs["fill_price"] == 58.10
+
+
+def test_stop_filled_decision_handles_a_missing_stop_price_gracefully():
+    order = _stop_order(stop_price=None)
+    d = R.stop_filled_decision(order, account="agentic")
+    assert d.inputs["stop_price"] is None
+
+
+def test_stop_filled_decision_feeds_a_real_journal_entry():
+    """The point of the fix: a real stop_filled decision, recorded the
+    same way run_entry captures any other decision, actually appears in
+    the journal's decisions -- the exact thing find_optimizations was
+    permanently unable to see before this existed."""
+    d = R.stop_filled_decision(_stop_order(), account="agentic")
+    log = R.RunLog("run-z")
+    log.decide(d)
+    manifest = log.manifest()
+    assert manifest["decisions"][0]["action"] == "stop_filled"
 
 
 # ---------------------------------------------------------------- scoring

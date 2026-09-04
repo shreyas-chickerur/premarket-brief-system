@@ -76,6 +76,54 @@ class Decision:
     def to_dict(self): return asdict(self)
 
 
+def stop_filled_decision(order: dict, *, account: str) -> Optional["Decision"]:
+    """A `Decision` for a stop-market order that actually filled, or
+    `None` if this order was not a filled stop.
+
+    Before 4 September 2026, nothing in this codebase distinguished a
+    stop-loss fill from any other sell fill at the Decision-recording
+    layer — `find_optimizations`'s "are stops too tight" check
+    (`action == "stop_filled"`) could therefore never find a single
+    matching decision; it was dead code keyed on a field nothing ever
+    wrote. This fixes that half: every real, filled `stop_market` order
+    from `get_equity_orders` now becomes a real `stop_filled` decision.
+    It deliberately does NOT attempt the companion "did the price recover
+    within 5 days" check that finding also depended on — see
+    `find_optimizations`'s docstring for why that half needs a design
+    this fix does not make on its own.
+
+    `order` is a raw Robinhood order dict (the same shape
+    `ledger.fills_from_orders` reads); call this once per order while
+    rebuilding fills in `DAILY_PROCEDURE.md` Stage 0 step 7, for both
+    accounts, and record every non-`None` result with `log.decide(...)`.
+    """
+    if str(order.get("type", "")) != "stop_market":
+        return None
+    qty = float(order.get("cumulative_quantity") or 0.0)
+    if qty <= 0:
+        return None
+
+    price = order.get("average_price")
+    if price in (None, ""):
+        price = order.get("price")
+    stop_price = order.get("stop_price")
+
+    return Decision(
+        symbol=str(order.get("symbol", "")).upper(),
+        action="stop_filled",
+        account=account,
+        executed=True,
+        reason=(f"stop order filled at {price}" if price not in (None, "")
+               else "stop order filled"),
+        inputs={
+            "quantity": qty,
+            "fill_price": float(price) if price not in (None, "") else None,
+            "stop_price": float(stop_price) if stop_price not in (None, "") else None,
+            "order_id": str(order.get("id", "")),
+        },
+    )
+
+
 @dataclass
 class CircuitBreakerVerdict:
     """What `circuit_breaker_usd` / `hard_stop_usd` actually do, enforced
@@ -517,23 +565,32 @@ def find_optimizations(history: Sequence[dict]) -> list[dict]:
 
     Each finding names the evidence and the sample size, so a pattern seen four
     times is never dressed up as a validated conclusion.
+
+    **No "stops too tight" finding.** An earlier version of this function
+    looked for `action == "stop_filled"` decisions whose `inputs` carried
+    `recovered_within_5d`, on the theory that a stop that filled and then
+    saw the price promptly recover suggests the volatility multiple is too
+    tight. Confirmed 4 September 2026: nothing in this codebase had ever
+    written either field — `stop_filled` is now emitted for real (see
+    `stop_filled_decision`), but `recovered_within_5d` cannot be. It
+    describes what happens AFTER a decision is recorded, and the
+    append-only journal has no way to retroactively enrich an
+    already-written entry — the same reason theses use a separate
+    `"close"`/`"outcome"` pair days later rather than editing the original
+    `"thesis"` entry. Building this finding properly needs either that same
+    separate-entry pattern (a real design decision, not implied by this
+    one) or a live price lookup this otherwise pure, data-free function
+    does not have. Rather than keep a finding permanently silent behind a
+    field nothing could ever populate, it was removed; the raw
+    `stop_filled` decisions are still in the journal for a human to review
+    by hand, or for a future version of this function built around one of
+    those two designs. See `HANDOFF.md` section 12.
     """
     out: list[dict] = []
     if len(history) < 5:
         return out
     recent = list(history)[-30:]
     n = len(recent)
-
-    # Stops that filled and then the name recovered promptly => stop too tight.
-    tight = [d for h in recent for d in h.get("decisions", [])
-             if d.get("action") == "stop_filled" and d.get("inputs", {}).get("recovered_within_5d")]
-    stops = [d for h in recent for d in h.get("decisions", []) if d.get("action") == "stop_filled"]
-    if len(stops) >= 5 and len(tight) / len(stops) > 0.5:
-        out.append({"kind": "stop_distance", "confidence": "tentative",
-                    "sample": len(stops),
-                    "finding": f"{len(tight)} of {len(stops)} stopped positions recovered "
-                               f"within five days — the volatility multiple may be too tight",
-                    "proposal": "raise k_daily_sigma from 2.5 to 3.0 and re-observe"})
 
     # Which gate condition is doing the rejecting?
     gates: dict[str, int] = {}
