@@ -365,6 +365,24 @@ August 2026, so a stuck order no longer has to be waited out.
 
 ## Stage 6 — why the schema and the five-section cap
 
+**Why `emailer.verify_email` runs before `render_email`, and why it
+raises rather than warns.** The email is the one artefact a human
+actually reads and the one place a fabricated number or an unsupported
+claim would do real damage — silently trusted because it came from the
+system's own report. `verify_email` checks, before anything renders: a
+card's `quantity` against the actual recorded `Decision`; that every
+bullet in the two account sections has a source; that the source is
+either a real research-bundle source or matches
+`ALLOWED_SOURCE_PREFIXES` (this repo's own data-provider and module
+naming conventions); and that every other number in a bullet or a card's
+`detail` can be traced, exactly or within a stated tolerance, to the
+manifest, the research bundle, or a broker response — dates and ordinals
+exempted, since "reports 9 Sep" is not a financial claim needing a
+source the way "up 47% this week" is. It raises `ValueError` rather than
+logging a warning specifically so a run cannot accidentally catch the
+exception and send anyway; if it fires, the fix is the card or bullet
+that produced the untraceable claim, never the check.
+
 **Why "always create a new file, never modify one."** The Drive connector
 rewrites metadata but not contents.
 

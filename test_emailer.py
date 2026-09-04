@@ -368,3 +368,151 @@ def test_idea_cards_closest_call_escapes_its_fields():
         _closest_call(symbol="<script>bad</script>", gate_failed="<b>x</b>")])
     assert "<script>bad</script>" not in html
     assert "<b>x</b>" not in html
+
+
+# -------------------------------------------------------------- verify_email
+
+def _decision(symbol="OXY", account="agentic", quantity=2.0, extra_inputs=None):
+    inputs = {"quantity": quantity}
+    if extra_inputs:
+        inputs.update(extra_inputs)
+    return {"symbol": symbol, "account": account, "action": "buy",
+            "executed": True, "reason": "cleared the gate", "inputs": inputs}
+
+
+def _manifest(decisions=()):
+    return {"run_id": "run-1", "decisions": list(decisions)}
+
+
+def test_verify_email_passes_a_clean_fully_traceable_case():
+    ideas = {"agentic": [{
+        "symbol": "OXY", "action": "buy", "quantity": "2 shares",
+        "detail": "limit 61.80, stop 58.09",
+        "bullets": [("Dated energy catalyst 9 Sep", "Alpha Vantage NEWS_SENTIMENT")],
+    }]}
+    manifest = _manifest([_decision(quantity=2.0, extra_inputs={"limit": 61.80, "stop": 58.09})])
+    E.verify_email(ideas, manifest=manifest)  # must not raise
+
+
+def test_verify_email_raises_on_quantity_mismatch():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "buy", "quantity": "3 shares"}]}
+    manifest = _manifest([_decision(quantity=2.0)])
+    with pytest.raises(ValueError, match="does not match"):
+        E.verify_email(ideas, manifest=manifest)
+
+
+def test_verify_email_raises_when_no_decision_matches_the_card_at_all():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "buy", "quantity": "2 shares"}]}
+    with pytest.raises(ValueError, match="no matching decision"):
+        E.verify_email(ideas, manifest=_manifest([]))
+
+
+def test_verify_email_matches_decisions_by_account_not_just_symbol():
+    """A quantity from the wrong account's decision must not satisfy the
+    agentic section's claim."""
+    ideas = {"agentic": [{"symbol": "OXY", "action": "buy", "quantity": "2 shares"}]}
+    manifest = _manifest([_decision(account="individual", quantity=2.0)])
+    with pytest.raises(ValueError, match="no matching decision"):
+        E.verify_email(ideas, manifest=manifest)
+
+
+def test_verify_email_raises_on_an_empty_source_bullet():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [("Looks fine", "")]}]}
+    with pytest.raises(ValueError, match="no source"):
+        E.verify_email(ideas, manifest=_manifest())
+
+
+def test_verify_email_raises_on_an_unrecognised_source():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [("Looks fine", "gut feeling")]}]}
+    with pytest.raises(ValueError, match="unrecognised source"):
+        E.verify_email(ideas, manifest=_manifest())
+
+
+def test_verify_email_accepts_a_source_from_known_sources():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [("Sourced narrowly", "EIA STEO, 9 Sep")]}]}
+    E.verify_email(ideas, manifest=_manifest(), known_sources=["EIA STEO, 9 Sep"])
+
+
+@pytest.mark.parametrize("source", [
+    "Alpha Vantage NEWS_SENTIMENT", "Robinhood get_equity_news",
+    "quantcore.stop_plan", "runlog.circuit_breaker_check",
+    "ledger.reconcile_positions", "evidence.assess", "washsale.check_buy",
+])
+def test_verify_email_accepts_every_allowed_source_prefix(source):
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [("Sourced broadly", source)]}]}
+    E.verify_email(ideas, manifest=_manifest())
+
+
+def test_verify_email_raises_on_an_untraceable_number_in_a_bullet():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [("Up 47% this week", "quantcore.stop_plan")]}]}
+    with pytest.raises(ValueError, match="not traceable"):
+        E.verify_email(ideas, manifest=_manifest())
+
+
+def test_verify_email_traces_a_number_present_in_supplied_evidence():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [("Up 47% this week", "quantcore.stop_plan")]}]}
+    E.verify_email(ideas, manifest=_manifest(),
+                   evidence=[{"weekly_change_pct": 47.0}])
+
+
+def test_verify_email_traces_a_rounded_number_within_tolerance():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [("Weight is 12.48%", "quantcore.stop_plan")]}]}
+    E.verify_email(ideas, manifest=_manifest(), evidence=[{"weight_pct": 12.483}])
+
+
+def test_verify_email_rejects_a_number_outside_tolerance():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [("Weight is 12.48%", "quantcore.stop_plan")]}]}
+    with pytest.raises(ValueError, match="not traceable"):
+        E.verify_email(ideas, manifest=_manifest(), evidence=[{"weight_pct": 20.0}])
+
+
+def test_verify_email_raises_on_untraceable_number_in_card_detail():
+    ideas = {"agentic": [{"symbol": "OXY", "action": "buy", "quantity": "2 shares",
+                          "detail": "limit 99.99"}]}
+    manifest = _manifest([_decision(quantity=2.0)])
+    with pytest.raises(ValueError, match="card detail"):
+        E.verify_email(ideas, manifest=manifest)
+
+
+@pytest.mark.parametrize("phrase", [
+    "reports 9 Sep", "reports Sep 9", "matures in 2026",
+    "the 21st of the month", "closed 2026-09-04",
+])
+def test_verify_email_exempts_dates_and_ordinals_from_numeric_tracing(phrase):
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [(phrase, "quantcore.stop_plan")]}]}
+    E.verify_email(ideas, manifest=_manifest())  # must not raise
+
+
+def test_verify_email_a_21_day_horizon_number_is_exempt_as_ordinal_like_but_bare_count_is_not():
+    """A bare small integer with no date/ordinal shape at all is NOT
+    exempt just because it's small -- only genuinely date-shaped numbers
+    are (see the parametrised date/ordinal test above)."""
+    ideas = {"agentic": [{"symbol": "OXY", "action": "hold",
+                          "bullets": [("cleared 4 of 5 conditions", "runlog.circuit_breaker_check")]}]}
+    with pytest.raises(ValueError, match="not traceable"):
+        E.verify_email(ideas, manifest=_manifest())
+
+
+def test_verify_email_only_checks_sections_actually_passed():
+    """Passing only "agentic" must not require an "individual" section to
+    exist or be checked."""
+    ideas = {"agentic": [{"symbol": "OXY", "action": "buy", "quantity": "2 shares"}]}
+    manifest = _manifest([_decision(quantity=2.0)])
+    E.verify_email(ideas, manifest=manifest)  # no "individual" key at all
+
+
+def test_verify_email_empty_ideas_pass_trivially():
+    E.verify_email({"agentic": [], "individual": []}, manifest=_manifest())
+
+
+def test_verify_email_is_part_of_the_public_api():
+    assert "verify_email" in E.__all__ and "ALLOWED_SOURCE_PREFIXES" in E.__all__

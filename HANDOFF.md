@@ -246,7 +246,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads; `Journal.closed_for_scoring` joins thesis + outcome entries for `score_closed_decisions` |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
-| `emailer.py` | HTML brief rendering, failure diagnosis, subject lines, the five-section cap (`CANONICAL_SECTIONS`/`MAX_SECTIONS`) enforced in code, closest-call reporting in `idea_cards` for a day nothing clears the gate |
+| `emailer.py` | HTML brief rendering, failure diagnosis, subject lines, the five-section cap (`CANONICAL_SECTIONS`/`MAX_SECTIONS`) enforced in code, closest-call reporting in `idea_cards` for a day nothing clears the gate, `verify_email` — raises on an unsupported number, source, or empty-source bullet before anything renders |
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
@@ -258,7 +258,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_watchdog.py` | 15 tests |
 | `test_research.py` | 45 tests, against recorded fixtures in `fixtures/research/`, never the live API |
 | `test_procedure_docs.py` | 6 tests: the DRY RUN guard's exact text, and that every stage has a matching rationale section |
-| `test_emailer.py` | 45 tests, including escaping, no-research-on-abort, the `idea_card`/`idea_cards` bulleted format, the five-section cap (exact set, over-cap, unrecognised title, duplicate title, and that the cap is not enforced on an aborted run), and closest-call reporting (only shown on an empty day, ordering, escaping) |
+| `test_emailer.py` | 73 tests, including escaping, no-research-on-abort, the `idea_card`/`idea_cards` bulleted format, the five-section cap (exact set, over-cap, unrecognised title, duplicate title, and that the cap is not enforced on an aborted run), closest-call reporting, and `verify_email` (quantity mismatch, no matching decision, wrong-account decision, empty/unrecognised source, every allowed source prefix, untraceable and tolerance-matched numbers, date/ordinal exemption) |
 
 Key API surface:
 
@@ -1519,8 +1519,47 @@ Stage 6 wires `runlog.closest_calls` into both account sections.
 `runlog.py`/`test_runlog.py`: 63 → 70 tests. `emailer.py`/`test_emailer.py`:
 41 → 45 tests. Full suite: 445 → 456.
 
+### 4 September 2026 — `emailer.verify_email`, the guard against a fabricated claim
+
+The email is the one artefact a human actually reads, and nothing before
+this checked that its claims were real. `verify_email` runs on the
+structured `agentic_ideas`/`suggestion_ideas` dicts before `idea_cards`
+renders them to HTML, and raises `ValueError` — never a warning, never
+caught and sent anyway — on the first of:
+
+1. A card's `quantity` not matching the recorded `Decision`'s
+   `inputs.quantity` (or no matching decision at all).
+2. A bullet in the agentic or individual section with an empty source.
+3. A bullet whose source is neither a real research-bundle source nor
+   matches `ALLOWED_SOURCE_PREFIXES` (`"Alpha Vantage "`, `"Robinhood "`,
+   and this repo's own module names, for a computed check or tool-call
+   source).
+4. A numeric token — in a bullet or a card's `detail` — that cannot be
+   traced, exactly or within a stated relative tolerance (default 1%), to
+   the manifest, the research bundle, or a broker response. Dates and
+   ordinals are exempted via an explicit allow-list (`"9 Sep"`, `"21st"`,
+   a bare year, an ISO date) — a small bare integer with no date shape
+   (`"cleared 4 of 5"`) is NOT exempt just because it is small.
+
+`DAILY_PROCEDURE.md` Stage 6 calls it immediately before `render_email`
+and treats a raise as a bug in what was built for the email — fix the
+card or bullet, never weaken the check.
+
+`emailer.py`/`test_emailer.py`: 45 → 73 tests. Full suite: 456 → 484.
+
 ## 12. Open and unverified
 
+- **`emailer.verify_email`'s numeric tracing is a regex-based heuristic,
+  not real natural-language understanding.** It finds number-shaped
+  substrings and checks whether a matching value appears somewhere in the
+  supplied evidence, exempting a fixed set of date/ordinal shapes. This
+  will not catch every conceivable phrasing (a number spelled out in
+  words, e.g. "twelve percent"), and it can in principle be fooled by an
+  unrelated coincidental number sitting in the evidence blob. It is a real
+  guard against the common failure mode — a fabricated figure with nothing
+  behind it at all — not a proof of semantic correctness. It has never run
+  against a real, live-generated email; only against hand-built test
+  cases.
 - **There is no "are stops too tight" optimization finding, and building
   one needs a real design decision this codebase has not made.** Real
   `stop_filled` decisions now accumulate in the journal (section 11's 4

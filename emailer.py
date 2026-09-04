@@ -26,11 +26,13 @@ blocked by default in most clients and would make the mail look broken.
 
 from __future__ import annotations
 
+import re
 from html import escape
 from typing import Any, Iterable, Optional, Sequence
 
 __all__ = ["diagnose", "render_email", "subject_for", "idea_card", "idea_cards",
-          "CANONICAL_SECTIONS", "MAX_SECTIONS"]
+          "CANONICAL_SECTIONS", "MAX_SECTIONS", "verify_email",
+          "ALLOWED_SOURCE_PREFIXES"]
 
 # --------------------------------------------------------------------------
 # palette
@@ -278,6 +280,179 @@ def idea_cards(ideas: Sequence[dict], *, closest_calls: Sequence[dict] = ()) -> 
             f'conditions, failed on "{escape(str(c["gate_failed"]))}".',
             size=13, color=MUTED))
     return "".join(lines)
+
+
+# --------------------------------------------------------------------------
+# verification -- the guard against a fabricated claim reaching the email
+# --------------------------------------------------------------------------
+
+# Source-string prefixes trusted without appearing in a caller-supplied
+# `known_sources` list -- this repo's own data-provider naming convention
+# (`research.py`: every source is `"Alpha Vantage <ENDPOINT>"` or
+# `"Robinhood <method>"`) plus its module names, for a bullet whose source
+# is a computed check or a tool call rather than a research feed (e.g.
+# `"quantcore.stop_plan"`, `"review_equity_order"` -- see
+# `PROCEDURE_RATIONALE.md` Stage 6). A source matching neither this nor
+# `known_sources` is unrecognised and `verify_email` raises.
+ALLOWED_SOURCE_PREFIXES = (
+    "Alpha Vantage ", "Robinhood ",
+    "quantcore.", "runlog.", "ledger.", "evidence.", "washsale.",
+)
+
+_ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+_ORDINAL_RE = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)\b", re.IGNORECASE)
+_MONTH_NEAR_NUMBER_RE = re.compile(
+    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}\b|"
+    r"\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\b",
+    re.IGNORECASE)
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _date_like_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans in `text` that are dates or ordinals -- the
+    explicit allow-list `verify_email` exempts from numeric tracing.
+    `"9 Sep"`, `"Sep 9"`, `"21st"`, `"2026-09-04"`, and a bare `"2026"`
+    are none of them financial figures and none of them need to trace
+    back to the manifest, research bundle, or a broker response."""
+    spans = []
+    for pattern in (_ISO_DATE_RE, _MONTH_NEAR_NUMBER_RE, _ORDINAL_RE, _YEAR_RE):
+        spans.extend((m.start(), m.end()) for m in pattern.finditer(text))
+    return spans
+
+
+def _numeric_claims(text: str) -> list[str]:
+    """Numeric substrings in `text` that are NOT inside a date/ordinal
+    span -- the tokens `verify_email` must be able to trace."""
+    exempt = _date_like_spans(text)
+    return [m.group() for m in _NUMBER_RE.finditer(text)
+            if not any(s <= m.start() and m.end() <= e for s, e in exempt)]
+
+
+def _traceable(claim: str, evidence_text: str, tolerance: float) -> bool:
+    """Whether numeric string `claim` can be found in `evidence_text`,
+    exactly or within `tolerance` (relative) of some number appearing in
+    it. An exact substring match is checked first since it is both cheap
+    and the common case (a value copied verbatim); the tolerance match
+    exists for a value that was legitimately rounded or formatted
+    differently (`"12.5%"` in a bullet against a raw `12.483` in a
+    decision's inputs)."""
+    if claim in evidence_text:
+        return True
+    try:
+        val = float(claim)
+    except ValueError:
+        return False
+    for m in _NUMBER_RE.finditer(evidence_text):
+        ev = float(m.group())
+        if val == 0.0:
+            if ev == 0.0:
+                return True
+            continue
+        if abs(ev - val) / abs(val) <= tolerance:
+            return True
+    return False
+
+
+def verify_email(ideas_by_account: dict[str, Sequence[dict]], *,
+                 manifest: dict,
+                 known_sources: Sequence[str] = (),
+                 evidence: Sequence[Any] = (),
+                 numeric_tolerance: float = 0.01) -> None:
+    """Cross-check every claim in the two account sections against real
+    data BEFORE the email renders, and raise `ValueError` on the first
+    thing that cannot be traced. This is the only defence against a
+    fabricated number or an unsupported claim reaching the one artefact a
+    human actually reads — call it on the structured idea dicts, before
+    `idea_cards` turns them into HTML, never by re-parsing rendered markup.
+
+    `ideas_by_account` is `{"agentic": agentic_ideas, "individual":
+    suggestion_ideas}` — the same dicts passed to `idea_cards`, keyed by
+    the `Decision.account` value each section corresponds to. `manifest`
+    is the run's `log.manifest()`. `known_sources` are source strings this
+    run's research bundle actually produced (e.g.
+    `[i.source for i in bundle.items]`); `ALLOWED_SOURCE_PREFIXES` covers
+    computed-check and tool-call sources without the caller having to
+    enumerate every one. `evidence` is an arbitrary sequence of additional
+    data to trace numbers against — broker responses, the research
+    bundle's items, anything with real numbers in it; `manifest` is always
+    included automatically, so a number the manifest itself contains never
+    needs to be passed separately.
+
+    Raises on the first of:
+
+    1. **A card's `quantity` does not match the matching `Decision`'s
+       `inputs.quantity`** in `manifest["decisions"]`, matched by symbol
+       and account. A card naming a quantity with no matching decision at
+       all is the same failure — there is nothing for it to agree with.
+    2. **A bullet with an empty source.** Every claim in these two
+       sections must be attributable; `idea_card`'s own general-purpose
+       leniency (an empty source renders without a tag) does not apply
+       here.
+    3. **A bullet whose source is neither in `known_sources` nor matches
+       `ALLOWED_SOURCE_PREFIXES`.**
+    4. **A numeric token in a bullet's text, or a card's `detail`, that
+       cannot be traced** (exactly, or within `numeric_tolerance`
+       relative) **to `manifest`, `evidence`, or a decision's `inputs`.**
+       Dates and ordinals are exempted via `_date_like_spans` — a horizon
+       of "21 days" or a report dated "9 Sep" is never required to trace
+       back to a source the way a price or a percentage is.
+
+    Sections not passed (e.g. only `"agentic"`) are simply not checked —
+    this function only ever covers the two account sections; system
+    health, prior-day review, and diversification are not claims about a
+    specific trade and are out of scope for it.
+    """
+    decisions_by_key: dict[tuple[str, str], list[dict]] = {}
+    for d in manifest.get("decisions", []):
+        key = (str(d.get("symbol", "")).upper(), str(d.get("account", "")))
+        decisions_by_key.setdefault(key, []).append(d)
+
+    evidence_text = str(manifest) + " " + " ".join(str(e) for e in evidence)
+
+    def source_known(source: str) -> bool:
+        return source in known_sources or any(source.startswith(p) for p in ALLOWED_SOURCE_PREFIXES)
+
+    for account, ideas in ideas_by_account.items():
+        for idea in ideas:
+            symbol = str(idea.get("symbol", "")).upper()
+
+            qty_text = str(idea.get("quantity", "") or "")
+            qty_claims = _numeric_claims(qty_text)
+            if qty_claims:
+                matches = decisions_by_key.get((symbol, account), [])
+                decision_qty = next(
+                    (m["inputs"]["quantity"] for m in matches
+                     if m.get("inputs", {}).get("quantity") is not None), None)
+                if decision_qty is None:
+                    raise ValueError(
+                        f'{symbol} ({account}): card states quantity {qty_text!r} but no '
+                        f'matching decision records a quantity')
+                for c in qty_claims:
+                    if abs(float(c) - float(decision_qty)) > max(abs(float(decision_qty)), 1e-9) * numeric_tolerance:
+                        raise ValueError(
+                            f'{symbol} ({account}): card quantity {qty_text!r} does not match '
+                            f'the recorded decision quantity {decision_qty!r}')
+
+            for claim in _numeric_claims(str(idea.get("detail", "") or "")):
+                if not _traceable(claim, evidence_text, numeric_tolerance):
+                    raise ValueError(
+                        f'{symbol} ({account}): card detail contains {claim!r}, not traceable '
+                        f'to the manifest or supplied evidence within {numeric_tolerance:.0%} tolerance')
+
+            for text, source in idea.get("bullets", ()):
+                if not source:
+                    raise ValueError(f'{symbol} ({account}): bullet {text!r} has no source')
+                if not source_known(source):
+                    raise ValueError(
+                        f'{symbol} ({account}): bullet cites unrecognised source {source!r} '
+                        f'-- not in known_sources and matches no ALLOWED_SOURCE_PREFIXES entry')
+                for claim in _numeric_claims(text):
+                    if not _traceable(claim, evidence_text, numeric_tolerance):
+                        raise ValueError(
+                            f'{symbol} ({account}): bullet {text!r} contains {claim!r}, not '
+                            f'traceable to the manifest or supplied evidence within '
+                            f'{numeric_tolerance:.0%} tolerance')
 
 
 # --------------------------------------------------------------------------

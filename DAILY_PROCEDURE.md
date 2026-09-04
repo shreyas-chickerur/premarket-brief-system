@@ -126,12 +126,20 @@ Write two files to Drive folder `{{DRIVE_FOLDER_ID}}` — **the connector rewrit
 - **If the 06:20 scheduled routine fired this directly** and the run **ABORTED**: do not render or send any email. Write the manifest and journal as above and stop. The watchdog owns deciding what happens next.
 - **If the run SUCCEEDED or the market was CLOSED**, or **if you are the watchdog re-running this procedure after a diagnosis/fix attempt**: render and send the email now. This is the only place email-sending logic lives; both callers funnel through it.
 
+**Before rendering anything, verify it.** Call `emailer.verify_email({"agentic": agentic_ideas, "individual": suggestion_ideas}, manifest=log.manifest(), known_sources=[i.source for i in bundle.items], evidence=[bundle, broker_responses_this_run])`. **It raises `ValueError` — do not catch it and send anyway — on a card's numbers not matching the recorded decision, an empty-source bullet, a bullet citing a source outside the research bundle and `emailer.ALLOWED_SOURCE_PREFIXES`, or a numeric claim (a price, a percentage, anything not a date or ordinal) that cannot be traced to the manifest, the research bundle, or a broker response.** This is the only defence against a fabricated number or an unsupported claim reaching the one artefact a human actually reads — if it raises, that is a bug in what was built for the email, not a false alarm to route around; fix the underlying card/bullet, do not weaken the check.
+
 **When you do send, keep it to `emailer.CANONICAL_SECTIONS` — at most `emailer.MAX_SECTIONS` (5) sections, every title drawn from that exact tuple. `render_email` raises `ValueError` on an extra, renamed, or duplicated section — this is enforced in code, not just this prose, specifically so the section list cannot silently grow again the way it did before the 1 September 2026 cut from four to three. A day with nothing to say for a section omits it (fewer than 5 is fine); it never invents a sixth.**
 
 ```python
 import emailer, runlog
 agentic_rejections = [d for d in log.manifest()["decisions"] if d["account"] == "agentic" and d.get("gate_failed")]
 individual_rejections = [d for d in log.manifest()["decisions"] if d["account"] == "individual" and d.get("gate_failed")]
+emailer.verify_email(
+    {"agentic": agentic_ideas, "individual": suggestion_ideas},
+    manifest=log.manifest(),
+    known_sources=[i.source for i in bundle.items],
+    evidence=[bundle, broker_responses_this_run],
+)  # raises ValueError on anything unsupported -- fix the card/bullet, never catch and send anyway
 subject, html = emailer.render_email(
     log.manifest(),
     sections=[("Agentic account — activity",
