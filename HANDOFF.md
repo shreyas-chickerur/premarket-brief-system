@@ -244,7 +244,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
 | `runlog.py` | Run manifests, staged timing, preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals (`stop_distance` removed — see section 11), real `stop_filled` decisions via `stop_filled_decision`, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
-| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads |
+| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads; `Journal.closed_for_scoring` joins thesis + outcome entries for `score_closed_decisions` |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
 | `emailer.py` | HTML brief rendering, failure diagnosis, subject lines |
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
@@ -253,7 +253,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_quantcore.py` | 81 tests, including known-answer volatility and correlation recovery, and the floor/cap quality-conflation regression |
 | `test_runlog.py` | 63 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, `abort()`'s first-reason-wins semantics, and `stop_filled_decision` against real order shapes |
 | `test_washsale.py` | 32 tests |
-| `test_ledger.py` | 88 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee), and `run_entry` (schema pinning, round-trip through a folded journal directly into `runlog.find_optimizations`) |
+| `test_ledger.py` | 93 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee), `run_entry` (schema pinning, round-trip through a folded journal directly into `runlog.find_optimizations`), and `closed_for_scoring` (thesis/outcome join, round-trip directly into `runlog.score_closed_decisions`) |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
 | `test_watchdog.py` | 15 tests |
 | `test_research.py` | 45 tests, against recorded fixtures in `fixtures/research/`, never the live API |
@@ -1414,6 +1414,34 @@ still in the journal for a human to review by hand, or for whichever
 design a future change picks — see section 12.
 
 `runlog.py`/`test_runlog.py`: 57 → 63 tests. Full suite: 424 → 430.
+
+### 4 September 2026 — Stage 0.6, the prior-day review nothing was calling
+
+`runlog.score_closed_decisions` existed since the 31 August 2026 redesign
+and was never called from anywhere — a defined but permanently dormant
+function, the exact "no prior-day review" gap an early review of this
+system flagged.
+
+New Stage 0.6 calls it for real, every run, right after Stage 0.5. It is
+deliberately a different question, not a duplicate: Stage 0.5's
+`evidence.assess` grades the record against ONE specific, pre-registered
+claim with a Bonferroni correction for repeated looks; Stage 0.6 asks the
+plainer question of what the honest hit rate and mean return have
+actually been, no pre-registered claim behind it, with its own honesty
+gate that refuses to call anything statistically meaningful below 30
+closed trades. The two can disagree, and reporting only one would hide
+the other's answer.
+
+`ledger.Journal.closed_for_scoring` does the joining `score_closed_decisions`
+needs: `evidence.Outcome.to_dict()` has no field named `outcome_pct` or
+`horizon_days` — `excess_pct` (the only number `Outcome` itself calls
+meaningful) stands in for `outcome_pct`, and `horizon_days` only exists on
+the original `"thesis"` entry, so the two are joined by `thesis_id`. Takes
+an `extra_outcomes` parameter so a thesis maturing THIS run counts toward
+the review immediately, the same "journal plus this run's fresh scores"
+pattern Stage 0.5 already uses for `evidence.assess`.
+
+`ledger.py`/`test_ledger.py`: 88 → 93 tests. Full suite: 430 → 435.
 
 ## 12. Open and unverified
 

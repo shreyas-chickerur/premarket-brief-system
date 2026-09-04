@@ -57,6 +57,14 @@ You are running the Pre-Market Brief System. This is a fresh session with no mem
 4. Call `evidence.trading_policy(verdict)`. **If `pause_new_positions` is true, override `max_new_positions_per_day` to 0 for the rest of this run and say so loudly and specifically in the email** — which verdict triggered it, and that existing positions and their stops are untouched. This takes effect the same run.
 5. Record this entire step's output — the verdict, `n`, the mean excess, the sample still needed, and the policy decision — on the run log in full. In the email itself (Stage 6, "System health"), compress it to one or two plain sentences: the verdict and, when `n == 0`, "no closed trades yet, roughly N more needed."
 
+**STAGE 0.6 — PRIOR-DAY REVIEW. Always runs, same as Stage 0.5 — this is a different question from it, not a duplicate.**
+
+Stage 0.5's `evidence.assess` answers one specific, pre-registered question: is there evidence for the exact edge this system set out to test. This stage answers a plainer one — honestly, what has the track record actually been — and it must run for real, not sit defined and never called (`runlog.score_closed_decisions` existed before 4 September 2026 but nothing had ever invoked it).
+
+1. Call `journal.closed_for_scoring(extra_outcomes=[o.to_dict() for o in outcomes just scored in Stage 0.5 step 1])` — the same "journal plus this run's fresh scores" combination Stage 0.5 step 2 already builds, so a thesis maturing this run counts immediately rather than waiting for the next one.
+2. Score it with `runlog.score_closed_decisions(closed)`. Its own honesty gate refuses to call anything statistically meaningful below 30 closed trades, and stays merely "provisional" below 100 — respect that language exactly, do not round it up in the email.
+3. Record the full result on the run log. In the email (Stage 6, "System health"), report it in one sentence immediately after the Stage 0.5 evidence line — hit rate, mean return, and the verdict's own honesty-gate language; when `n == 0`, "no closed trades yet."
+
 **STAGE 1 — GATHER.** The individual account is READ ONLY; the agentic account is tradable.
 
 Pull prices with **`TIME_SERIES_DAILY_ADJUSTED`, not `TIME_SERIES_DAILY`**. If the adjusted endpoint is unavailable on this key, say so in the email and rely on `detect_anomalies`, which blocks any symbol whose series contains a split-shaped ratio anywhere in the window, not just on the last bar.

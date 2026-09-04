@@ -780,6 +780,39 @@ class Journal:
                 out.append(p)
         return out
 
+    def closed_for_scoring(self, extra_outcomes: Sequence[dict] = ()) -> list[dict]:
+        """Every settled thesis, shaped for `runlog.score_closed_decisions`
+        — which needs `outcome_pct`, `thesis_played_out`, `horizon_days`.
+
+        `evidence.Outcome.to_dict()`, what a `"outcome"` journal entry's
+        payload actually carries, has neither field under those exact
+        names: `excess_pct` — the only number `Outcome` itself calls
+        meaningful, see its own docstring — is the honest choice for
+        `outcome_pct`, and `horizon_days` lives on the original `"thesis"`
+        entry, not the outcome, so this joins the two by `thesis_id`. An
+        outcome with no matching thesis entry, or missing `excess_pct`
+        entirely, is skipped rather than guessed at.
+
+        `extra_outcomes` lets a caller pass in outcomes scored THIS run
+        (`Outcome.to_dict()` results not yet written to the journal)
+        alongside the already-journaled ones — the same "journal plus this
+        run's fresh scores" pattern Stage 0.5 already uses when building
+        `evidence.assess`'s input.
+        """
+        theses_by_id = {e.payload.get("thesis_id"): e.payload for e in self.of_kind("thesis")}
+        all_outcomes = [e.payload for e in self.of_kind("outcome")] + list(extra_outcomes)
+        out = []
+        for p in all_outcomes:
+            thesis = theses_by_id.get(p.get("thesis_id"))
+            if thesis is None or "excess_pct" not in p:
+                continue
+            out.append({
+                "outcome_pct": p["excess_pct"],
+                "thesis_played_out": p.get("thesis_played_out"),
+                "horizon_days": int(thesis.get("horizon_days", 0) or 0),
+            })
+        return out
+
 
 def fold_journal(files: Iterable[dict]) -> Journal:
     """Fold dated journal files into one view, oldest first.

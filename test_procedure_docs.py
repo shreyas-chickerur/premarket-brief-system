@@ -49,11 +49,11 @@ def test_procedure_rationale_cross_references_every_stage():
     explanation anywhere is a sign something was dropped rather than moved."""
     daily = _read("DAILY_PROCEDURE.md")
     rationale = _read("PROCEDURE_RATIONALE.md")
-    for stage in ("STAGE 0", "STAGE 0.5", "STAGE 1", "STAGE 2", "STAGE 3",
-                  "STAGE 4", "STAGE 5", "STAGE 6"):
+    for stage in ("STAGE 0", "STAGE 0.5", "STAGE 0.6", "STAGE 1", "STAGE 2",
+                  "STAGE 3", "STAGE 4", "STAGE 5", "STAGE 6"):
         assert stage in daily, f"{stage} missing from the procedure itself"
-    for stage_ref in ("Stage 0,", "Stage 1", "Stage 2", "Stage 4", "Stage 5",
-                      "Stage 6"):
+    for stage_ref in ("Stage 0,", "Stage 0.6", "Stage 1", "Stage 2", "Stage 4",
+                      "Stage 5", "Stage 6"):
         assert stage_ref in rationale, f"no rationale section references {stage_ref}"
 
 

@@ -212,6 +212,36 @@ underscores and brackets), which breaks `json.loads` silently:
 history can vanish from the fold with no visible error. `download_file_content`
 returns raw base64 and does not have this problem.
 
+## Stage 0.6 — a different question from Stage 0.5, and why it must actually run
+
+`runlog.score_closed_decisions` existed before 4 September 2026 and was
+never called from anywhere — a defined but permanently dormant function,
+exactly the "no prior-day review" gap an early review of this system
+flagged. Stage 0.6 fixes that by calling it for real, every run.
+
+**Why this is not a duplicate of Stage 0.5.** `evidence.assess` grades
+the record against ONE specific, pre-registered claim (`target_edge_pct`,
+`assumed_sd_pct`), with a Bonferroni correction for repeated looks — a
+strict statistical test whose answer is "is there evidence for the exact
+thing we set out to test." `score_closed_decisions` asks a plainer
+question with no pre-registered claim behind it at all: honestly, what
+has the hit rate and mean return actually been. Both matter, and they can
+disagree — a small sample can show a positive mean return
+(`score_closed_decisions`) while still being nowhere near enough evidence
+to clear the pre-registered bar (`evidence.assess`), and reporting only
+one would hide the other's answer.
+
+**Why `journal.closed_for_scoring` joins two entry kinds rather than
+reading `"outcome"` alone.** `evidence.Outcome.to_dict()` — what an
+`"outcome"` entry's payload actually carries — has no field named
+`outcome_pct` or `horizon_days`; `runlog.score_closed_decisions` needs
+both. `excess_pct` (the only number `Outcome` itself calls meaningful) is
+the honest stand-in for `outcome_pct`, and `horizon_days` only exists on
+the original `"thesis"` entry, so the two have to be joined by
+`thesis_id`. This is the same class of schema-drift risk `ledger.run_entry`
+(section 6) exists to pin down elsewhere — a function whose caller and
+reader disagree about field names fails silently, not loudly.
+
 ## Stage 1 — why the adjusted endpoint, and why compact payloads
 
 **Adjusted, not raw, prices.** The unadjusted endpoint returns raw prices, so

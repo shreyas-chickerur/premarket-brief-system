@@ -246,6 +246,72 @@ def test_an_empty_folder_folds_to_an_empty_journal():
     assert j.runs == [] and j.entries == [] and j.unreadable == []
 
 
+# ---------------------------------------------------- closed_for_scoring
+
+def test_closed_for_scoring_joins_outcome_and_thesis_by_id():
+    j = L.fold_journal([_file("journal-2026-09-01.json", [
+        {"run_id": "a", "kind": "thesis",
+         "payload": {"thesis_id": "t1", "opened": "2026-09-01", "horizon_days": 21}},
+        {"run_id": "b", "kind": "outcome",
+         "payload": {"thesis_id": "t1", "excess_pct": 4.2, "thesis_played_out": True}},
+    ])])
+    closed = j.closed_for_scoring()
+    assert closed == [{"outcome_pct": 4.2, "thesis_played_out": True, "horizon_days": 21}]
+
+
+def test_closed_for_scoring_skips_an_outcome_with_no_matching_thesis():
+    """Should not happen -- the journal is append-only and a "close"/
+    "outcome" pair is only ever written for an already-recorded thesis --
+    but must not crash or fabricate a horizon if it does."""
+    j = L.fold_journal([_file("journal-2026-09-01.json", [
+        {"run_id": "b", "kind": "outcome",
+         "payload": {"thesis_id": "ghost", "excess_pct": 4.2}},
+    ])])
+    assert j.closed_for_scoring() == []
+
+
+def test_closed_for_scoring_skips_an_outcome_missing_excess_pct():
+    j = L.fold_journal([_file("journal-2026-09-01.json", [
+        {"run_id": "a", "kind": "thesis",
+         "payload": {"thesis_id": "t1", "opened": "2026-09-01", "horizon_days": 21}},
+        {"run_id": "b", "kind": "outcome", "payload": {"thesis_id": "t1"}},
+    ])])
+    assert j.closed_for_scoring() == []
+
+
+def test_closed_for_scoring_includes_extra_outcomes_not_yet_journaled():
+    """The same "journal plus this run's fresh scores" pattern Stage 0.5
+    already uses for evidence.assess -- a thesis maturing THIS run must
+    count toward the prior-day review immediately, not next run."""
+    j = L.fold_journal([_file("journal-2026-09-01.json", [
+        {"run_id": "a", "kind": "thesis",
+         "payload": {"thesis_id": "t1", "opened": "2026-08-01", "horizon_days": 30}},
+    ])])
+    closed = j.closed_for_scoring(extra_outcomes=[
+        {"thesis_id": "t1", "excess_pct": -1.5, "thesis_played_out": False},
+    ])
+    assert closed == [{"outcome_pct": -1.5, "thesis_played_out": False, "horizon_days": 30}]
+
+
+def test_closed_for_scoring_feeds_score_closed_decisions_directly():
+    """The guarantee that matters: the joined shape is directly consumable
+    by runlog.score_closed_decisions, not just structurally similar."""
+    entries = [
+        {"run_id": "a", "kind": "thesis",
+         "payload": {"thesis_id": f"t{i}", "opened": "2026-08-01", "horizon_days": 20}}
+        for i in range(35)
+    ] + [
+        {"run_id": "b", "kind": "outcome",
+         "payload": {"thesis_id": f"t{i}", "excess_pct": 2.0 if i % 2 == 0 else -1.0,
+                    "thesis_played_out": True}}
+        for i in range(35)
+    ]
+    j = L.fold_journal([_file("journal-2026-09-01.json", entries)])
+    result = R.score_closed_decisions(j.closed_for_scoring())
+    assert result["n"] == 35
+    assert result["statistically_meaningful"] == "no"  # under 100, per score_closed_decisions
+
+
 # ------------------------------------------------------------ run_entry
 
 def _run_log_with(*, health="nominal", duration_ms=1234,
