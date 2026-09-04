@@ -16,8 +16,9 @@ source of truth both scheduled routines follow:
 
 | File | Purpose |
 |---|---|
-| `DAILY_PROCEDURE.md` | The Stage 0–6 trading procedure, run every weekday morning and, on a retry, by the watchdog |
-| `WATCHDOG_PROCEDURE.md` | Checks whether the daily run happened and was healthy; on a real problem, diagnoses, fixes, merges, and retries |
+| `DAILY_PROCEDURE.md` | The Stage 0–6 trading procedure, run every weekday morning and, on a retry, by the watchdog. Rules only, no rationale. |
+| `WATCHDOG_PROCEDURE.md` | Checks whether the daily run happened and was healthy; on a real problem, diagnoses, fixes, merges, and retries. Rules only, no rationale. |
+| `PROCEDURE_RATIONALE.md` | Why each rule in the two documents above exists, cross-referenced by stage and step |
 | `TRIGGER_PROMPT.md` | The short trigger prompts that point each scheduled routine at the procedure above |
 
 ## Modules

@@ -1065,6 +1065,20 @@ computed check) rather than an unattributed paragraph of synthesis.
 activity" and "Individual account — suggestions" sections this way. 8 new
 tests.
 
+### 4 September 2026 — the procedure documents split from their own rationale
+
+An external review of this project (list of twelve findings, independently
+verified against the code before any of them were acted on) flagged that
+`DAILY_PROCEDURE.md` mixed load-bearing rules with the story of the morning
+that produced them — a rule an agent must follow exactly is harder to spot
+in the middle of a paragraph about 31 August 2026 than on its own line.
+`DAILY_PROCEDURE.md` and `WATCHDOG_PROCEDURE.md` now hold only imperative
+rules, one per line or short paragraph, no dates, no history. The
+explanation moved to the new `PROCEDURE_RATIONALE.md`, cross-referenced by
+stage and step number — nothing was dropped, only relocated. This is Task 1
+of that review's ordered work list; the remaining eleven follow in their own
+commits.
+
 ## 12. Open and unverified
 
 - Whether the connector broker refreshes the brokerage token indefinitely
