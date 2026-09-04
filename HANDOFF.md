@@ -174,6 +174,7 @@ the circuit breaker is far away. It becomes meaningful as capital is deployed.
 | Code | this public repository | `git clone --depth 1` each morning: no credentials, no context cost |
 | Configuration and the pre-registered evidence claim | `state.json`, private Google Drive folder | Account numbers, thresholds, the one hypothesis being tested |
 | Everything that changes run to run | rebuilt from the broker + dated `journal-*.json` files, same folder | See below — this is a deliberate redesign, not the original plan |
+| Fills and split events (never positions) | dated `fills-cache-*.json` / `splits-cache-*.json` files, same folder | Bounded-staleness cache so the full order history and every symbol's `SPLITS` don't get re-pulled every run — see below |
 
 The folder and file identifiers are in `HANDOFF.private.md`.
 
@@ -203,6 +204,25 @@ by default. Two properties of the connector, and the fix each one forced:
   the broker" into "do the broker's own positions follow from the broker's own
   fills" — a check that can actually fail for a reason worth aborting on
   (a transfer, a corporate action, a bug) rather than failing by construction.
+- **That rule stays exactly as it is — but the FILLS and SPLIT EVENTS
+  positions are rebuilt from can now themselves be cached, once they are old
+  enough to be safe (4 September 2026).** Before this, the full order
+  history was re-pulled with no `created_at_gte` and `SPLITS` was called for
+  every symbol, both on every single run, forever. `ledger.
+  fills_ready_to_cache` only writes a fill to `fills-cache-*.json` once it
+  is strictly older than `FILLS_CACHE_HORIZON_DAYS` (7 days) — long enough
+  that a Robinhood order can no longer plausibly still be open — and Stage
+  0 still always re-fetches that entire trailing window fresh from the
+  broker every run regardless of what is cached, so a still-mutable order
+  is never trusted from the cache before it has settled. `ledger.
+  symbols_needing_split_check` skips `SPLITS` only for a symbol checked
+  within `SPLITS_CACHE_HORIZON_DAYS`, so a real future split is still caught
+  within a bounded window rather than requiring a daily check forever.
+  Positions are still rebuilt fresh from the full cached-plus-new fill set
+  every run and still reconciled against the live broker snapshot every
+  run — nothing about what is trusted changes, only how much has to be
+  re-fetched to reconstruct it. See `PROCEDURE_RATIONALE.md`'s "why fills
+  and split checks are cached" and `HANDOFF.md` section 11.
 - **Drive is not a code fallback.** It briefly held copies of the Python
   modules; they went stale the first time the code changed, and a stale copy of
   the market calendar is exactly the failure this system is built to avoid. The
@@ -224,7 +244,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
 | `runlog.py` | Run manifests, staged timing, preflight self-audit, verified market calendar, regression review, optimization proposals, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
-| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold |
+| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached) |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
 | `emailer.py` | HTML brief rendering, failure diagnosis, subject lines |
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
@@ -233,7 +253,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_quantcore.py` | 81 tests, including known-answer volatility and correlation recovery, and the floor/cap quality-conflation regression |
 | `test_runlog.py` | 52 tests, including daylight-saving drift, market-calendar integrity, and circuit-breaker enforcement |
 | `test_washsale.py` | 32 tests |
-| `test_ledger.py` | 50 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, and the standing circuit-breaker fold |
+| `test_ledger.py` | 73 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, and the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch) |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
 | `test_watchdog.py` | 15 tests |
 | `test_research.py` | 45 tests, against recorded fixtures in `fixtures/research/`, never the live API |
@@ -1250,6 +1270,36 @@ more wrong parser and produced two deliberate design changes.
   `EARNINGS_CALL_TRANSCRIPT` and Robinhood `get_sec_filing`/
   `get_sec_filing_facts` remain unverified — see section 12.
 
+### 4 September 2026 — fills and split events are cached; positions are still never stored
+
+Findings from the original review of this system were confirmed and fixed:
+the full order history was pulled with no `created_at_gte` every single
+morning, and `SPLITS` was called for every unique symbol on every single
+run — both a fixed, growing cost paid daily for history that, past a short
+window, cannot change.
+
+`ledger.py` gained a bounded-staleness cache for fills and split events —
+**not** positions, which the storage rule in section 5 above still forbids
+storing at all. `fills_ready_to_cache` only writes a fill to
+`fills-cache-*.json` once it is strictly older than
+`FILLS_CACHE_HORIZON_DAYS` (7 days, generously longer than a Robinhood
+order can plausibly stay open), and `DAILY_PROCEDURE.md` Stage 0 step 7
+still always re-fetches that entire trailing window fresh from the broker
+every run via `fills_cache_watermark`, regardless of what is cached — a
+still-mutable order is never trusted from the cache before it has had time
+to settle. `symbols_needing_split_check` skips `SPLITS` only for a symbol
+checked within `SPLITS_CACHE_HORIZON_DAYS`, bounding a real future split's
+detection latency to a known window rather than eliminating the check
+outright. Both caches use the same append-only dated-file, fold-on-read
+pattern the journal already established, for the same reason: the Drive
+connector can create a file but not rewrite one.
+
+`fills_cache_round_trip_matches_a_direct_fetch` is the test that matters
+most here: reconstructing history from cached-plus-fresh fills must
+produce the exact same derived positions as fetching everything fresh
+every time, proven against the real 31 August 2026 order fixture.
+`ledger.py`: 50 → 73 tests. Full suite: 381 → 404.
+
 ## 12. Open and unverified
 
 - **`research.py` has now been live-checked feed by feed for every channel
@@ -1305,6 +1355,16 @@ more wrong parser and produced two deliberate design changes.
   for the live values) implies roughly 900 closed trades to settle at the
   observed trade rate. That is measured in years — see section 8's "Path to
   live trading" for why that is not, on its own, a reason to delay going live.
+- **The fills/split-events cache (section 5, section 11's 4 September entry)
+  has never run against a real Drive folder.** No `fills-cache-*.json` or
+  `splits-cache-*.json` file exists yet, so the first real run after this
+  change takes the cold-start path (`watermark=None`, full history fetched
+  exactly as before) and should behave identically to today — the caching
+  benefit only shows up starting the SECOND real run, once a cache file
+  exists to fold. `test_fills_cache_round_trip_matches_a_direct_fetch`
+  proves the reconstruction logic against the real 31 August order fixture,
+  but nothing has proven the actual dated-file read/write cycle against a
+  live Drive folder yet.
 
 ## 13. Standing honesty rules
 

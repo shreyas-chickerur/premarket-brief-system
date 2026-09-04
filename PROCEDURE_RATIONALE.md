@@ -91,6 +91,54 @@ transfer, a different corporate action, or a bug, and every downstream
 number depends on knowing which. Recording a new opening balance to make an
 unexplained residual disappear would defeat the entire check.
 
+## Stage 0, step 7 — why fills and split checks are cached, and positions still are not
+
+**The problem the cache fixes.** Before 4 September 2026, every single run
+pulled BOTH accounts' entire order history with no `created_at_gte` and
+called `SPLITS` for every unique symbol, every day, forever — a fixed,
+growing cost paid in full each morning for history that, past a short
+window, cannot change. This is exactly what a live review flagged as
+findings worth confirming, and both confirmed true.
+
+**Why the cache holds fills and split events, not positions.**
+`HANDOFF.md` section 5's storage rule is that positions are rebuilt every
+run, never stored — that is what makes drift structurally impossible
+rather than merely detected. Fills and split events are a different kind
+of fact: once an order has reached a terminal state and a split's
+effective date has passed, both are permanently fixed history, in exactly
+the same sense `journal-*.json` entries are — the fold-on-read pattern
+already proven safe for the journal applies to them just as well, and
+`positions_from_fills` is still called fresh on the full cached-plus-new
+fill set every run, still reconciled against the live broker snapshot
+every run. Nothing about what gets trusted changes; only how much has to
+be re-fetched from the broker to reconstruct it does.
+
+**Why a horizon window, not "cache anything older than the last fetch."**
+A Robinhood order is not guaranteed to be terminal the moment it is first
+seen — a partially filled order can still complete, or its remainder can
+still be cancelled, for some days after it was created. Caching a fill the
+first time it is observed would risk permanently under-counting an order
+that later filled more, silently corrupting `positions_from_fills` in a
+way `reconcile_positions` might never catch (the broker's own snapshot
+would simply always disagree by the same missed amount). `ledger.
+FILLS_CACHE_HORIZON_DAYS` (7 days) is the bound on how long an order is
+trusted to still possibly be open; `fills_ready_to_cache` only writes a
+fill to the cache once it is strictly older than that, and the watermark
+fetch in Stage 0 step 7 always re-covers that entire trailing window fresh
+regardless of what is cached, so a still-mutable order is never trusted
+from the cache before it has had time to settle.
+
+**Why splits are cached per-symbol with their own staleness check, not
+once and forever.** A split event, once its effective date has passed, will
+never change — but a company can announce and execute a NEW split at any
+future point while a symbol is still held or a candidate, so "checked once,
+trust forever" would let a real split silently escape detection.
+`symbols_needing_split_check` rechecks a symbol only after
+`SPLITS_CACHE_HORIZON_DAYS` (7 days, matching the fills horizon) have
+passed since its last check, bounding detection latency to a known, small
+window instead of requiring the endpoint to run for every symbol every day
+regardless of whether anything could plausibly have changed.
+
 ## Stage 0, step 8 — the wash-sale registry is rebuilt, never stored
 
 A stored copy that has forgotten a loss sale approves the repurchase that

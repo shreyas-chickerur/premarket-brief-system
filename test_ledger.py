@@ -7,7 +7,7 @@ assumes; real payloads carry the fields and states that actually turn up.
 """
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -572,3 +572,234 @@ def test_a_second_trip_after_a_clear_is_standing_again():
         ]),
     ])
     assert j.standing_circuit_breaker == {"reason": "second trip"}
+
+
+# --------------------------------------------------------------------------
+# fills and splits caching -- never positions
+# --------------------------------------------------------------------------
+
+def _cache_file(name, rows):
+    return {"title": name, "content": json.dumps(rows)}
+
+
+def _fill_row(symbol, side, qty, price, on, order_id=""):
+    return {"symbol": symbol, "side": side, "quantity": qty, "price": price,
+            "on": on, "order_id": order_id}
+
+
+def test_fills_cache_filename_matches_journal_convention():
+    assert L.fills_cache_filename(date(2026, 9, 1)) == "fills-cache-2026-09-01.json"
+    assert L.fills_cache_filename(date(2026, 9, 1), 1) == "fills-cache-2026-09-01-1.json"
+
+
+def test_fold_fills_cache_merges_and_sorts_across_dated_files():
+    fills, bad = L.fold_fills_cache([
+        _cache_file("fills-cache-2026-08-20.json",
+            [_fill_row("XOM", "buy", 10, 100.0, "2026-08-18", "o1")]),
+        _cache_file("fills-cache-2026-08-25.json",
+            [_fill_row("OXY", "sell", 3, 50.0, "2026-08-22", "o2")]),
+    ])
+    assert bad == []
+    assert [f.order_id for f in fills] == ["o1", "o2"]
+    assert fills[0].on == date(2026, 8, 18)
+
+
+def test_fold_fills_cache_dedupes_on_order_id():
+    """The same order_id appearing in two cache files (should not happen in
+    practice, but must not double-count a position if it does) keeps one
+    fill, not two."""
+    fills, bad = L.fold_fills_cache([
+        _cache_file("fills-cache-2026-08-20.json",
+            [_fill_row("XOM", "buy", 10, 100.0, "2026-08-18", "o1")]),
+        _cache_file("fills-cache-2026-08-21.json",
+            [_fill_row("XOM", "buy", 10, 100.0, "2026-08-18", "o1")]),
+    ])
+    assert bad == []
+    assert len(fills) == 1
+
+
+def test_fold_fills_cache_dedupes_fills_with_no_order_id_by_composite_key():
+    fills, bad = L.fold_fills_cache([
+        _cache_file("fills-cache-2026-08-20.json",
+            [_fill_row("XOM", "buy", 10, 100.0, "2026-08-18")]),
+        _cache_file("fills-cache-2026-08-21.json",
+            [_fill_row("XOM", "buy", 10, 100.0, "2026-08-18")]),
+    ])
+    assert len(fills) == 1
+
+
+def test_fold_fills_cache_ignores_non_matching_titles():
+    fills, bad = L.fold_fills_cache([
+        _cache_file("journal-2026-08-20.json", [{"entries": []}]),
+        _cache_file("fills-cache-2026-08-21.json",
+            [_fill_row("XOM", "buy", 10, 100.0, "2026-08-18", "o1")]),
+    ])
+    assert len(fills) == 1
+
+
+def test_fold_fills_cache_records_unreadable_content_rather_than_crashing():
+    fills, bad = L.fold_fills_cache([
+        {"title": "fills-cache-2026-08-20.json", "content": "not json"},
+        _cache_file("fills-cache-2026-08-21.json",
+            [_fill_row("XOM", "buy", 10, 100.0, "2026-08-18", "o1")]),
+    ])
+    assert len(fills) == 1
+    assert len(bad) == 1
+
+
+def test_fold_fills_cache_records_a_malformed_row_rather_than_crashing():
+    fills, bad = L.fold_fills_cache([
+        _cache_file("fills-cache-2026-08-20.json", [
+            _fill_row("XOM", "buy", 10, 100.0, "2026-08-18", "o1"),
+            {"symbol": "OXY"},  # missing required fields
+        ]),
+    ])
+    assert len(fills) == 1
+    assert len(bad) == 1
+
+
+def test_fold_fills_cache_empty_input():
+    fills, bad = L.fold_fills_cache([])
+    assert fills == [] and bad == []
+
+
+def test_fills_cache_watermark_none_when_nothing_cached():
+    assert L.fills_cache_watermark([]) is None
+
+
+def test_fills_cache_watermark_is_day_after_newest_cached_fill():
+    cached = [L.Fill("XOM", "buy", 10, 100.0, date(2026, 8, 18), "o1"),
+             L.Fill("OXY", "sell", 3, 50.0, date(2026, 8, 22), "o2")]
+    assert L.fills_cache_watermark(cached) == date(2026, 8, 23)
+
+
+def test_fills_ready_to_cache_excludes_the_mutable_horizon_window():
+    today = date(2026, 9, 4)
+    fresh = [
+        L.Fill("XOM", "buy", 10, 100.0, date(2026, 8, 20), "old"),   # 15 days old
+        L.Fill("OXY", "buy", 5, 60.0, date(2026, 9, 1), "recent"),   # 3 days old
+    ]
+    ready = L.fills_ready_to_cache(fresh, today=today)
+    assert [f.order_id for f in ready] == ["old"]
+
+
+def test_fills_ready_to_cache_boundary_is_exclusive():
+    """A fill exactly `horizon_days` old is still inside the mutable window
+    -- caching it one day too early is exactly the bug this boundary exists
+    to prevent, so the boundary itself must not be cached yet."""
+    today = date(2026, 9, 4)
+    boundary_fill = L.Fill("XOM", "buy", 10, 100.0, today - timedelta(days=7), "boundary")
+    assert L.fills_ready_to_cache([boundary_fill], today=today) == []
+
+
+def test_fills_cache_round_trip_matches_a_direct_fetch():
+    """The whole point: caching older fills and re-fetching only the
+    mutable window must reconstruct the exact same fill set (and therefore
+    the exact same positions) as fetching everything fresh every time."""
+    all_fills = L.fills_from_orders(ORDERS)
+    today = date(2026, 9, 4)
+
+    # Simulate: everything older than the horizon is already cached.
+    already_cached = L.fills_ready_to_cache(all_fills, today=today)
+    cache_files = [_cache_file("fills-cache-2026-08-20.json",
+        [_fill_row(f.symbol, f.side, f.quantity, f.price, f.on.isoformat(), f.order_id)
+         for f in already_cached])]
+    cached, bad = L.fold_fills_cache(cache_files)
+    assert bad == []
+
+    # The next run re-fetches everything from the watermark forward (here,
+    # simulated by just re-using the same real order fixture -- a real
+    # fetch would pass fills_cache_watermark(cached) as created_at_gte).
+    fresh_since_watermark = [f for f in all_fills if f.on >= L.fills_cache_watermark(cached)]
+    reconstructed = sorted(set(cached) | set(fresh_since_watermark), key=lambda f: (f.on, f.order_id))
+    direct = sorted(all_fills, key=lambda f: (f.on, f.order_id))
+    assert L.positions_from_fills(reconstructed) == L.positions_from_fills(direct)
+
+
+def test_splits_cache_filename_matches_convention():
+    assert L.splits_cache_filename(date(2026, 9, 1)) == "splits-cache-2026-09-01.json"
+    assert L.splits_cache_filename(date(2026, 9, 1), 2) == "splits-cache-2026-09-01-2.json"
+
+
+def _splits_row(symbol, checked_through, splits):
+    return {"symbol": symbol, "checked_through": checked_through, "splits": splits}
+
+
+def test_fold_splits_cache_keeps_the_latest_check_per_symbol():
+    cache, bad = L.fold_splits_cache([
+        _cache_file("splits-cache-2026-08-20.json",
+            [_splits_row("NVDA", "2026-08-20", [])]),
+        _cache_file("splits-cache-2026-08-27.json",
+            [_splits_row("NVDA", "2026-08-27",
+                [{"effective_date": "2026-06-10", "ratio": 4.0}])]),
+    ])
+    assert bad == []
+    assert cache["NVDA"].checked_through == date(2026, 8, 27)
+    assert cache["NVDA"].splits == [L.SplitEvent("NVDA", date(2026, 6, 10), 4.0)]
+
+
+def test_fold_splits_cache_tracks_multiple_symbols_independently():
+    cache, bad = L.fold_splits_cache([
+        _cache_file("splits-cache-2026-08-20.json", [
+            _splits_row("NVDA", "2026-08-20", []),
+            _splits_row("CMG", "2026-08-20", []),
+        ]),
+    ])
+    assert set(cache) == {"NVDA", "CMG"}
+
+
+def test_fold_splits_cache_records_unreadable_content():
+    cache, bad = L.fold_splits_cache([
+        {"title": "splits-cache-2026-08-20.json", "content": "not json"},
+    ])
+    assert cache == {} and len(bad) == 1
+
+
+def test_fold_splits_cache_records_a_malformed_row():
+    cache, bad = L.fold_splits_cache([
+        _cache_file("splits-cache-2026-08-20.json", [
+            {"symbol": "NVDA"},  # missing checked_through
+        ]),
+    ])
+    assert cache == {} and len(bad) == 1
+
+
+def test_symbols_needing_split_check_includes_never_checked_symbols():
+    out = L.symbols_needing_split_check(["NVDA", "OXY"], {}, today=date(2026, 9, 4))
+    assert out == ["NVDA", "OXY"]
+
+
+def test_symbols_needing_split_check_skips_recently_checked_symbols():
+    cache = {"NVDA": L.SplitsCacheEntry("NVDA", date(2026, 9, 2), [])}
+    out = L.symbols_needing_split_check(["NVDA", "OXY"], cache, today=date(2026, 9, 4))
+    assert out == ["OXY"]
+
+
+def test_symbols_needing_split_check_rechecks_stale_symbols():
+    """A symbol checked more than the horizon ago must be rechecked -- a
+    real split could have been announced since, and staying cached forever
+    would let it silently fall out of reconciliation."""
+    cache = {"NVDA": L.SplitsCacheEntry("NVDA", date(2026, 8, 20), [])}
+    out = L.symbols_needing_split_check(["NVDA"], cache, today=date(2026, 9, 4))
+    assert out == ["NVDA"]
+
+
+def test_symbols_needing_split_check_dedupes_and_uppercases():
+    out = L.symbols_needing_split_check(["nvda", "NVDA"], {}, today=date(2026, 9, 4))
+    assert out == ["NVDA"]
+
+
+def test_splits_cache_round_trip_feeds_apply_splits_directly():
+    """The cached SplitEvents must be usable as-is by apply_splits, with no
+    extra conversion step -- proving the cache and the existing split
+    machinery actually compose."""
+    cache, bad = L.fold_splits_cache([
+        _cache_file("splits-cache-2026-08-20.json",
+            [_splits_row("NVDA", "2026-08-20",
+                [{"effective_date": "2026-06-10", "ratio": 4.0}])]),
+    ])
+    splits_by_symbol = {sym: entry.splits for sym, entry in cache.items()}
+    fills = [L.Fill("NVDA", "buy", 25, 400.0, date(2026, 5, 1), "o1")]
+    adjusted = L.apply_splits(fills, splits_by_symbol)
+    assert adjusted[0].quantity == 100.0
+    assert adjusted[0].price == 100.0

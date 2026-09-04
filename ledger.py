@@ -35,6 +35,10 @@ __all__ = [
     "positions_from_fills", "cost_basis", "loss_sales", "reconcile_positions",
     "to_washsale_trades", "JournalEntry", "Journal", "fold_journal",
     "journal_filename", "JOURNAL_RE",
+    "FILLS_CACHE_HORIZON_DAYS", "fills_cache_filename", "FILLS_CACHE_RE",
+    "fold_fills_cache", "fills_cache_watermark", "fills_ready_to_cache",
+    "SPLITS_CACHE_HORIZON_DAYS", "splits_cache_filename", "SPLITS_CACHE_RE",
+    "SplitsCacheEntry", "fold_splits_cache", "symbols_needing_split_check",
 ]
 
 # Quantities are compared with a tolerance because broker payloads carry six
@@ -203,6 +207,213 @@ def apply_splits(fills: Sequence[Fill],
                 for f in out
             ]
     return out
+
+
+# --------------------------------------------------------------------------
+# caching fills and split events -- never positions
+# --------------------------------------------------------------------------
+#
+# Section 5's storage rule stays exactly as it is: positions and the
+# wash-sale registry are never stored, only rebuilt from fills every run.
+# What was actually expensive was pulling the ENTIRE order history with no
+# `created_at_gte` every single morning, and calling `SPLITS` for every
+# symbol every single run, even though a fill from a year ago and a split
+# check from last week are both already-settled facts about the past that
+# do not need re-fetching from the broker to be trusted again today.
+#
+# The cache below holds Fills and SplitEvents -- append-only dated files,
+# the same pattern the journal already uses, because the Drive connector
+# can create a file but not rewrite one. It does NOT hold positions, and it
+# does not let a run skip fetching the LAST `*_HORIZON_DAYS` of history
+# fresh from the broker: a Robinhood order can still be open (unfilled
+# remainder, still eligible to fill or be cancelled) for a few days after
+# it was created, so trusting a fill as permanent before it has had time to
+# reach a terminal state would let a caching optimization quietly corrupt
+# the exact reconciliation invariant the redesign in this file exists to
+# protect. Only fills strictly OLDER than the horizon are ever written to
+# the cache; positions are still rebuilt fresh every run from the full
+# cached-plus-fresh fill set, and still reconciled against the live broker
+# snapshot every run, exactly as before.
+
+FILLS_CACHE_HORIZON_DAYS = 7
+FILLS_CACHE_RE = re.compile(r"^fills-cache-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.json$")
+
+
+def fills_cache_filename(run_date: date, seq: int = 0) -> str:
+    """One file per run, same convention as `journal_filename` -- the
+    connector cannot overwrite, and a second run on the same day gets its
+    own sequence number rather than colliding with the first."""
+    stem = f"fills-cache-{run_date.isoformat()}"
+    return f"{stem}.json" if seq == 0 else f"{stem}-{seq}.json"
+
+
+def fold_fills_cache(files: Iterable[dict]) -> tuple[list[Fill], list[str]]:
+    """Fold dated fills-cache files into one deduplicated, sorted `Fill`
+    list, plus any files/rows that would not parse.
+
+    `files` are `{"title": str, "content": str}`, same shape as
+    `fold_journal`. Deduplicated on `order_id` (falling back to a
+    symbol/date/price/quantity key for the rare fill with no id) so a
+    caller that accidentally re-caches an already-cached fill does not
+    double it into the position count.
+    """
+    seen: dict[str, Fill] = {}
+    bad: list[str] = []
+    dated: list[tuple[str, int, Any]] = []
+
+    for f in files:
+        title = str(f.get("title", ""))
+        if not FILLS_CACHE_RE.match(title):
+            continue
+        try:
+            rows = json.loads(f.get("content") or "[]")
+        except (ValueError, TypeError):
+            bad.append(title)
+            continue
+        m = FILLS_CACHE_RE.match(title)
+        dated.append((m.group(1), int(m.group(2) or 0), rows))
+
+    dated.sort(key=lambda t: (t[0], t[1]))
+
+    for iso, seq, rows in dated:
+        for r in rows:
+            try:
+                fill = Fill(
+                    symbol=str(r["symbol"]).upper(),
+                    side=str(r["side"]),
+                    quantity=float(r["quantity"]),
+                    price=float(r["price"]),
+                    on=_as_date(r["on"]),
+                    order_id=str(r.get("order_id", "")),
+                )
+                if fill.on is None:
+                    raise ValueError("unparseable date")
+            except (KeyError, TypeError, ValueError):
+                bad.append(f"{fills_cache_filename(date.fromisoformat(iso), seq)} fill")
+                continue
+            key = fill.order_id or f"{fill.symbol}:{fill.on}:{fill.price}:{fill.quantity}"
+            seen[key] = fill
+
+    out = sorted(seen.values(), key=lambda f: (f.on, f.order_id))
+    return out, bad
+
+
+def fills_cache_watermark(cached_fills: Sequence[Fill]) -> Optional[date]:
+    """The earliest date the next broker fetch needs to cover: the day
+    after the newest cached fill, or `None` (fetch full history, exactly
+    as every run does today) if nothing is cached yet.
+
+    Fetching from here forward always re-covers the entire mutable horizon
+    window fresh, since `fills_ready_to_cache` never lets a fill inside
+    that window into the cache in the first place -- there is no gap to
+    account for separately here.
+    """
+    if not cached_fills:
+        return None
+    return max(f.on for f in cached_fills) + timedelta(days=1)
+
+
+def fills_ready_to_cache(fresh_fills: Sequence[Fill], *,
+                         horizon_days: int = FILLS_CACHE_HORIZON_DAYS,
+                         today: Optional[date] = None) -> list[Fill]:
+    """Fills old enough to be safely written to the cache: strictly older
+    than `horizon_days` ago. Every fill that goes in has therefore been
+    re-fetched fresh from the broker at least once after its order had
+    `horizon_days` to reach a terminal state -- filled, cancelled, or
+    expired -- so caching it can no longer under-count a still-open order.
+    Fills inside the window are used for today's rebuild but stay
+    uncached until a later run ages them out naturally.
+    """
+    today = today or date.today()
+    boundary = today - timedelta(days=horizon_days)
+    return [f for f in fresh_fills if f.on < boundary]
+
+
+SPLITS_CACHE_HORIZON_DAYS = 7
+SPLITS_CACHE_RE = re.compile(r"^splits-cache-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.json$")
+
+
+def splits_cache_filename(run_date: date, seq: int = 0) -> str:
+    """Same append-only convention as `fills_cache_filename`."""
+    stem = f"splits-cache-{run_date.isoformat()}"
+    return f"{stem}.json" if seq == 0 else f"{stem}-{seq}.json"
+
+
+@dataclass
+class SplitsCacheEntry:
+    """What this system knew about one symbol's splits, as of `checked_through`."""
+    symbol: str
+    checked_through: date
+    splits: list[SplitEvent] = field(default_factory=list)
+
+
+def fold_splits_cache(files: Iterable[dict]) -> tuple[dict[str, SplitsCacheEntry], list[str]]:
+    """Fold dated splits-cache files into one entry per symbol, plus any
+    files/rows that would not parse.
+
+    Unlike fills, a symbol can appear in many cache files over time as it
+    gets periodically rechecked; the entry with the LATEST `checked_through`
+    wins per symbol, folded oldest-file-first so a later file's entry for a
+    symbol supersedes an earlier one rather than the reverse.
+    """
+    by_symbol: dict[str, SplitsCacheEntry] = {}
+    bad: list[str] = []
+    dated: list[tuple[str, int, Any]] = []
+
+    for f in files:
+        title = str(f.get("title", ""))
+        m = SPLITS_CACHE_RE.match(title)
+        if not m:
+            continue
+        try:
+            body = json.loads(f.get("content") or "[]")
+        except (ValueError, TypeError):
+            bad.append(title)
+            continue
+        dated.append((m.group(1), int(m.group(2) or 0), body))
+
+    dated.sort(key=lambda t: (t[0], t[1]))
+
+    for iso, seq, body in dated:
+        for row in body:
+            try:
+                sym = str(row["symbol"]).upper()
+                checked_through = _as_date(row["checked_through"])
+                if checked_through is None:
+                    raise ValueError("unparseable checked_through")
+                events = [
+                    SplitEvent(sym, _as_date(e["effective_date"]), float(e["ratio"]))
+                    for e in row.get("splits", [])
+                ]
+            except (KeyError, TypeError, ValueError):
+                bad.append(f"{splits_cache_filename(date.fromisoformat(iso), seq)} entry")
+                continue
+            existing = by_symbol.get(sym)
+            if existing is None or checked_through >= existing.checked_through:
+                by_symbol[sym] = SplitsCacheEntry(sym, checked_through, events)
+
+    return by_symbol, bad
+
+
+def symbols_needing_split_check(symbols: Sequence[str],
+                                cache: dict[str, SplitsCacheEntry], *,
+                                horizon_days: int = SPLITS_CACHE_HORIZON_DAYS,
+                                today: Optional[date] = None) -> list[str]:
+    """Which symbols need a fresh `SPLITS` call this run: never checked
+    before, or checked more than `horizon_days` ago. Every other symbol
+    reuses its cached events. This bounds a real split's detection latency
+    to `horizon_days` rather than requiring `SPLITS` to run for every held
+    and candidate symbol on every single run regardless of whether
+    anything could plausibly have changed since the last check.
+    """
+    today = today or date.today()
+    boundary = today - timedelta(days=horizon_days)
+    out = set()
+    for sym in symbols:
+        entry = cache.get(sym.upper())
+        if entry is None or entry.checked_through < boundary:
+            out.add(sym.upper())
+    return sorted(out)
 
 
 def positions_from_fills(fills: Sequence[Fill],
