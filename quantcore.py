@@ -597,7 +597,22 @@ def vol_percentile(df: pd.DataFrame, lookback: int = 252, window: int = 20,
                         f"({coverage:.0%} of the {lookback}-day lookback)")
 
 
-def correlation_concentration(returns_by_symbol: dict[str, pd.Series]) -> dict:
+# Recalibrated 31 August 2026 (HANDOFF.md section 11) against a known-answer
+# 20-name book at a true 0.55 correlation. These are the defaults used when a
+# caller does not pass `config.concentration_bets_floor_ratio` /
+# `config.concentration_eigen_share_cap` -- see `correlation_concentration`'s
+# docstring for why each exists. Before 4 September 2026, `state.json`'s
+# config documented these two keys as though they were already read at
+# runtime; nothing in this function ever accepted them, so changing the
+# config value silently did nothing.
+DEFAULT_CONCENTRATION_BETS_FLOOR_RATIO = 0.5
+DEFAULT_CONCENTRATION_EIGEN_SHARE_CAP = 0.45
+
+
+def correlation_concentration(returns_by_symbol: dict[str, pd.Series], *,
+                              bets_floor_ratio: float = DEFAULT_CONCENTRATION_BETS_FLOOR_RATIO,
+                              eigen_share_cap: float = DEFAULT_CONCENTRATION_EIGEN_SHARE_CAP
+                              ) -> dict:
     """Are these N positions actually one bet?
 
     Ledoit-Wolf shrinkage is far better behaved than a raw sample correlation on
@@ -680,19 +695,25 @@ def correlation_concentration(returns_by_symbol: dict[str, pd.Series]) -> dict:
     # noise alone regularly pulls the estimate under 5, which would flag an
     # ordinary diversified 5-stock book as concentrated. Scaling the floor by
     # n avoids penalising small portfolios for being small.
-    # The eigen-share cutoff is kept as a second, absolute path at 0.45
-    # (down from 0.60) for the case a skewed pair distribution trips it
-    # without moving the ratio much.
-    bets_floor = 0.5 * len(syms)
+    # The eigen-share cutoff is kept as a second, absolute path (default
+    # 0.45, down from 0.60) for the case a skewed pair distribution trips
+    # it without moving the ratio much. Both thresholds are parameters
+    # (`bets_floor_ratio`, `eigen_share_cap`) rather than literals so
+    # `config.concentration_bets_floor_ratio`/`concentration_eigen_share_cap`
+    # actually reach this calculation -- see the module-level defaults'
+    # docstring for why that connection was missing before 4 September 2026.
+    bets_floor = bets_floor_ratio * len(syms)
     concentrated = bool(
         min(eff_bets, eff_bets_sample) < bets_floor
-        or max(top_share, s_top) > 0.45
+        or max(top_share, s_top) > eigen_share_cap
     )
 
     return {
         "status": "ok",
         "n_symbols": len(syms),
         "n_obs": len(frame),
+        "bets_floor_ratio": bets_floor_ratio,
+        "eigen_share_cap": eigen_share_cap,
         "mean_pairwise_corr": float(off.mean()),
         "max_pairwise_corr": float(off.max()),
         "max_pair": pairs[worst],

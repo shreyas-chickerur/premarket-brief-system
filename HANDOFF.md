@@ -144,7 +144,7 @@ The live values are in `state.json` under `config`. The keys and their meaning:
 | `suggestions_per_day_cap` | Unset — the gate is the limiter, not a quota. |
 | `email_to` | Brief recipient. |
 | `gap_risk_haircut` | Shrinks the effective risk budget to account for stops that cannot execute outside regular hours (default 0.25). See section 11. |
-| `concentration_bets_floor_ratio`, `concentration_eigen_share_cap` | The recalibrated concentration thresholds (0.5 and 0.45) — see section 11. Read by convention; the actual gate values live in `quantcore.correlation_concentration`, not read from config at runtime yet. |
+| `concentration_bets_floor_ratio`, `concentration_eigen_share_cap` | The recalibrated concentration thresholds, default 0.5 and 0.45 — see section 11. Actually read at runtime as of 4 September 2026 (`quantcore.correlation_concentration`'s `bets_floor_ratio`/`eigen_share_cap` parameters); the two module-level defaults apply only when config omits the key. |
 
 A separate top-level `evidence.pre_registration` object (not under `config`)
 holds the pre-registered claim this system is being tested against — see
@@ -241,7 +241,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `DAILY_PROCEDURE.md` | The canonical Stage 0–6 trading procedure, followed by both the main routine and the watchdog's retry — not code, but the single source of truth for what either one actually does |
 | `WATCHDOG_PROCEDURE.md` | The watchdog's own procedure: assess today's manifest, and on a real problem, diagnose, attempt a fix, merge it, and re-run `DAILY_PROCEDURE.md` once |
 | `research.py` | Deterministic Stage 1 research — replaces "research by web search" with a defined candidate universe and one parser per feed (news, congressional/insider activity, scheduled events, filings, macro, commodities, positioning), every item graded `ok`/`thin`/`degraded`/`failed` and required to attach to a symbol or channel |
-| `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
+| `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration (thresholds read from config, not hardcoded), direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
 | `runlog.py` | Run manifests, staged timing, preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals (`stop_distance` removed — see section 11), real `stop_filled` decisions via `stop_filled_decision`, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads; `Journal.closed_for_scoring` joins thesis + outcome entries for `score_closed_decisions` |
@@ -250,7 +250,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
-| `test_quantcore.py` | 81 tests, including known-answer volatility and correlation recovery, and the floor/cap quality-conflation regression |
+| `test_quantcore.py` | 84 tests, including known-answer volatility and correlation recovery, the floor/cap quality-conflation regression, and proof that `concentration_bets_floor_ratio`/`concentration_eigen_share_cap` from config actually change the `concentrated` verdict in both directions |
 | `test_runlog.py` | 63 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, `abort()`'s first-reason-wins semantics, and `stop_filled_decision` against real order shapes |
 | `test_washsale.py` | 32 tests |
 | `test_ledger.py` | 93 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee), `run_entry` (schema pinning, round-trip through a folded journal directly into `runlog.find_optimizations`), and `closed_for_scoring` (thesis/outcome join, round-trip directly into `runlog.score_closed_decisions`) |
@@ -1442,6 +1442,30 @@ the review immediately, the same "journal plus this run's fresh scores"
 pattern Stage 0.5 already uses for `evidence.assess`.
 
 `ledger.py`/`test_ledger.py`: 88 → 93 tests. Full suite: 430 → 435.
+
+### 4 September 2026 — concentration thresholds actually read from config
+
+`state.json`'s config documented `concentration_bets_floor_ratio` and
+`concentration_eigen_share_cap` as though they were live inputs to
+`quantcore.correlation_concentration` since the 31 August 2026
+recalibration — but the function had no parameters for them at all; both
+0.5 and 0.45 were plain literals. Changing either config value did
+nothing, silently.
+
+`correlation_concentration` now takes `bets_floor_ratio` and
+`eigen_share_cap` as keyword parameters (`DEFAULT_CONCENTRATION_BETS_FLOOR_RATIO`
+/ `DEFAULT_CONCENTRATION_EIGEN_SHARE_CAP`, 0.5/0.45, apply when config
+omits the key — an unconfigured run behaves exactly as before), returns
+the thresholds it actually used in its result dict, and
+`DAILY_PROCEDURE.md` Stage 2 reads both from `state["config"]` rather than
+relying on the function's own defaults.
+
+Proven in both directions, not just that the parameter exists and
+defaults sensibly: a loosened `eigen_share_cap` stops flagging a book the
+default would call concentrated, and a tightened `bets_floor_ratio` flags
+a book the default would call fine.
+
+`quantcore.py`/`test_quantcore.py`: 81 → 84 tests. Full suite: 435 → 438.
 
 ## 12. Open and unverified
 

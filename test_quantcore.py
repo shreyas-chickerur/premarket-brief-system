@@ -518,6 +518,46 @@ def test_a_zero_variance_series_is_dropped_not_crashed_on():
     assert "DEAD" not in str(out.get("max_pair", ""))
 
 
+def test_concentration_thresholds_default_to_the_recalibrated_constants():
+    """4 September 2026: state.json's config documented
+    concentration_bets_floor_ratio/concentration_eigen_share_cap as though
+    they were already read at runtime; nothing in this function ever
+    accepted them. The returned thresholds must match the module-level
+    defaults exactly when a caller passes nothing, so a config read that
+    happens to match the default is indistinguishable from one that never
+    happened -- the round-trip test below is what actually proves the
+    wiring, not this one alone."""
+    out = q.correlation_concentration(_correlated_book(0.55, [0.02] * 12))
+    assert out["bets_floor_ratio"] == q.DEFAULT_CONCENTRATION_BETS_FLOOR_RATIO == 0.5
+    assert out["eigen_share_cap"] == q.DEFAULT_CONCENTRATION_EIGEN_SHARE_CAP == 0.45
+
+
+def test_a_looser_eigen_share_cap_from_config_stops_flagging_a_book_the_default_would():
+    """The test that actually proves config reaches the calculation: the
+    exact same book, scored differently, because a different threshold was
+    passed in -- not just that a parameter exists and defaults sensibly."""
+    book = _correlated_book(0.90, [0.02] * 15)
+    default = q.correlation_concentration(book)
+    assert default["concentrated"] is True
+
+    loosened = q.correlation_concentration(book, eigen_share_cap=0.99, bets_floor_ratio=0.0)
+    assert loosened["concentrated"] is False
+    assert loosened["eigen_share_cap"] == 0.99
+    assert loosened["bets_floor_ratio"] == 0.0
+
+
+def test_a_tighter_bets_floor_ratio_from_config_flags_a_book_the_default_would_not():
+    """The inverse direction: a stricter config value must be able to flag
+    a book the default thresholds pass."""
+    rng = np.random.default_rng(3)
+    book = {f"S{i}": pd.Series(rng.normal(size=200) * 0.02) for i in range(8)}
+    default = q.correlation_concentration(book)
+    assert default["concentrated"] is False
+
+    tightened = q.correlation_concentration(book, bets_floor_ratio=0.99, eigen_share_cap=0.01)
+    assert tightened["concentrated"] is True
+
+
 # ------------------------------------------------------ cash-limited sizing
 
 def _plan(entry=100.0, stop_fraction=0.08):

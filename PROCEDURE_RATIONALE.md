@@ -292,6 +292,15 @@ eigen-share-only cutoff never fired for a realistically correlated equity
 book (see `HANDOFF.md` section 11, 31 August 2026: a known-answer portfolio
 at a true 0.55 correlation was called unconcentrated).
 
+**Why the two thresholds are read from `config`, not hardcoded.** Both
+numbers were parameters of `correlation_concentration` only as of 4
+September 2026 — before that, `state.json`'s config already documented
+`concentration_bets_floor_ratio`/`concentration_eigen_share_cap` as
+though they were live inputs, but the function never accepted them, so
+changing either value in config silently did nothing. The function
+defaults to the same 0.5/0.45 recalibrated values when config omits the
+key, so an unconfigured run behaves exactly as before.
+
 ## Stage 4 — why individual-account suggestions count as evidence
 
 The pre-registered evidence claim is about whether the five-condition gate
