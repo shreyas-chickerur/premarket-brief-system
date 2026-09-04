@@ -25,6 +25,7 @@ source of truth both scheduled routines follow:
 
 | File | Purpose |
 |---|---|
+| `research.py` | Deterministic Stage 1 research: candidate generation, the weather-symbol mapping, and one parser per feed (news, congressional and insider activity, scheduled events, filings, macro, commodities, positioning), each grading its own result the same way `quantcore.Estimate` does |
 | `quantcore.py` | Volatility estimators, indicators, stop distance, position sizing, data-anomaly detection |
 | `runlog.py` | Run manifests, staged timing, the preflight self-audit, regression review, honest scoring |
 | `washsale.py` | Cross-account wash-sale registry (26 U.S.C. 1091 is taxpayer-level, not account-level) |
@@ -77,7 +78,7 @@ Python 3.11 or newer.
 ```
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 292 tests
+python -m pytest -q          # 343 tests
 python pipeline_demo.py      # end-to-end run
 ```
 

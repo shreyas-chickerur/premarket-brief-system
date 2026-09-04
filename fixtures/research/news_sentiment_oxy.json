@@ -1,0 +1,16 @@
+{
+  "feed": [
+    {
+      "title": "OPEC+ output cut expected to lift oil producers",
+      "time_published": "20260903T113000",
+      "overall_sentiment_score": 0.31,
+      "overall_sentiment_label": "Somewhat-Bullish"
+    },
+    {
+      "title": "Iran ceasefire talks stall, energy premium persists",
+      "time_published": "20260903T091500",
+      "overall_sentiment_score": 0.18,
+      "overall_sentiment_label": "Somewhat-Bullish"
+    }
+  ]
+}

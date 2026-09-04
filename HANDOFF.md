@@ -12,7 +12,7 @@ to an agent or a person with no memory of the design conversation.
 > The private companion document, `HANDOFF.private.md`, carries the concrete
 > values. It is gitignored and lives alongside `state.json` in Drive.
 
-**Status (4 September 2026):** 292 tests passing. The system is scheduled and
+**Status (4 September 2026):** 343 tests passing. The system is scheduled and
 running daily in dry-run mode (weekdays, 06:20 Central) — see section 8. It has
 reached every stage on real order history three times in a row, every time
 with both accounts reconciling to zero residuals — see section 11 for the
@@ -220,6 +220,7 @@ by default. Two properties of the connector, and the fix each one forced:
 |---|---|
 | `DAILY_PROCEDURE.md` | The canonical Stage 0–6 trading procedure, followed by both the main routine and the watchdog's retry — not code, but the single source of truth for what either one actually does |
 | `WATCHDOG_PROCEDURE.md` | The watchdog's own procedure: assess today's manifest, and on a real problem, diagnose, attempt a fix, merge it, and re-run `DAILY_PROCEDURE.md` once |
+| `research.py` | Deterministic Stage 1 research — replaces "research by web search" with a defined candidate universe and one parser per feed (news, congressional/insider activity, scheduled events, filings, macro, commodities, positioning), every item graded `ok`/`thin`/`degraded`/`failed` and required to attach to a symbol or channel |
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
 | `runlog.py` | Run manifests, staged timing, preflight self-audit, verified market calendar, regression review, optimization proposals, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
@@ -235,6 +236,8 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_ledger.py` | 50 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, and the standing circuit-breaker fold |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
 | `test_watchdog.py` | 15 tests |
+| `test_research.py` | 45 tests, against recorded fixtures in `fixtures/research/`, never the live API |
+| `test_procedure_docs.py` | 6 tests: the DRY RUN guard's exact text, and that every stage has a matching rationale section |
 | `test_emailer.py` | 34 tests, including escaping, no-research-on-abort, and the `idea_card`/`idea_cards` bulleted format |
 
 Key API surface:
@@ -288,7 +291,7 @@ caller to check.
 ```bash
 python3.11 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest -q          # 292 tests
+python -m pytest -q          # 343 tests
 python pipeline_demo.py      # end-to-end run
 ```
 
@@ -318,7 +321,9 @@ watchlist with the failing condition named.
 
 1. **A named catalyst with a date or window.** Not "well-run company."
 2. **Two independent corroborating sources.** Two outlets reprinting one wire is
-   one source.
+   one source. Mechanical, not a judgment call, since `research.py` (section 11,
+   4 September 2026): `bundle.corroborated(symbol)` counts distinct sources
+   among a symbol's usable news items.
 3. **A stated invalidation level** — the price or event that proves it wrong.
 4. **Size derived from the risk dial**, not conviction.
 5. **No blocking conflict** — wash sale, adding to a loser, concentration, cash
@@ -1079,8 +1084,52 @@ stage and step number — nothing was dropped, only relocated. This is Task 1
 of that review's ordered work list; the remaining eleven follow in their own
 commits.
 
+### 4 September 2026 — `research.py`, a deterministic Stage 1
+
+Task 2 of the same review, and the largest: "research overnight news, macro
+events, earnings, and filings by web search" was Stage 1's entire
+specification — improvised fresh each morning, not reproducible run to run,
+and the slowest stage on record for exactly that reason. `research.py`
+replaces it. It calls no API itself — every parser is a pure function of an
+already-fetched raw response, the same boundary `quantcore.py` draws against
+DataFrames, which is what makes it testable against recorded fixtures
+(`fixtures/research/`) instead of the live API.
+
+Every `ResearchItem` carries a value, a source, an as-of timestamp, and a
+quality flag from the same vocabulary `quantcore.Estimate` uses; a failed
+feed reports `quality="failed"` rather than being defaulted or skipped. Every
+item must attach to a symbol or a named macro/commodity channel plus a
+one-clause mechanism, or it is refused at construction — research exists to
+inform decisions about real holdings and candidates, not to narrate the
+market. `bundle.corroborated(symbol)` makes the five-condition gate's "two
+independent corroborating sources" a mechanical count (`research.py` pulls
+Alpha Vantage `NEWS_SENTIMENT` and Robinhood `get_equity_news` specifically
+so there are two sources to count) instead of a judgment call.
+
+The candidate universe was the other half of the same problem — undefined
+anywhere in the codebase before this. `research.candidates()` unions four
+sources: held positions, `state.json.config.watchlist`, today's
+`TOP_GAINERS_LOSERS`, and names sharing a sector (`SECTOR_MAP`, the same
+data-as-code pattern as `washsale.PROXY_GROUPS`) with a held position.
+Weather enters through exactly one path, `WEATHER_MAP`: a symbol not listed
+gets no weather item, regardless of how newsworthy the weather is generally
+— a general weather narrative was explicitly the thing to keep out of the
+brief.
+
+45 tests, all against recorded fixtures. `DAILY_PROCEDURE.md` Stage 1 now
+calls `research.candidates()` and `research.gather()` instead of describing
+an unstructured web search. **Not yet run against the live Alpha Vantage or
+Robinhood connectors** — see section 12.
+
 ## 12. Open and unverified
 
+- **`research.py` has never run against the live Alpha Vantage or Robinhood
+  connectors.** Every one of its 45 tests is against a recorded fixture; the
+  actual API responses for `CONGRESS_TRADES`, `INSIDER_TRANSACTIONS`, the
+  nine macro channels, the eleven commodity channels, and the rest have
+  never been fetched and fed through it for real. The parsing code is only
+  as good as the fixtures' fidelity to the real response shapes — a live run
+  is the first genuine test of that, and has not happened yet.
 - Whether the connector broker refreshes the brokerage token indefinitely
   without a fresh desktop-browser sign-in. The token expires roughly every four
   days; refresh is supported but unconfirmed for this server. If it lapses, runs

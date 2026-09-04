@@ -1,0 +1,5 @@
+[
+  {"ticker": "OXY", "representative": "Jane Example", "transaction": "purchase", "amount": "$15,001-$50,000", "transaction_date": "2026-08-28"},
+  {"ticker": "NVDA", "representative": "John Sample", "transaction": "sale", "amount": "$1,001-$15,000", "transaction_date": "2026-08-20"},
+  {"ticker": "ZZZZ", "representative": "Not Watched", "transaction": "purchase", "amount": "$1,001-$15,000", "transaction_date": "2026-08-15"}
+]
