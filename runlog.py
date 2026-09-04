@@ -610,6 +610,59 @@ def _regressions(history: Sequence[dict]) -> list[Check]:
     return checks
 
 
+# Per-stage timing budgets, in milliseconds. Initial estimates -- judgment
+# calls, not measurements, the same category as `quantcore.gap_risk_haircut`
+# -- since this system has not yet accumulated enough real per-stage timing
+# history to calibrate them against (see `HANDOFF.md` section 12). Revisit
+# once `history` (section 8) has enough runs to know what "slow" actually
+# looks like for each stage. Keys match the `name` passed to
+# `RunLog.stage(name)` and are expected to line up with `DAILY_PROCEDURE.md`'s
+# own Stage 0 through Stage 6 numbering -- a name used there that is not a
+# key here is not budgeted (see `stage_budget_overruns`), not an error.
+STAGE_TIMING_BUDGETS_MS = {
+    "preflight": 15_000,          # Stage 0
+    "evidence_review": 10_000,    # Stage 0.5
+    "prior_day_review": 5_000,    # Stage 0.6
+    "gather": 120_000,            # Stage 1 -- the most external calls by far
+    "measure": 30_000,            # Stage 2
+    "gate": 5_000,                # Stage 3 -- pure computation, no external calls
+    "individual_account": 15_000, # Stage 4
+    "agentic_account": 30_000,    # Stage 5 -- places real orders
+    "record_and_send": 15_000,    # Stage 6
+}
+
+
+def stage_budget_overruns(stages: Sequence[dict], *,
+                          budgets: dict[str, int] = STAGE_TIMING_BUDGETS_MS
+                          ) -> list[dict]:
+    """Which of this run's stages took longer than their budget.
+
+    Surfaced in the email's "System health" section (Stage 6) rather than
+    left buried in the raw manifest, so a stage that has quietly grown
+    slow over time is visible on the one artefact a human actually reads
+    every single day — not only in `find_optimizations`'s eventual
+    "performance" finding, which needs 5+ runs of history before it can
+    say anything and only ever names the single slowest stage, not every
+    stage currently over budget.
+
+    `stages` are expected in `Stage.to_dict()` shape (`manifest()["stages"]`).
+    A stage name with no entry in `budgets` is not flagged — an unbudgeted
+    name signals a naming mismatch to go fix, not a performance problem,
+    and is silently skipped rather than raising, since a manifest from
+    before this existed (or a stage name that has not been budgeted yet)
+    must not break `System health` rendering.
+    """
+    out = []
+    for s in stages:
+        name = s.get("name")
+        budget = budgets.get(name)
+        dur = s.get("duration_ms", 0)
+        if budget is not None and dur > budget:
+            out.append({"name": name, "duration_ms": dur, "budget_ms": budget,
+                        "over_by_ms": dur - budget})
+    return out
+
+
 def find_optimizations(history: Sequence[dict]) -> list[dict]:
     """Look for things worth changing. Proposals only — nothing self-modifies.
 

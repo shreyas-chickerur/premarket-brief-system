@@ -25,6 +25,23 @@ documents were merged into one).
 stage timing read as zero and silently destroys the performance record the
 regression review (`runlog.find_optimizations`) depends on.
 
+**Why each stage must use `runlog.STAGE_TIMING_BUDGETS_MS`'s exact name.**
+Before 4 September 2026, `log.stage(name)` existed and recorded a
+duration, but nothing ever compared that duration against anything, and
+`DAILY_PROCEDURE.md` never even named which stages to wrap. A stage that
+quietly grows slower run over run had no way to surface until
+`find_optimizations`'s "performance" finding fired — which needs 5+ runs
+of history, and even then only ever names the single slowest stage, not
+every stage currently over budget. `runlog.stage_budget_overruns` fixes
+both gaps: pinned canonical names close the "which name" question, and
+Stage 6's "System health" section reports every overrun on the SAME run
+it happened, not five runs later. A stage whose name is not in
+`STAGE_TIMING_BUDGETS_MS` is silently unmonitored, not an error — the
+budgets themselves are initial estimates, the same judgment-call category
+as `quantcore.gap_risk_haircut`, since this system does not yet have
+enough real per-stage history to calibrate them against (`HANDOFF.md`
+section 12).
+
 ## Stage 0, step 0b — a manual fire is not a schedule defect
 
 If a human triggered the run by hand rather than the schedule firing it, the

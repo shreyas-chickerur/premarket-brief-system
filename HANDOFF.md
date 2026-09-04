@@ -242,7 +242,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `WATCHDOG_PROCEDURE.md` | The watchdog's own procedure: assess today's manifest, and on a real problem, diagnose, attempt a fix, merge it, and re-run `DAILY_PROCEDURE.md` once |
 | `research.py` | Deterministic Stage 1 research — replaces "research by web search" with a defined candidate universe and one parser per feed (news, congressional/insider activity, scheduled events, filings, macro, commodities, positioning), every item graded `ok`/`thin`/`degraded`/`failed` and required to attach to a symbol or channel |
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration (thresholds read from config, not hardcoded), direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
-| `runlog.py` | Run manifests, staged timing, preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals (`stop_distance` removed — see section 11), real `stop_filled` decisions via `stop_filled_decision`, the pinned `GATE_CONDITIONS` five-condition order and `closest_calls` gate-miss ranking, honest scoring |
+| `runlog.py` | Run manifests, staged timing (against per-stage budgets, `STAGE_TIMING_BUDGETS_MS`/`stage_budget_overruns`), preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals (`stop_distance` removed — see section 11), real `stop_filled` decisions via `stop_filled_decision`, the pinned `GATE_CONDITIONS` five-condition order and `closest_calls` gate-miss ranking, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads; `Journal.closed_for_scoring` joins thesis + outcome entries for `score_closed_decisions` |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
@@ -251,7 +251,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
 | `test_quantcore.py` | 84 tests, including known-answer volatility and correlation recovery, the floor/cap quality-conflation regression, and proof that `concentration_bets_floor_ratio`/`concentration_eigen_share_cap` from config actually change the `concentrated` verdict in both directions |
-| `test_runlog.py` | 70 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, `abort()`'s first-reason-wins semantics, `stop_filled_decision` against real order shapes, and `closest_calls` ranking (including exclusion of non-gate rejections and tie-breaking) |
+| `test_runlog.py` | 77 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, `abort()`'s first-reason-wins semantics, `stop_filled_decision` against real order shapes, `closest_calls` ranking (including exclusion of non-gate rejections and tie-breaking), and `stage_budget_overruns` (boundary-exact non-flagging, unbudgeted-name skipping, a caller-supplied budget table) |
 | `test_washsale.py` | 32 tests |
 | `test_ledger.py` | 93 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee), `run_entry` (schema pinning, round-trip through a folded journal directly into `runlog.find_optimizations`), and `closed_for_scoring` (thesis/outcome join, round-trip directly into `runlog.score_closed_decisions`) |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
@@ -1547,8 +1547,39 @@ card or bullet, never weaken the check.
 
 `emailer.py`/`test_emailer.py`: 45 → 73 tests. Full suite: 456 → 484.
 
+### 4 September 2026 — per-stage timing budgets, surfaced the same run they fire
+
+`log.stage(name)` recorded a duration since the redesign, but nothing
+compared it against anything, and `DAILY_PROCEDURE.md` never named which
+stages to wrap in the first place. A stage that quietly grows slower run
+over run had no way to surface until `runlog.find_optimizations`'s
+"performance" finding fired — which needs 5+ runs of history, and even
+then only ever names the single slowest stage.
+
+`runlog.STAGE_TIMING_BUDGETS_MS` pins nine canonical stage names (Stage 0
+through Stage 6 — `"preflight"`, `"evidence_review"`, `"prior_day_review"`,
+`"gather"`, `"measure"`, `"gate"`, `"individual_account"`,
+`"agentic_account"`, `"record_and_send"`) to an initial millisecond
+budget each. `runlog.stage_budget_overruns` reports every stage that ran
+over its budget on THIS run; `DAILY_PROCEDURE.md` step 0 now names the
+canonical stage for each numbered Stage, and Stage 6's "System health"
+section reports the result directly, same-run rather than five runs
+later. A stage whose name is not in the budget table is silently
+unmonitored, never an error.
+
+`runlog.py`/`test_runlog.py`: 70 → 77 tests. Full suite: 484 → 491.
+
 ## 12. Open and unverified
 
+- **`runlog.STAGE_TIMING_BUDGETS_MS`'s nine values are judgment calls, not
+  measurements**, the same category as `quantcore.gap_risk_haircut` — this
+  system does not yet have enough real per-stage timing history to
+  calibrate them against. `"gather"` (120s) in particular is a guess at
+  how long Stage 1's live research calls (`research.py`, section 11) take
+  in practice; it has never been checked against a real run's actual
+  timing. Revisit once enough real history exists, the same way
+  `gap_risk_haircut` and the concentration thresholds are flagged for
+  revisiting elsewhere in this section.
 - **`emailer.verify_email`'s numeric tracing is a regex-based heuristic,
   not real natural-language understanding.** It finds number-shaped
   substrings and checks whether a matching value appears somewhere in the

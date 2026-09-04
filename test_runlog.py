@@ -313,6 +313,58 @@ def test_healthy_history_raises_no_regressions():
     assert log.health() == "nominal"
 
 
+# ---------------------------------------------------------- stage timing budgets
+
+def test_stage_budget_overruns_flags_a_stage_over_its_budget():
+    stages = [{"name": "gather", "duration_ms": 130_000}]
+    out = R.stage_budget_overruns(stages)
+    assert len(out) == 1
+    assert out[0]["name"] == "gather"
+    assert out[0]["duration_ms"] == 130_000
+    assert out[0]["budget_ms"] == R.STAGE_TIMING_BUDGETS_MS["gather"]
+    assert out[0]["over_by_ms"] == 130_000 - R.STAGE_TIMING_BUDGETS_MS["gather"]
+
+
+def test_stage_budget_overruns_is_silent_when_every_stage_is_within_budget():
+    stages = [{"name": "gate", "duration_ms": 100}]
+    assert R.stage_budget_overruns(stages) == []
+
+
+def test_stage_budget_overruns_at_exactly_the_budget_does_not_flag():
+    """The budget is the ceiling, not the floor -- hitting it exactly is
+    not yet an overrun."""
+    stages = [{"name": "gate", "duration_ms": R.STAGE_TIMING_BUDGETS_MS["gate"]}]
+    assert R.stage_budget_overruns(stages) == []
+
+
+def test_stage_budget_overruns_skips_an_unbudgeted_stage_name():
+    """An unbudgeted name is a naming mismatch to fix, not a performance
+    problem -- must not raise or false-positive."""
+    stages = [{"name": "some_new_stage_nobody_budgeted_yet", "duration_ms": 999_999}]
+    assert R.stage_budget_overruns(stages) == []
+
+
+def test_stage_budget_overruns_supports_a_caller_supplied_budget_table():
+    stages = [{"name": "custom", "duration_ms": 200}]
+    assert R.stage_budget_overruns(stages, budgets={"custom": 100})[0]["name"] == "custom"
+    assert R.stage_budget_overruns(stages, budgets={"custom": 300}) == []
+
+
+def test_stage_budget_overruns_flags_only_the_stages_actually_over():
+    stages = [
+        {"name": "preflight", "duration_ms": 1_000},   # well within budget
+        {"name": "gather", "duration_ms": 200_000},     # over
+        {"name": "gate", "duration_ms": 100},           # within budget
+    ]
+    out = R.stage_budget_overruns(stages)
+    assert [o["name"] for o in out] == ["gather"]
+
+
+def test_every_stage_timing_budget_key_has_a_positive_value():
+    for name, ms in R.STAGE_TIMING_BUDGETS_MS.items():
+        assert ms > 0, f"{name} budget must be positive"
+
+
 # ---------------------------------------------------------------- optimizations
 
 def test_optimizer_is_silent_without_enough_history():
