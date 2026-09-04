@@ -244,7 +244,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration, direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
 | `runlog.py` | Run manifests, staged timing, preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
-| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces |
+| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
 | `emailer.py` | HTML brief rendering, failure diagnosis, subject lines |
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
@@ -253,7 +253,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_quantcore.py` | 81 tests, including known-answer volatility and correlation recovery, and the floor/cap quality-conflation regression |
 | `test_runlog.py` | 57 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, and `abort()`'s first-reason-wins semantics |
 | `test_washsale.py` | 32 tests |
-| `test_ledger.py` | 84 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), and monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee) |
+| `test_ledger.py` | 88 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee), and `run_entry` (schema pinning, round-trip through a folded journal directly into `runlog.find_optimizations`) |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
 | `test_watchdog.py` | 15 tests |
 | `test_research.py` | 45 tests, against recorded fixtures in `fixtures/research/`, never the live API |
@@ -1356,6 +1356,34 @@ last, so this ordering actually survives a later check also calling
 decided what the run reported, not the root cause.
 
 `runlog.py`/`test_runlog.py`: 52 → 57 tests. Full suite: 415 → 420.
+
+### 4 September 2026 — the `"run"` journal entry's schema is pinned in code
+
+Stage 6's only instruction for the `"run"` journal entry used to be "a
+compact summary for `find_optimizations`" — prose, not a pinned contract.
+`runlog._regressions` and `runlog.find_optimizations` read specific
+fields (`health`, `duration_ms`, `decisions[].action`/
+`.inputs.recovered_within_5d`/`.gate_failed`/`.executed`,
+`stages[].name`/`.duration_ms`) via `dict.get(..., default)` throughout —
+a field that drifted out of sync between what got hand-written and what
+those functions expect would not raise, it would just silently stop
+contributing to the optimization findings.
+
+`ledger.run_entry(log)` pins the exact five-field schema
+(`RUN_ENTRY_SCHEMA_FIELDS`) and is the only sanctioned way to build the
+payload now — `DAILY_PROCEDURE.md` Stage 6 calls it directly rather than
+describing the shape in prose. Duck-typed to accept either a
+`runlog.RunLog` (via `.manifest()`) or a plain manifest `dict`, matching
+the same import-cycle-avoidance pattern `to_washsale_trades` already
+uses for `washsale`.
+
+`test_run_entry_round_trips_through_the_journal_into_find_optimizations`
+is the test that matters most here: it builds real `run_entry` payloads
+into journal entries, folds them, and feeds the result straight into
+`runlog.find_optimizations`, proving the schema and the reader actually
+agree — not just that both exist.
+
+`ledger.py`/`test_ledger.py`: 84 → 88 tests. Full suite: 420 → 424.
 
 ## 12. Open and unverified
 

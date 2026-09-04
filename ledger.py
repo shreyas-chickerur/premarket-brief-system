@@ -34,7 +34,7 @@ __all__ = [
     "Fill", "fills_from_orders", "SplitEvent", "splits_from_api", "apply_splits",
     "positions_from_fills", "cost_basis", "loss_sales", "reconcile_positions",
     "to_washsale_trades", "JournalEntry", "Journal", "fold_journal",
-    "journal_filename", "JOURNAL_RE",
+    "journal_filename", "JOURNAL_RE", "run_entry", "RUN_ENTRY_SCHEMA_FIELDS",
     "journal_monthly_filename", "MONTHLY_JOURNAL_RE", "month_is_compactable",
     "compact_journal_month",
     "FILLS_CACHE_HORIZON_DAYS", "fills_cache_filename", "FILLS_CACHE_RE",
@@ -640,6 +640,47 @@ def journal_filename(run_date: date, seq: int = 0) -> str:
     overwrite and a silently dropped run is worse than a duplicate."""
     stem = f"journal-{run_date.isoformat()}"
     return f"{stem}.json" if seq == 0 else f"{stem}-{seq}.json"
+
+
+# Fields runlog._regressions and runlog.find_optimizations actually read
+# from one history entry -- see runlog.py. Every field run_entry() emits
+# exists because one of those two functions consumes it; nothing else
+# belongs in a "run" journal entry, which is why it stays a small, pinned
+# projection of the full manifest rather than the manifest itself (that
+# already gets written whole to run-manifest-YYYY-MM-DD[-N].json).
+RUN_ENTRY_SCHEMA_FIELDS = ("run_id", "health", "duration_ms", "decisions", "stages")
+
+
+def run_entry(log: Any) -> dict:
+    """The payload for a journal `"run"` entry.
+
+    Before this existed, `DAILY_PROCEDURE.md` described it only as "a
+    compact summary for `find_optimizations`" — prose, not a pinned
+    contract, with nothing stopping the fields actually written from
+    drifting out of sync with the fields `runlog._regressions` and
+    `runlog.find_optimizations` read (`health`, `duration_ms`,
+    `decisions[].action`/`.inputs.recovered_within_5d`/`.gate_failed`/
+    `.executed`, `stages[].name`/`.duration_ms`). A mismatch there would
+    not raise — `dict.get(..., default)` throughout both functions means
+    a missing or renamed field just silently stops contributing to the
+    optimization findings, exactly the kind of failure that never gets
+    noticed until someone asks why a known pattern stopped showing up.
+
+    Accepts either a `runlog.RunLog` (or anything else with a
+    `.manifest()` method shaped the same way — duck-typed rather than
+    importing `runlog`, the same reason `to_washsale_trades` imports
+    `washsale` locally rather than at module level: avoiding an import
+    cycle) or a plain manifest `dict` directly, for testing without a
+    `RunLog` instance.
+    """
+    m = log.manifest() if hasattr(log, "manifest") else dict(log)
+    return {
+        "run_id": m.get("run_id", ""),
+        "health": m.get("health", ""),
+        "duration_ms": m.get("duration_ms", 0),
+        "decisions": m.get("decisions", []),
+        "stages": m.get("stages", []),
+    }
 
 
 @dataclass

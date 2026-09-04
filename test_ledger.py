@@ -12,6 +12,7 @@ from datetime import date, timedelta
 import pytest
 
 import ledger as L
+import runlog as R
 
 
 # --- real payloads, agentic account, 2026-08-31 -------------------------------
@@ -243,6 +244,75 @@ def test_a_settled_thesis_is_not_offered_for_scoring_twice():
 def test_an_empty_folder_folds_to_an_empty_journal():
     j = L.fold_journal([])
     assert j.runs == [] and j.entries == [] and j.unreadable == []
+
+
+# ------------------------------------------------------------ run_entry
+
+def _run_log_with(*, health="nominal", duration_ms=1234,
+                  decisions=(), stages=()):
+    log = R.RunLog("run-x")
+    for d in decisions:
+        log.decide(R.Decision(**d))
+    for s in stages:
+        log.stages.append(R.Stage(name=s["name"], started_at="t",
+                                  duration_ms=s["duration_ms"], ok=True))
+    # health/duration_ms are derived on RunLog, not settable directly;
+    # patch the manifest after the fact so tests can pin an exact value
+    # without needing a real failing check to produce "degraded"/"critical".
+    m = log.manifest()
+    m["health"] = health
+    m["duration_ms"] = duration_ms
+    return m  # run_entry accepts a plain manifest dict just as well as a RunLog
+
+
+def test_run_entry_pins_exactly_the_fields_find_optimizations_reads():
+    manifest = _run_log_with(decisions=[
+        {"symbol": "OXY", "action": "hold", "account": "agentic",
+         "executed": False, "reason": "no change"},
+    ], stages=[{"name": "gather", "duration_ms": 500}])
+    entry = L.run_entry(manifest)
+    assert set(entry.keys()) == set(L.RUN_ENTRY_SCHEMA_FIELDS)
+    assert entry["health"] == "nominal"
+    assert entry["duration_ms"] == 1234
+    assert entry["decisions"][0]["symbol"] == "OXY"
+    assert entry["stages"][0]["name"] == "gather"
+
+
+def test_run_entry_accepts_a_real_runlog_via_manifest():
+    log = R.RunLog("run-y")
+    log.decide(R.Decision("OXY", "hold", "agentic", False, "no change"))
+    entry = L.run_entry(log)
+    assert entry["run_id"] == "run-y"
+    assert entry["decisions"][0]["symbol"] == "OXY"
+
+
+def test_run_entry_defaults_missing_fields_rather_than_raising():
+    entry = L.run_entry({})
+    assert entry == {"run_id": "", "health": "", "duration_ms": 0,
+                     "decisions": [], "stages": []}
+
+
+def test_run_entry_round_trips_through_the_journal_into_find_optimizations():
+    """The guarantee that actually matters: a run_entry payload, folded
+    back out of the journal exactly as DAILY_PROCEDURE.md's Stage 6 write
+    and Stage 0 step 9 read would do it, must be directly consumable by
+    runlog.find_optimizations -- proving the pinned schema and the reader
+    actually agree, not just that both exist."""
+    # Five runs where stops recovered promptly within 5 days -- the exact
+    # pattern find_optimizations looks for (see runlog.py "tight" stops).
+    entries = []
+    for i in range(6):
+        manifest = _run_log_with(decisions=[
+            {"symbol": "OXY", "action": "stop_filled", "account": "agentic",
+             "executed": True, "reason": "stop hit",
+             "inputs": {"recovered_within_5d": True}},
+        ])
+        entries.append(_file(f"journal-2026-08-{i+1:02d}.json",
+            [{"run_id": f"r{i}", "kind": "run", "payload": L.run_entry(manifest)}]))
+
+    journal = L.fold_journal(entries)
+    findings = R.find_optimizations(journal.runs)
+    assert any(f["kind"] == "stop_distance" for f in findings)
 
 
 # ------------------------------------------------------- journal compaction

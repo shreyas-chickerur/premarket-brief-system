@@ -273,6 +273,21 @@ August 2026, so a stuck order no longer has to be waited out.
 **Why "always create a new file, never modify one."** The Drive connector
 rewrites metadata but not contents.
 
+**Why the `"run"` entry's payload is `ledger.run_entry(log)`, never
+hand-built.** Before 4 September 2026, the only instruction was to write
+"a compact summary for `find_optimizations`" — prose, not a pinned
+contract. `runlog._regressions` and `runlog.find_optimizations` read
+specific fields (`health`, `duration_ms`, `decisions[].action`/
+`.inputs.recovered_within_5d`/`.gate_failed`/`.executed`,
+`stages[].name`/`.duration_ms`) via `dict.get(..., default)` throughout,
+which means a field that drifted out of sync between what got written
+and what those functions expect would not raise — it would just silently
+stop contributing to the optimization findings, a failure nobody would
+notice until a known pattern stopped showing up for no visible reason.
+`ledger.run_entry` pins the exact field set in code, tested end to end by
+folding a `run_entry` payload back out of a journal and feeding it
+straight to `runlog.find_optimizations`.
+
 **Why the 06:20 routine stays silent on an abort.** The watchdog (fires 60
 minutes later, reads `WATCHDOG_PROCEDURE.md`) owns deciding what happens
 next — diagnosing, attempting a fix, and re-running this same procedure.
