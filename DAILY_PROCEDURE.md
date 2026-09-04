@@ -126,35 +126,31 @@ Write two files to Drive folder `{{DRIVE_FOLDER_ID}}` — **the connector rewrit
 - **If the 06:20 scheduled routine fired this directly** and the run **ABORTED**: do not render or send any email. Write the manifest and journal as above and stop. The watchdog owns deciding what happens next.
 - **If the run SUCCEEDED or the market was CLOSED**, or **if you are the watchdog re-running this procedure after a diagnosis/fix attempt**: render and send the email now. This is the only place email-sending logic lives; both callers funnel through it.
 
-**Before rendering anything, verify it.** Call `emailer.verify_email({"agentic": agentic_ideas, "individual": suggestion_ideas}, manifest=log.manifest(), known_sources=[i.source for i in bundle.items], evidence=[bundle, broker_responses_this_run])`. **It raises `ValueError` — do not catch it and send anyway — on a card's numbers not matching the recorded decision, an empty-source bullet, a bullet citing a source outside the research bundle and `emailer.ALLOWED_SOURCE_PREFIXES`, or a numeric claim (a price, a percentage, anything not a date or ordinal) that cannot be traced to the manifest, the research bundle, or a broker response.** This is the only defence against a fabricated number or an unsupported claim reaching the one artefact a human actually reads — if it raises, that is a bug in what was built for the email, not a false alarm to route around; fix the underlying card/bullet, do not weaken the check.
+**There is one call that both renders and verifies — `emailer.render_email` — and no other path to send an email.** It takes `agentic_ideas`/`suggestion_ideas` as structured data, not pre-rendered HTML, and runs `emailer.verify_email` on them internally, unconditionally, before anything renders. **This is deliberate: `verify_email` used to be a separate call a caller had to remember to make, which is exactly the "documented intention, nothing checked" failure this system keeps getting burned by (the journal's `unreadable` list, the dead `find_optimizations` findings, the research coverage conflation). There is no argument to `render_email` that accepts pre-built account-section HTML, so skipping verification is not something this call can express.** It raises `ValueError` — do not catch it and send anyway — on a card's numbers not matching the recorded decision, an empty-source bullet, a bullet citing a source outside the research bundle and `emailer.ALLOWED_SOURCE_PREFIXES`, or a numeric claim (a price, a percentage, anything not a date or ordinal) that cannot be traced to the manifest, the research bundle, or a broker response. If it raises, that is a bug in what was built for the email, not a false alarm to route around; fix the underlying card or bullet, do not weaken the check.
 
-**When you do send, keep it to `emailer.CANONICAL_SECTIONS` — at most `emailer.MAX_SECTIONS` (5) sections, every title drawn from that exact tuple. `render_email` raises `ValueError` on an extra, renamed, or duplicated section — this is enforced in code, not just this prose, specifically so the section list cannot silently grow again the way it did before the 1 September 2026 cut from four to three. A day with nothing to say for a section omits it (fewer than 5 is fine); it never invents a sixth.**
+**The remaining three sections still keep to `emailer.OTHER_SECTIONS` — at most 3, every title drawn from that exact tuple, no duplicates, and never one of the two account titles (those come from `agentic_ideas`/`suggestion_ideas`, never from `other_sections`).** `render_email` raises `ValueError` on a violation — enforced in code, not just this prose, specifically so the section list cannot silently grow again the way it did before the 1 September 2026 cut from four to three. A day with nothing to say for one of the three omits it; it never invents a fourth.
 
 ```python
 import emailer, runlog
 agentic_rejections = [d for d in log.manifest()["decisions"] if d["account"] == "agentic" and d.get("gate_failed")]
 individual_rejections = [d for d in log.manifest()["decisions"] if d["account"] == "individual" and d.get("gate_failed")]
-emailer.verify_email(
-    {"agentic": agentic_ideas, "individual": suggestion_ideas},
-    manifest=log.manifest(),
-    known_sources=[i.source for i in bundle.items],
-    evidence=[bundle, broker_responses_this_run],
-)  # raises ValueError on anything unsupported -- fix the card/bullet, never catch and send anyway
 subject, html = emailer.render_email(
     log.manifest(),
-    sections=[("Agentic account — activity",
-               emailer.idea_cards(agentic_ideas, closest_calls=runlog.closest_calls(agentic_rejections))),
-              ("Individual account — suggestions",
-               emailer.idea_cards(suggestion_ideas, closest_calls=runlog.closest_calls(individual_rejections))),
-              ("Prior-day review", prior_day_frag),
-              ("Diversification", diversification_frag),
-              ("System health", health_frag)],
+    agentic_ideas=agentic_ideas,
+    suggestion_ideas=suggestion_ideas,
+    agentic_closest_calls=runlog.closest_calls(agentic_rejections),
+    suggestion_closest_calls=runlog.closest_calls(individual_rejections),
+    known_sources=[i.source for i in bundle.items],
+    evidence=[bundle, broker_responses_this_run],
+    other_sections=[("Prior-day review", prior_day_frag),
+                    ("Diversification", diversification_frag),
+                    ("System health", health_frag)],
     prefix=prefix,  # "[DRY RUN]" while the DRY RUN guard above is in effect; "" once removed
-)
+)  # raises ValueError on anything unsupported -- fix the card/bullet, never catch and send anyway
 ```
 
-- **"Agentic account — activity"**: build `agentic_ideas` as a list of dicts, one per symbol touched this run (or, under the DRY RUN guard, one per order that *would* have been placed) — `{"symbol": ..., "action": "buy"|"sell"|"trim"|"hold", "quantity": "2 shares", "detail": "limit 61.80, stop 58.09, 12.48% weight", "bullets": [(text, source), ...]}`. Every bullet is one concrete reason the idea moved in the direction of the call, each tagged with the specific source that supports it. Include existing held positions too (`action: "hold"`), briefly, with the broker's actual response as a bullet where an order was really sent. When `agentic_ideas` is empty, `emailer.idea_cards`'s `closest_calls` argument (above) reports the rejected idea(s) that got furthest through the gate instead of bare "Nothing today." — this is only visible at all when Stage 3 set `gate_failed` to one of `runlog.GATE_CONDITIONS`'s exact strings.
-- **"Individual account — suggestions"**: same `idea_card` shape, one card per idea that cleared the gate in Stage 4 — symbol, buy or sell, how many shares, and bullets sourced the same way as above. Skip anything that didn't clear the gate; `emailer.idea_cards([])` on a do-nothing day renders "Nothing today.", or the closest call(s) when any rejection reached the gate at all.
+- **"Agentic account — activity"**: build `agentic_ideas` as a list of dicts, one per symbol touched this run (or, under the DRY RUN guard, one per order that *would* have been placed) — `{"symbol": ..., "action": "buy"|"sell"|"trim"|"hold", "quantity": "2 shares", "detail": "limit 61.80, stop 58.09, 12.48% weight", "bullets": [(text, source), ...]}`. Every bullet is one concrete reason the idea moved in the direction of the call, each tagged with the specific source that supports it. Include existing held positions too (`action: "hold"`), briefly, with the broker's actual response as a bullet where an order was really sent. When `agentic_ideas` is empty, `agentic_closest_calls` reports the rejected idea(s) that got furthest through the gate instead of bare "Nothing today." — this is only visible at all when Stage 3 set `gate_failed` to one of `runlog.GATE_CONDITIONS`'s exact strings.
+- **"Individual account — suggestions"**: same `idea_card` shape, one card per idea that cleared the gate in Stage 4 — symbol, buy or sell, how many shares, and bullets sourced the same way as above. Skip anything that didn't clear the gate; an empty `suggestion_ideas` on a do-nothing day renders "Nothing today.", or the closest call(s) when any rejection reached the gate at all.
 - **"Prior-day review"**: the Stage 0.5 `evidence.assess` verdict and the Stage 0.6 `runlog.score_closed_decisions` verdict, one or two sentences each, in that order. Two different questions about the same track record — do not merge them into one sentence or drop either one because they happen to agree.
 - **"Diversification"**: the Stage 2 `correlation_concentration` result — whether the book is `concentrated`, the effective-bets count against the number of names examined, and the most correlated pair when it is informative. If `status` is `"insufficient"` (too few names or too little history), say so plainly instead of omitting the section silently.
 - **"System health"**: the run's overall status, the circuit breaker's status from Stage 5 whenever it is not fully clear, `runlog.stage_budget_overruns(log.manifest()["stages"])` — name every stage that ran over its budget and by how much, in one short line each, omit the mention entirely on a day with none — and — only when this run was a watchdog retry — a plain-English note on what was diagnosed and, if a fix was written and merged to `main`, a one-line description of the fix and the commit it landed in. The evidence and prior-day-review verdicts no longer belong here — see "Prior-day review" above.

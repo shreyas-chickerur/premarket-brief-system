@@ -107,7 +107,7 @@ def test_failed_run_drops_research_sections_entirely():
     """Empty headings imply research happened. None did."""
     _, html = E.render_email(
         aborted_manifest(),
-        sections=[("What moved and why", "<p>markets did things</p>")])
+        other_sections=[("What moved and why", "<p>markets did things</p>")])
     assert "What moved and why" not in html
     assert "markets did things" not in html
 
@@ -125,7 +125,7 @@ def test_failed_run_reports_what_still_worked():
 def test_healthy_run_keeps_its_research_sections():
     _, html = E.render_email(
         healthy_manifest(),
-        sections=[("System health", "<p>markets did things</p>")])
+        other_sections=[("System health", "<p>markets did things</p>")])
     assert "System health" in html and "markets did things" in html
 
 
@@ -140,43 +140,64 @@ def test_canonical_sections_is_exactly_five():
     assert len(E.CANONICAL_SECTIONS) == 5
     assert "Prior-day review" in E.CANONICAL_SECTIONS
     assert "Diversification" in E.CANONICAL_SECTIONS
+    assert len(E.ACCOUNT_SECTIONS) == 2
+    assert len(E.OTHER_SECTIONS) == 3
 
 
 def test_all_five_canonical_sections_render_together():
-    _, html = E.render_email(healthy_manifest(), sections=[
-        (title, f"<p>{title} body</p>") for title in E.CANONICAL_SECTIONS
-    ])
+    """The two account sections are always built internally from
+    structured ideas; the remaining three arrive as other_sections."""
+    _, html = E.render_email(
+        healthy_manifest(),
+        agentic_ideas=[{"symbol": "OXY", "action": "hold"}],
+        suggestion_ideas=[{"symbol": "VTI", "action": "hold"}],
+        other_sections=[(title, f"<p>{title} body</p>") for title in E.OTHER_SECTIONS])
     for title in E.CANONICAL_SECTIONS:
-        assert title in html and f"{title} body" in html
+        assert title in html
+    for title in E.OTHER_SECTIONS:
+        assert f"{title} body" in html
+    assert "OXY" in html and "VTI" in html
 
 
 def test_fewer_than_five_sections_is_fine():
-    """A day with nothing to say for a section omits it -- only an
-    unlisted or duplicated title is an error, not an incomplete one."""
+    """A day with nothing to say for one of the other sections omits it --
+    only an unlisted or duplicated title is an error, not an incomplete
+    one. The two account sections still always render."""
     _, html = E.render_email(healthy_manifest(),
-                             sections=[("System health", "<p>ok</p>")])
+                             other_sections=[("System health", "<p>ok</p>")])
     assert "System health" in html
+    for title in E.ACCOUNT_SECTIONS:
+        assert title in html
 
 
-def test_more_than_five_sections_raises():
+def test_more_than_three_other_sections_raises():
     """The exact drift this cap exists to stop -- a caller quietly
-    appending a sixth section over time, the same way the email grew to
-    four sections before the 1 September 2026 cut to three."""
-    six = list(E.CANONICAL_SECTIONS) + ["Extra commentary"]
-    with pytest.raises(ValueError, match="at most 5 sections"):
+    appending a section beyond the three that are actually left once the
+    account sections are no longer caller-suppliable."""
+    four = list(E.OTHER_SECTIONS) + ["Extra commentary"]
+    with pytest.raises(ValueError, match="at most 3 other sections"):
         E.render_email(healthy_manifest(),
-                       sections=[(t, "<p>x</p>") for t in six])
+                       other_sections=[(t, "<p>x</p>") for t in four])
+
+
+def test_an_account_title_in_other_sections_raises():
+    """The specific seam this closes: an account section must be built
+    from structured ideas, never handed in as pre-rendered HTML that
+    skipped verify_email."""
+    with pytest.raises(ValueError, match="must not include account section"):
+        E.render_email(healthy_manifest(),
+                       other_sections=[("Agentic account — activity", "<p>fake</p>")])
 
 
 def test_an_unrecognised_section_title_raises():
     with pytest.raises(ValueError, match="unrecognised section title"):
         E.render_email(healthy_manifest(),
-                       sections=[("What moved and why", "<p>x</p>")])
+                       other_sections=[("What moved and why", "<p>x</p>")])
 
 
 def test_a_duplicated_section_title_raises():
     with pytest.raises(ValueError, match="duplicate section title"):
-        E.render_email(healthy_manifest(), sections=[
+        E.render_email(healthy_manifest(), other_sections=[
             ("System health", "<p>a</p>"),
             ("System health", "<p>b</p>"),
         ])
@@ -188,7 +209,7 @@ def test_section_cap_is_not_enforced_on_an_aborted_run():
     rendered, same as before this cap existed."""
     _, html = E.render_email(
         aborted_manifest(),
-        sections=[("not a real section", "<p>x</p>")] * 9)
+        other_sections=[("not a real section", "<p>x</p>")] * 9)
     assert "not a real section" not in html
 
 
@@ -516,3 +537,62 @@ def test_verify_email_empty_ideas_pass_trivially():
 
 def test_verify_email_is_part_of_the_public_api():
     assert "verify_email" in E.__all__ and "ALLOWED_SOURCE_PREFIXES" in E.__all__
+
+
+# ------------------------------------- render_email cannot skip verify_email
+
+def test_render_email_raises_on_an_unverifiable_card_instead_of_rendering_it():
+    """The seam this closes: there is no argument to render_email that
+    accepts pre-rendered account HTML, so a card that would fail
+    verify_email cannot reach the page by construction."""
+    with pytest.raises(ValueError, match="no matching decision"):
+        E.render_email(
+            healthy_manifest(),
+            agentic_ideas=[{"symbol": "OXY", "action": "buy", "quantity": "2 shares"}])
+
+
+def test_render_email_raises_on_an_empty_source_bullet_before_rendering():
+    with pytest.raises(ValueError, match="no source"):
+        E.render_email(
+            healthy_manifest(),
+            suggestion_ideas=[{"symbol": "VTI", "action": "hold",
+                              "bullets": [("Looks fine", "")]}])
+
+
+def test_render_email_passes_known_sources_and_evidence_through_to_verify_email():
+    """A card that verify_email would reject on its own must be accepted
+    by render_email once the same known_sources/evidence make it
+    traceable -- proving these arguments actually reach the check, not
+    just that render_email accepts them."""
+    ideas = [{"symbol": "OXY", "action": "hold",
+             "bullets": [("Weight is 12.48%", "EIA STEO, 9 Sep")]}]
+    with pytest.raises(ValueError, match="unrecognised source"):
+        E.render_email(healthy_manifest(), agentic_ideas=ideas)
+
+    _, html = E.render_email(
+        healthy_manifest(), agentic_ideas=ideas,
+        known_sources=["EIA STEO, 9 Sep"], evidence=[{"weight_pct": 12.48}])
+    assert "OXY" in html and "12.48%" in html
+
+
+def test_render_email_renders_a_verified_card_end_to_end():
+    manifest = healthy_manifest()
+    manifest["decisions"] = [{"symbol": "OXY", "account": "agentic", "action": "buy",
+                              "executed": True, "reason": "cleared the gate",
+                              "inputs": {"quantity": 2.0}}]
+    _, html = E.render_email(
+        manifest,
+        agentic_ideas=[{"symbol": "OXY", "action": "buy", "quantity": "2 shares",
+                        "bullets": [("Dated catalyst", "Alpha Vantage NEWS_SENTIMENT")]}],
+        other_sections=[("System health", "<p>nominal</p>")])
+    assert "OXY" in html and "Dated catalyst" in html and "Agentic account" in html
+
+
+def test_render_email_does_not_verify_on_an_aborted_run():
+    """No research happened, so there is nothing to verify -- an
+    otherwise-invalid card must not raise on the abort path."""
+    _, html = E.render_email(
+        aborted_manifest(),
+        agentic_ideas=[{"symbol": "OXY", "action": "buy", "quantity": "2 shares",
+                        "bullets": [("Fabricated", "")]}])
+    assert "OXY" not in html

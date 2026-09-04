@@ -246,7 +246,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads; `Journal.closed_for_scoring` joins thesis + outcome entries for `score_closed_decisions` |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
-| `emailer.py` | HTML brief rendering, failure diagnosis, subject lines, the five-section cap (`CANONICAL_SECTIONS`/`MAX_SECTIONS`) enforced in code, closest-call reporting in `idea_cards` for a day nothing clears the gate, `verify_email` — raises on an unsupported number, source, or empty-source bullet before anything renders |
+| `emailer.py` | HTML brief rendering, failure diagnosis, subject lines, the five-section cap (`CANONICAL_SECTIONS`/`ACCOUNT_SECTIONS`/`OTHER_SECTIONS`) enforced in code, closest-call reporting in `idea_cards` for a day nothing clears the gate, `verify_email` — raises on an unsupported number, source, or empty-source bullet; `render_email` takes structured account ideas (not pre-rendered HTML) and runs `verify_email` on them itself, unconditionally, so there is no path to a sent email that skips it |
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
@@ -258,7 +258,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_watchdog.py` | 15 tests |
 | `test_research.py` | 45 tests, against recorded fixtures in `fixtures/research/`, never the live API |
 | `test_procedure_docs.py` | 6 tests: the DRY RUN guard's exact text, and that every stage has a matching rationale section |
-| `test_emailer.py` | 73 tests, including escaping, no-research-on-abort, the `idea_card`/`idea_cards` bulleted format, the five-section cap (exact set, over-cap, unrecognised title, duplicate title, and that the cap is not enforced on an aborted run), closest-call reporting, and `verify_email` (quantity mismatch, no matching decision, wrong-account decision, empty/unrecognised source, every allowed source prefix, untraceable and tolerance-matched numbers, date/ordinal exemption) |
+| `test_emailer.py` | 79 tests, including escaping, no-research-on-abort, the `idea_card`/`idea_cards` bulleted format, the five-section cap (exact set, over-cap, unrecognised title, duplicate title, and that the cap is not enforced on an aborted run), closest-call reporting, `verify_email` (quantity mismatch, no matching decision, wrong-account decision, empty/unrecognised source, every allowed source prefix, untraceable and tolerance-matched numbers, date/ordinal exemption), and that `render_email` cannot render an account section without `verify_email` passing first |
 
 Key API surface:
 
@@ -1568,6 +1568,33 @@ later. A stage whose name is not in the budget table is silently
 unmonitored, never an error.
 
 `runlog.py`/`test_runlog.py`: 70 → 77 tests. Full suite: 484 → 491.
+
+### 4 September 2026 — `verify_email` closed as a seam, not left as an instruction
+
+Task 12 shipped `verify_email` as a function a caller had to remember to
+invoke before `render_email`. A live review caught this the same day:
+`render_email` already enforced the section caps in code, but the one
+check where a missed call is least acceptable — the anti-fabrication
+guard — was the one check in `emailer.py` still optional. That is exactly
+the failure shape this system had already been burned by three times: the
+journal's `unreadable` list nothing read, the `find_optimizations`
+findings keyed on fields nothing wrote, the research `coverage_issues()`
+conflation. All three were documented intentions; none were enforced
+until something broke.
+
+`render_email` now takes `agentic_ideas`/`suggestion_ideas` as structured
+data, not pre-rendered HTML, builds both account sections itself via
+`idea_cards`, and runs `verify_email` on the structured ideas first,
+unconditionally — there is no parameter that accepts pre-built account
+HTML, so "render without verifying" is not something a caller can express
+by mistake. The three non-account sections still arrive as pre-rendered
+`(title, html)` pairs via `other_sections` (now capped at `OTHER_SECTIONS`,
+3, since the two account titles are no longer caller-suppliable at all).
+`verify_email` stays independently callable for tests, but production
+code has exactly one path to a sent email, and it always passes through
+the check.
+
+`emailer.py`/`test_emailer.py`: 73 → 79 tests. Full suite: 491 → 497.
 
 ## 12. Open and unverified
 

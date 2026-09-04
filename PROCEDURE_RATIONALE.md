@@ -400,6 +400,25 @@ logging a warning specifically so a run cannot accidentally catch the
 exception and send anyway; if it fires, the fix is the card or bullet
 that produced the untraceable claim, never the check.
 
+**Why `render_email` calls `verify_email` itself, rather than the
+procedure calling both.** For one day, `verify_email` was a second call a
+caller had to remember to make before `render_email` — an instruction,
+not an enforcement, and this system had already been burned three times
+by exactly that shape of gap: the journal's `unreadable` list nothing
+read, the `find_optimizations` findings keyed on fields nothing wrote,
+the research `coverage_issues()` conflation. A run that simply forgot the
+`verify_email` call would render an unverified email and nothing would
+complain — the one check where that failure is least acceptable would
+have been the one check in `emailer.py` that was optional. The fix closes
+the seam rather than warning about it harder: `render_email` now takes
+`agentic_ideas`/`suggestion_ideas` as structured data, not pre-rendered
+HTML, builds the two account sections itself, and runs `verify_email` on
+them first, unconditionally. There is no parameter that accepts
+pre-built account HTML, so a caller cannot express "render without
+verifying" even by mistake. `verify_email` stays independently callable
+for tests, but production code has exactly one path to a sent email, and
+it always passes through the check.
+
 **Why "always create a new file, never modify one."** The Drive connector
 rewrites metadata but not contents.
 

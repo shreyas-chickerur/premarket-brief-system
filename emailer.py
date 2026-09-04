@@ -31,8 +31,8 @@ from html import escape
 from typing import Any, Iterable, Optional, Sequence
 
 __all__ = ["diagnose", "render_email", "subject_for", "idea_card", "idea_cards",
-          "CANONICAL_SECTIONS", "MAX_SECTIONS", "verify_email",
-          "ALLOWED_SOURCE_PREFIXES"]
+          "CANONICAL_SECTIONS", "MAX_SECTIONS", "ACCOUNT_SECTIONS", "OTHER_SECTIONS",
+          "verify_email", "ALLOWED_SOURCE_PREFIXES"]
 
 # --------------------------------------------------------------------------
 # palette
@@ -482,25 +482,68 @@ CANONICAL_SECTIONS = (
 )
 MAX_SECTIONS = len(CANONICAL_SECTIONS)
 
+# The two sections `render_email` always builds itself, from structured
+# ideas, never from caller-supplied HTML — see `render_email`'s docstring
+# for why (5 September 2026: `verify_email` was a separate function a
+# caller had to remember to call, which is exactly the "documented
+# intention, nothing checked" failure this system kept getting burned by).
+ACCOUNT_SECTIONS = (
+    "Agentic account — activity",
+    "Individual account — suggestions",
+)
+# The remaining three, still capped and still title-checked, passed to
+# `render_email` as pre-rendered `(title, html)` pairs via `other_sections`
+# — they carry no per-symbol numeric claims for `verify_email` to check.
+OTHER_SECTIONS = tuple(t for t in CANONICAL_SECTIONS if t not in ACCOUNT_SECTIONS)
+
 
 def render_email(manifest: dict, *,
-                 sections: Sequence[tuple[str, str]] = (),
+                 agentic_ideas: Sequence[dict] = (),
+                 suggestion_ideas: Sequence[dict] = (),
+                 agentic_closest_calls: Sequence[dict] = (),
+                 suggestion_closest_calls: Sequence[dict] = (),
+                 known_sources: Sequence[str] = (),
+                 evidence: Sequence[Any] = (),
+                 numeric_tolerance: float = 0.01,
+                 other_sections: Sequence[tuple[str, str]] = (),
                  prefix: str = "",
                  disclaimer: bool = True) -> tuple[str, str]:
     """Return `(subject, html)`.
 
-    `sections` are `(title, html)` pairs holding the research narrative for a
-    run that got far enough to produce one. They are DROPPED on an aborted run:
-    if preflight refused to proceed, there is no research, and printing empty
-    headings implies there was.
+    This is the ONLY path that renders the two account sections, and there
+    is no way to call it with pre-rendered account HTML and skip
+    verification. `agentic_ideas`/`suggestion_ideas` are structured data
+    (the same shape `idea_cards` and `verify_email` already took);
+    `verify_email` runs on them, unconditionally, before anything else —
+    only if it passes does `idea_cards` turn them into markup. Before 5
+    September 2026, `verify_email` was a separate function a caller had to
+    remember to invoke, which is exactly the "documented intention,
+    nothing checked" failure this system kept getting burned by (the
+    journal's `unreadable` list, the dead `find_optimizations` findings,
+    the research coverage conflation — all three were instructions nothing
+    enforced). `verify_email` stays independently callable, for tests or a
+    caller that wants to check without rendering, but there is no path
+    through THIS function where an account section renders without it
+    having passed first.
 
-    On a completed run, `sections` may contain at most `MAX_SECTIONS` (5)
-    entries, and every title must be one of `CANONICAL_SECTIONS` — a day
-    that has nothing to say for a section omits it entirely (fewer than 5
-    is fine; an unlisted or duplicated title is not). This is what "caps
-    enforced in code" means: the section list cannot silently grow or drift
-    just because a future change to `DAILY_PROCEDURE.md`'s prose forgot to
-    also update this list.
+    `other_sections` are `(title, html)` pairs for the three remaining
+    sections — "Prior-day review", "Diversification", "System health"
+    (`OTHER_SECTIONS`) — which carry no per-symbol numeric claims to
+    verify the way the account cards do, so they stay pre-rendered HTML.
+    Passing one of the two account titles here raises: those sections are
+    always built from the structured ideas above, never from HTML a
+    caller assembled itself. At most `len(OTHER_SECTIONS)` (3) entries,
+    every title in `OTHER_SECTIONS`, no duplicates — same enforced-in-code
+    cap as before, just scoped to what is left once the account sections
+    are no longer caller-suppliable.
+
+    `known_sources`, `evidence`, and `numeric_tolerance` pass straight
+    through to `verify_email` — see its docstring for what they do.
+
+    On an aborted run, none of this runs: no sections, no verification —
+    if preflight refused to proceed, there is no research, and printing
+    empty headings (or checking claims that were never made) implies
+    there was.
     """
     d = diagnose(manifest)
     health = "aborted" if d else manifest.get("health", "nominal")
@@ -512,22 +555,45 @@ def render_email(manifest: dict, *,
         body.append(_failure_block(d, accent))
         body.append(_what_still_worked(manifest))
     else:
-        sections = list(sections)
-        if len(sections) > MAX_SECTIONS:
+        other_sections = list(other_sections)
+        titles = [t for t, _ in other_sections]
+        # Ordered so the count cap is reachable on its own: with only
+        # `len(OTHER_SECTIONS)` (3) valid unique titles, a 4th entry could
+        # otherwise only ever be caught as unrecognised or duplicate,
+        # never as "too many" specifically -- checking count first keeps
+        # that message meaningful instead of dead code.
+        if len(other_sections) > len(OTHER_SECTIONS):
             raise ValueError(
-                f"render_email accepts at most {MAX_SECTIONS} sections, got "
-                f"{len(sections)}: {[t for t, _ in sections]}")
-        titles = [t for t, _ in sections]
-        unknown = [t for t in titles if t not in CANONICAL_SECTIONS]
+                f"render_email accepts at most {len(OTHER_SECTIONS)} other sections, got "
+                f"{len(other_sections)}: {titles}")
+        account_titles_present = [t for t in titles if t in ACCOUNT_SECTIONS]
+        if account_titles_present:
+            raise ValueError(
+                f"other_sections must not include account section(s) "
+                f"{account_titles_present} — pass agentic_ideas/suggestion_ideas instead")
+        unknown = [t for t in titles if t not in OTHER_SECTIONS]
         if unknown:
             raise ValueError(
-                f"unrecognised section title(s) {unknown} — must be one of "
-                f"{CANONICAL_SECTIONS}")
+                f"unrecognised section title(s) {unknown} — must be one of {OTHER_SECTIONS}")
         if len(set(titles)) != len(titles):
             raise ValueError(f"duplicate section title(s) in {titles}")
 
+        verify_email(
+            {"agentic": agentic_ideas, "individual": suggestion_ideas},
+            manifest=manifest, known_sources=known_sources, evidence=evidence,
+            numeric_tolerance=numeric_tolerance,
+        )
+
+        full_sections = [
+            ("Agentic account — activity",
+             idea_cards(agentic_ideas, closest_calls=agentic_closest_calls)),
+            ("Individual account — suggestions",
+             idea_cards(suggestion_ideas, closest_calls=suggestion_closest_calls)),
+            *other_sections,
+        ]
+
         body.append(_health_line(manifest))
-        for title, html in sections:
+        for title, html in full_sections:
             body.append(_h(title))
             body.append(html)
         body.append(_decisions(manifest))
