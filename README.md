@@ -25,13 +25,13 @@ source of truth both scheduled routines follow:
 
 | File | Purpose |
 |---|---|
-| `research.py` | Deterministic Stage 1 research: candidate generation, the weather-symbol mapping, and one parser per feed (news, congressional and insider activity, scheduled events, filings, macro, commodities, positioning), each grading its own result the same way `quantcore.Estimate` does |
-| `quantcore.py` | Volatility estimators, indicators, stop distance, position sizing, data-anomaly detection |
-| `runlog.py` | Run manifests, staged timing, the preflight self-audit, regression review, honest scoring |
+| `research.py` | Deterministic Stage 1 research: candidate generation, the weather-symbol mapping, and one parser per feed (news, congressional and insider activity, scheduled events, filings, macro, commodities, positioning), each grading its own result the same way `quantcore.Estimate` does; every parser verified against a real recorded response, with a shape-drift guard and coverage tracking so a field-name mismatch can't masquerade as a quiet day |
+| `quantcore.py` | Volatility estimators, indicators, stop distance, position sizing, data-anomaly detection, portfolio concentration (thresholds read from config) |
+| `runlog.py` | Run manifests, staged timing against per-stage budgets, the preflight self-audit (including a blocking journal-readability check), regression review, optimization proposals, real `stop_filled` decisions, the pinned five-condition gate order and closest-call ranking, honest scoring |
 | `washsale.py` | Cross-account wash-sale registry (26 U.S.C. 1091 is taxpayer-level, not account-level) |
-| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal |
+| `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history (never stored); the append-only journal, its optional monthly compaction, and a bounded-staleness cache for fills and split events (never positions) |
 | `evidence.py` | Pre-registered edge testing: sample-size planning, futility stopping, the policy that pauses trading on a ruled-out claim |
-| `emailer.py` | HTML rendering of the brief, with failure diagnosis |
+| `emailer.py` | HTML rendering of the brief, with failure diagnosis, a five-section cap enforced in code, and `verify_email` — raises before anything renders if a claim isn't traceable to real data |
 | `watchdog.py` | Judgment layer behind `WATCHDOG_PROCEDURE.md`: which manifest is latest, what counts as healthy |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic series the demo falls back to |
