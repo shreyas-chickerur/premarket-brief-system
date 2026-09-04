@@ -29,7 +29,8 @@ from __future__ import annotations
 from html import escape
 from typing import Any, Iterable, Optional, Sequence
 
-__all__ = ["diagnose", "render_email", "subject_for", "idea_card", "idea_cards"]
+__all__ = ["diagnose", "render_email", "subject_for", "idea_card", "idea_cards",
+          "CANONICAL_SECTIONS", "MAX_SECTIONS"]
 
 # --------------------------------------------------------------------------
 # palette
@@ -263,6 +264,30 @@ def idea_cards(ideas: Sequence[dict]) -> str:
 # render
 # --------------------------------------------------------------------------
 
+# The fixed set of sections a completed run's email may contain, in the
+# order they render. Cut from an original four ("Evidence review" / "Where
+# things stand" / "What moved and why" / "Risk measurement") to three on 1
+# September 2026, then restructured to these five on 4 September 2026: the
+# original three had nowhere to put the prior-day track record
+# (`runlog.score_closed_decisions`, Stage 0.6) or the portfolio
+# concentration verdict (`quantcore.correlation_concentration`, Stage 2) —
+# both existed in the run's own data and had no section to appear in, so
+# neither ever reached the one artefact a human actually reads. This tuple
+# is enforced in `render_email` below, not just described in
+# `DAILY_PROCEDURE.md` prose: the user does not want a market-commentary
+# newsletter, and a caller that starts appending ad hoc sections again
+# (the exact drift that produced the original four) now gets a `ValueError`
+# instead of a silently growing email.
+CANONICAL_SECTIONS = (
+    "Agentic account — activity",
+    "Individual account — suggestions",
+    "Prior-day review",
+    "Diversification",
+    "System health",
+)
+MAX_SECTIONS = len(CANONICAL_SECTIONS)
+
+
 def render_email(manifest: dict, *,
                  sections: Sequence[tuple[str, str]] = (),
                  prefix: str = "",
@@ -273,6 +298,14 @@ def render_email(manifest: dict, *,
     run that got far enough to produce one. They are DROPPED on an aborted run:
     if preflight refused to proceed, there is no research, and printing empty
     headings implies there was.
+
+    On a completed run, `sections` may contain at most `MAX_SECTIONS` (5)
+    entries, and every title must be one of `CANONICAL_SECTIONS` — a day
+    that has nothing to say for a section omits it entirely (fewer than 5
+    is fine; an unlisted or duplicated title is not). This is what "caps
+    enforced in code" means: the section list cannot silently grow or drift
+    just because a future change to `DAILY_PROCEDURE.md`'s prose forgot to
+    also update this list.
     """
     d = diagnose(manifest)
     health = "aborted" if d else manifest.get("health", "nominal")
@@ -284,6 +317,20 @@ def render_email(manifest: dict, *,
         body.append(_failure_block(d, accent))
         body.append(_what_still_worked(manifest))
     else:
+        sections = list(sections)
+        if len(sections) > MAX_SECTIONS:
+            raise ValueError(
+                f"render_email accepts at most {MAX_SECTIONS} sections, got "
+                f"{len(sections)}: {[t for t, _ in sections]}")
+        titles = [t for t, _ in sections]
+        unknown = [t for t in titles if t not in CANONICAL_SECTIONS]
+        if unknown:
+            raise ValueError(
+                f"unrecognised section title(s) {unknown} — must be one of "
+                f"{CANONICAL_SECTIONS}")
+        if len(set(titles)) != len(titles):
+            raise ValueError(f"duplicate section title(s) in {titles}")
+
         body.append(_health_line(manifest))
         for title, html in sections:
             body.append(_h(title))

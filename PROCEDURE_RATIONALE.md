@@ -338,7 +338,7 @@ than filling what it can (`EQUITY_MAX_SELL_SHARES_EXCEEDED`). This tool did
 not exist when the system was first designed; it was confirmed working 31
 August 2026, so a stuck order no longer has to be waited out.
 
-## Stage 6 — why the schema and the three-section cap
+## Stage 6 — why the schema and the five-section cap
 
 **Why "always create a new file, never modify one."** The Drive connector
 rewrites metadata but not contents.
@@ -364,18 +364,39 @@ next — diagnosing, attempting a fix, and re-running this same procedure.
 Sending a partial "sorry, broken" email from the direct routine would just
 be a second email nobody asked for once the watchdog's retry lands.
 
-**Why exactly three sections, as cards.** The user does not want a
-market-commentary newsletter, only what the agentic account did, what to
-consider for the individual account, and whether the system is healthy — cut
-down from "Evidence review" / "Where things stand" / "What moved and why" /
-"Risk measurement" on 1 September 2026. The two account sections are cards,
-one per symbol, never a paragraph, since 4 September 2026: a name, an
-action, and a quantity buried in a sentence are slower to scan than the
-same three things in a card's first line. Every bullet is tagged with the
-specific source that supports it — a named data provider (`"Alpha Vantage"`),
-a specific report (`"EIA STEO, 9 Sep"`), a computed check
-(`"quantcore.stop_plan"`), a tool result (`"review_equity_order"`) — not a
-vague "research suggests".
+**Why at most five sections, as cards, and why enforced in code.** The
+user does not want a market-commentary newsletter. The section list was
+"Evidence review" / "Where things stand" / "What moved and why" / "Risk
+measurement" originally, cut to three (agentic activity, individual
+suggestions, system health) on 1 September 2026 — and restructured to
+five on 4 September 2026, adding "Prior-day review" and "Diversification"
+back in, because both existed in the run's own data
+(`runlog.score_closed_decisions`, `quantcore.correlation_concentration`)
+with nowhere to appear: the original three-section cut had quietly
+dropped real information along with the newsletter tone, not just the
+tone. `emailer.CANONICAL_SECTIONS`/`MAX_SECTIONS` enforce this in
+`render_email` itself now, not only in this prose — a caller that starts
+appending a sixth section gets a `ValueError`, the same drift-back-to-
+four risk the 1 September cut only guarded against by asking nicely. The
+two account sections are cards, one per symbol, never a paragraph, since 4
+September 2026: a name, an action, and a quantity buried in a sentence
+are slower to scan than the same three things in a card's first line.
+Every bullet is tagged with the specific source that supports it — a
+named data provider (`"Alpha Vantage"`), a specific report (`"EIA STEO, 9
+Sep"`), a computed check (`"quantcore.stop_plan"`), a tool result
+(`"review_equity_order"`) — not a vague "research suggests".
+
+**Why "Prior-day review" and "Diversification" are separate sections, not
+folded into "System health".** `evidence.assess` and
+`runlog.score_closed_decisions` (Stage 0.5, Stage 0.6) both answer a
+track-record question — is there evidence for the pre-registered edge,
+and honestly what has the hit rate been — which is a different kind of
+question from "did the run complete without breaking." Folding both into
+"System health" is how `score_closed_decisions` stayed uncalled for as
+long as it did: a function whose output has no section to appear in is
+easy to leave uncalled indefinitely. `correlation_concentration` gets the
+same treatment for the same reason — it was always computed in Stage 2
+and never had anywhere in the email to show up.
 
 **Why the "System health" section never omits a watchdog note.** The user
 reads this section specifically to know the system stopped itself or fixed

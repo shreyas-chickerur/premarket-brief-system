@@ -246,7 +246,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads; `Journal.closed_for_scoring` joins thesis + outcome entries for `score_closed_decisions` |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
-| `emailer.py` | HTML brief rendering, failure diagnosis, subject lines |
+| `emailer.py` | HTML brief rendering, failure diagnosis, subject lines, the five-section cap (`CANONICAL_SECTIONS`/`MAX_SECTIONS`) enforced in code |
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
@@ -258,7 +258,7 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_watchdog.py` | 15 tests |
 | `test_research.py` | 45 tests, against recorded fixtures in `fixtures/research/`, never the live API |
 | `test_procedure_docs.py` | 6 tests: the DRY RUN guard's exact text, and that every stage has a matching rationale section |
-| `test_emailer.py` | 34 tests, including escaping, no-research-on-abort, and the `idea_card`/`idea_cards` bulleted format |
+| `test_emailer.py` | 41 tests, including escaping, no-research-on-abort, the `idea_card`/`idea_cards` bulleted format, and the five-section cap (exact set, over-cap, unrecognised title, duplicate title, and that the cap is not enforced on an aborted run) |
 
 Key API surface:
 
@@ -1466,6 +1466,32 @@ default would call concentrated, and a tightened `bets_floor_ratio` flags
 a book the default would call fine.
 
 `quantcore.py`/`test_quantcore.py`: 81 → 84 tests. Full suite: 435 → 438.
+
+### 4 September 2026 — the email restructured to five sections, capped in code
+
+The three-section email (agentic activity, individual suggestions,
+system health) had quietly dropped real information along with the
+newsletter tone it was cut from four sections to remove on 1 September
+2026: `runlog.score_closed_decisions` and `quantcore.correlation_concentration`
+were both computed but had no section to appear in, which is a real part
+of why the first stayed uncalled for days (section 11's Stage 0.6 entry)
+and the second's output never reached the one artefact a human actually
+reads.
+
+Two sections added back — "Prior-day review" (the Stage 0.5 `evidence.assess`
+verdict and the Stage 0.6 `score_closed_decisions` verdict, together,
+since both answer a track-record question, not a health question) and
+"Diversification" (the Stage 2 concentration verdict) — for five total.
+
+**This is enforced in code now, not just in `DAILY_PROCEDURE.md` prose.**
+`emailer.CANONICAL_SECTIONS`/`MAX_SECTIONS` fix the allowed titles and cap
+the count at 5; `render_email` raises `ValueError` on an extra, renamed,
+or duplicated section title, for any run whose email actually renders
+research (an aborted run still drops sections entirely, unchecked, since
+none render at all). A day with nothing to say for a section omits it —
+fewer than 5 is fine, a sixth is not.
+
+`emailer.py`/`test_emailer.py`: 34 → 41 tests. Full suite: 438 → 445.
 
 ## 12. Open and unverified
 

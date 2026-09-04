@@ -125,8 +125,71 @@ def test_failed_run_reports_what_still_worked():
 def test_healthy_run_keeps_its_research_sections():
     _, html = E.render_email(
         healthy_manifest(),
-        sections=[("What moved and why", "<p>markets did things</p>")])
-    assert "What moved and why" in html and "markets did things" in html
+        sections=[("System health", "<p>markets did things</p>")])
+    assert "System health" in html and "markets did things" in html
+
+
+# -------------------------------------------------- capped, canonical sections
+
+def test_canonical_sections_is_exactly_five():
+    """4 September 2026: restructured from three to five -- the original
+    three had nowhere to put the prior-day track record
+    (runlog.score_closed_decisions, Stage 0.6) or the diversification
+    verdict (quantcore.correlation_concentration, Stage 2)."""
+    assert E.MAX_SECTIONS == 5
+    assert len(E.CANONICAL_SECTIONS) == 5
+    assert "Prior-day review" in E.CANONICAL_SECTIONS
+    assert "Diversification" in E.CANONICAL_SECTIONS
+
+
+def test_all_five_canonical_sections_render_together():
+    _, html = E.render_email(healthy_manifest(), sections=[
+        (title, f"<p>{title} body</p>") for title in E.CANONICAL_SECTIONS
+    ])
+    for title in E.CANONICAL_SECTIONS:
+        assert title in html and f"{title} body" in html
+
+
+def test_fewer_than_five_sections_is_fine():
+    """A day with nothing to say for a section omits it -- only an
+    unlisted or duplicated title is an error, not an incomplete one."""
+    _, html = E.render_email(healthy_manifest(),
+                             sections=[("System health", "<p>ok</p>")])
+    assert "System health" in html
+
+
+def test_more_than_five_sections_raises():
+    """The exact drift this cap exists to stop -- a caller quietly
+    appending a sixth section over time, the same way the email grew to
+    four sections before the 1 September 2026 cut to three."""
+    six = list(E.CANONICAL_SECTIONS) + ["Extra commentary"]
+    with pytest.raises(ValueError, match="at most 5 sections"):
+        E.render_email(healthy_manifest(),
+                       sections=[(t, "<p>x</p>") for t in six])
+
+
+def test_an_unrecognised_section_title_raises():
+    with pytest.raises(ValueError, match="unrecognised section title"):
+        E.render_email(healthy_manifest(),
+                       sections=[("What moved and why", "<p>x</p>")])
+
+
+def test_a_duplicated_section_title_raises():
+    with pytest.raises(ValueError, match="duplicate section title"):
+        E.render_email(healthy_manifest(), sections=[
+            ("System health", "<p>a</p>"),
+            ("System health", "<p>b</p>"),
+        ])
+
+
+def test_section_cap_is_not_enforced_on_an_aborted_run():
+    """Sections are dropped entirely on an aborted run (no research ran),
+    so an invalid title there must not raise -- it is simply never
+    rendered, same as before this cap existed."""
+    _, html = E.render_email(
+        aborted_manifest(),
+        sections=[("not a real section", "<p>x</p>")] * 9)
+    assert "not a real section" not in html
 
 
 def test_passing_checks_are_counted_not_itemised():

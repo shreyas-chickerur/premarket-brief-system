@@ -55,7 +55,7 @@ You are running the Pre-Market Brief System. This is a fresh session with no mem
 2. Gather every already-settled outcome from the journal (`kind == "outcome"`) plus the ones just scored in step 1. This is the full sample `evidence.assess` grades.
 3. Build `evidence.PreRegistration(**state["evidence"]["pre_registration"])` — parse `decide_by` to a `date` first. Count prior `kind == "evidence"` journal entries and pass `looks_taken = that count + 1`. Call `evidence.assess(outcomes, prereg, asof=today, looks_taken=looks_taken)`.
 4. Call `evidence.trading_policy(verdict)`. **If `pause_new_positions` is true, override `max_new_positions_per_day` to 0 for the rest of this run and say so loudly and specifically in the email** — which verdict triggered it, and that existing positions and their stops are untouched. This takes effect the same run.
-5. Record this entire step's output — the verdict, `n`, the mean excess, the sample still needed, and the policy decision — on the run log in full. In the email itself (Stage 6, "System health"), compress it to one or two plain sentences: the verdict and, when `n == 0`, "no closed trades yet, roughly N more needed."
+5. Record this entire step's output — the verdict, `n`, the mean excess, the sample still needed, and the policy decision — on the run log in full. In the email itself (Stage 6, "Prior-day review" — not "System health"; this is a track-record question, not a health question), compress it to one or two plain sentences: the verdict and, when `n == 0`, "no closed trades yet, roughly N more needed."
 
 **STAGE 0.6 — PRIOR-DAY REVIEW. Always runs, same as Stage 0.5 — this is a different question from it, not a duplicate.**
 
@@ -63,7 +63,7 @@ Stage 0.5's `evidence.assess` answers one specific, pre-registered question: is 
 
 1. Call `journal.closed_for_scoring(extra_outcomes=[o.to_dict() for o in outcomes just scored in Stage 0.5 step 1])` — the same "journal plus this run's fresh scores" combination Stage 0.5 step 2 already builds, so a thesis maturing this run counts immediately rather than waiting for the next one.
 2. Score it with `runlog.score_closed_decisions(closed)`. Its own honesty gate refuses to call anything statistically meaningful below 30 closed trades, and stays merely "provisional" below 100 — respect that language exactly, do not round it up in the email.
-3. Record the full result on the run log. In the email (Stage 6, "System health"), report it in one sentence immediately after the Stage 0.5 evidence line — hit rate, mean return, and the verdict's own honesty-gate language; when `n == 0`, "no closed trades yet."
+3. Record the full result on the run log. In the email (Stage 6, "Prior-day review"), report it in one sentence immediately after the Stage 0.5 evidence line, both in the same section — hit rate, mean return, and the verdict's own honesty-gate language; when `n == 0`, "no closed trades yet."
 
 **STAGE 1 — GATHER.** The individual account is READ ONLY; the agentic account is tradable.
 
@@ -77,7 +77,7 @@ Pull prices with **`TIME_SERIES_DAILY_ADJUSTED`, not `TIME_SERIES_DAILY`**. If t
 
 `CONGRESS_TRADES` and `INSIDER_TRANSACTIONS` take one symbol per call — there is no bulk pull, so `raw_feeds["congress_trades"]`/`raw_feeds["insider_transactions"]` are `{symbol: raw_response}` maps, one fetch per held-or-candidate symbol. `INSIDER_TRANSACTIONS` in particular is prone to Alpha Vantage's own "preview" truncation on names with a long transaction history — call it with `return_full_data=true` so an oversized response spills to a file through the harness's own mechanism instead of Alpha Vantage's lossy `sample_data` sample, and read that file with `jq`/`python -c "json.load(...)"`, never `cp`/`mv` (the existing convention for oversized `get_equity_orders` pages, `PROCEDURE_RATIONALE.md`). Either way, `research.gather()` recognises and reports the difference (`quality="degraded"`, not silently truncated) — see `research.py`'s `_is_preview_envelope`. After gathering, check `bundle.coverage_issues()`: any feed with rows seen but zero items produced is a parser bug, not a quiet day, and must be reported in System health rather than passed over silently.
 
-**STAGE 2 — MEASURE.** For every position and candidate: `consensus_volatility`, `average_true_range`, `rsi`, and the two long-lookback measures only where the history actually supports them. Portfolio-level `correlation_concentration(returns_by_symbol, bets_floor_ratio=state["config"].get("concentration_bets_floor_ratio", quantcore.DEFAULT_CONCENTRATION_BETS_FLOOR_RATIO), eigen_share_cap=state["config"].get("concentration_eigen_share_cap", quantcore.DEFAULT_CONCENTRATION_EIGEN_SHARE_CAP))` — **read from config, never hardcoded**; the two defaults exist only for a config that omits the key. Carry every quality flag through.
+**STAGE 2 — MEASURE.** For every position and candidate: `consensus_volatility`, `average_true_range`, `rsi`, and the two long-lookback measures only where the history actually supports them. Portfolio-level `correlation_concentration(returns_by_symbol, bets_floor_ratio=state["config"].get("concentration_bets_floor_ratio", quantcore.DEFAULT_CONCENTRATION_BETS_FLOOR_RATIO), eigen_share_cap=state["config"].get("concentration_eigen_share_cap", quantcore.DEFAULT_CONCENTRATION_EIGEN_SHARE_CAP))` — **read from config, never hardcoded**; the two defaults exist only for a config that omits the key. Keep the full result for Stage 6's "Diversification" section. Carry every quality flag through.
 
 **STAGE 3 — GATE.** Apply the five conditions in section 7 of `HANDOFF.md`, and check the wash-sale registry rebuilt in Stage 0 with `check_buy` before any purchase and `check_loss_sale` before realising any loss, across BOTH accounts.
 
@@ -126,7 +126,7 @@ Write two files to Drive folder `{{DRIVE_FOLDER_ID}}` — **the connector rewrit
 - **If the 06:20 scheduled routine fired this directly** and the run **ABORTED**: do not render or send any email. Write the manifest and journal as above and stop. The watchdog owns deciding what happens next.
 - **If the run SUCCEEDED or the market was CLOSED**, or **if you are the watchdog re-running this procedure after a diagnosis/fix attempt**: render and send the email now. This is the only place email-sending logic lives; both callers funnel through it.
 
-**When you do send, keep it to exactly three sections:**
+**When you do send, keep it to `emailer.CANONICAL_SECTIONS` — at most `emailer.MAX_SECTIONS` (5) sections, every title drawn from that exact tuple. `render_email` raises `ValueError` on an extra, renamed, or duplicated section — this is enforced in code, not just this prose, specifically so the section list cannot silently grow again the way it did before the 1 September 2026 cut from four to three. A day with nothing to say for a section omits it (fewer than 5 is fine); it never invents a sixth.**
 
 ```python
 import emailer
@@ -134,6 +134,8 @@ subject, html = emailer.render_email(
     log.manifest(),
     sections=[("Agentic account — activity", emailer.idea_cards(agentic_ideas)),
               ("Individual account — suggestions", emailer.idea_cards(suggestion_ideas)),
+              ("Prior-day review", prior_day_frag),
+              ("Diversification", diversification_frag),
               ("System health", health_frag)],
     prefix=prefix,  # "[DRY RUN]" while the DRY RUN guard above is in effect; "" once removed
 )
@@ -141,7 +143,9 @@ subject, html = emailer.render_email(
 
 - **"Agentic account — activity"**: build `agentic_ideas` as a list of dicts, one per symbol touched this run (or, under the DRY RUN guard, one per order that *would* have been placed) — `{"symbol": ..., "action": "buy"|"sell"|"trim"|"hold", "quantity": "2 shares", "detail": "limit 61.80, stop 58.09, 12.48% weight", "bullets": [(text, source), ...]}`. Every bullet is one concrete reason the idea moved in the direction of the call, each tagged with the specific source that supports it. Include existing held positions too (`action: "hold"`), briefly, with the broker's actual response as a bullet where an order was really sent.
 - **"Individual account — suggestions"**: same `idea_card` shape, one card per idea that cleared the gate in Stage 4 — symbol, buy or sell, how many shares, and bullets sourced the same way as above. Skip anything that didn't clear the gate; `emailer.idea_cards([])` on a do-nothing day renders "Nothing today."
-- **"System health"**: the run's overall status, the Stage 0.5 evidence verdict and policy in one or two sentences, the circuit breaker's status from Stage 5 whenever it is not fully clear, and — only when this run was a watchdog retry — a plain-English note on what was diagnosed and, if a fix was written and merged to `main`, a one-line description of the fix and the commit it landed in.
+- **"Prior-day review"**: the Stage 0.5 `evidence.assess` verdict and the Stage 0.6 `runlog.score_closed_decisions` verdict, one or two sentences each, in that order. Two different questions about the same track record — do not merge them into one sentence or drop either one because they happen to agree.
+- **"Diversification"**: the Stage 2 `correlation_concentration` result — whether the book is `concentrated`, the effective-bets count against the number of names examined, and the most correlated pair when it is informative. If `status` is `"insufficient"` (too few names or too little history), say so plainly instead of omitting the section silently.
+- **"System health"**: the run's overall status, the circuit breaker's status from Stage 5 whenever it is not fully clear, and — only when this run was a watchdog retry — a plain-English note on what was diagnosed and, if a fix was written and merged to `main`, a one-line description of the fix and the commit it landed in. The evidence and prior-day-review verdicts no longer belong here — see "Prior-day review" above.
 
 The renderer still supplies the verdict banner, health line, decisions table, and footer, and still escapes everything passed to it — write plain prose, no markup. Send with Gmail as **HTML** (`contentType: text/html`) using the returned `subject` and `html`, to `state.json.config.email_to`.
 
