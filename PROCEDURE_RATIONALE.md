@@ -301,6 +301,31 @@ changing either value in config silently did nothing. The function
 defaults to the same 0.5/0.45 recalibrated values when config omits the
 key, so an unconfigured run behaves exactly as before.
 
+## Stage 3 — why `gate_failed` must be one of `runlog.GATE_CONDITIONS`, exactly
+
+Before 4 September 2026, `gate_failed` was free text — whatever string
+the run happened to write. `runlog.closest_calls` (Stage 6, "report the
+closest call when nothing clears the gate" — an early review flagged the
+missing capability directly) ranks a rejection by where its `gate_failed`
+value falls in the five conditions' fixed, published order (`HANDOFF.md`
+section 7): the later the failing condition, the more of the gate the
+idea actually cleared before it failed. A misspelled or freely-worded
+condition name is invisible to that ranking — it cannot be placed in the
+order, so it is silently excluded rather than ranked, which would make
+"nothing today" look identical whether the closest miss failed on
+condition 1 or condition 5. Pinning the five exact strings in code, not
+prose, is what makes the ranking possible at all — the same reason
+`ledger.run_entry` pins the `"run"` entry's schema (section 6) rather than
+trusting a description to stay in sync with what reads it.
+
+A rejection recorded before the idea even reached the gate — a
+data-quality rejection, Stage 1 — deliberately uses different text
+(`"data quality"`, not one of the five). It is excluded from
+`closest_calls` for the same reason a `gate_failed` typo would be: it
+never reached the gate, so ranking it as a near miss would be wrong in
+the opposite direction — reporting a fundamentally unusable idea as
+almost having cleared everything.
+
 ## Stage 4 — why individual-account suggestions count as evidence
 
 The pre-registered evidence claim is about whether the five-condition gate

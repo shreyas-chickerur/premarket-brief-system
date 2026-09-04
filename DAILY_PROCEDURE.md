@@ -79,7 +79,7 @@ Pull prices with **`TIME_SERIES_DAILY_ADJUSTED`, not `TIME_SERIES_DAILY`**. If t
 
 **STAGE 2 — MEASURE.** For every position and candidate: `consensus_volatility`, `average_true_range`, `rsi`, and the two long-lookback measures only where the history actually supports them. Portfolio-level `correlation_concentration(returns_by_symbol, bets_floor_ratio=state["config"].get("concentration_bets_floor_ratio", quantcore.DEFAULT_CONCENTRATION_BETS_FLOOR_RATIO), eigen_share_cap=state["config"].get("concentration_eigen_share_cap", quantcore.DEFAULT_CONCENTRATION_EIGEN_SHARE_CAP))` — **read from config, never hardcoded**; the two defaults exist only for a config that omits the key. Keep the full result for Stage 6's "Diversification" section. Carry every quality flag through.
 
-**STAGE 3 — GATE.** Apply the five conditions in section 7 of `HANDOFF.md`, and check the wash-sale registry rebuilt in Stage 0 with `check_buy` before any purchase and `check_loss_sale` before realising any loss, across BOTH accounts.
+**STAGE 3 — GATE.** Apply the five conditions in section 7 of `HANDOFF.md`, and check the wash-sale registry rebuilt in Stage 0 with `check_buy` before any purchase and `check_loss_sale` before realising any loss, across BOTH accounts. **When an idea fails, set `gate_failed` to the exact matching string from `runlog.GATE_CONDITIONS` — never free text.** This is what lets Stage 6 rank how close a rejected idea got via `runlog.closest_calls`; a condition named anything else is invisible to that ranking. A rejection that never reached the gate at all (a data-quality rejection, Stage 1) is the one case that uses different text, deliberately — `runlog.closest_calls` excludes it rather than treating it as a near miss.
 
 `quantcore.stop_plan` RAISES if the volatility estimate's quality falls outside `require_quality` (default: `ok`, `thin`, or `degraded` — anything short of `failed`). Catch that and record it as a rejected idea with the gate condition `"data quality"`, not as a crashed run.
 
@@ -129,11 +129,15 @@ Write two files to Drive folder `{{DRIVE_FOLDER_ID}}` — **the connector rewrit
 **When you do send, keep it to `emailer.CANONICAL_SECTIONS` — at most `emailer.MAX_SECTIONS` (5) sections, every title drawn from that exact tuple. `render_email` raises `ValueError` on an extra, renamed, or duplicated section — this is enforced in code, not just this prose, specifically so the section list cannot silently grow again the way it did before the 1 September 2026 cut from four to three. A day with nothing to say for a section omits it (fewer than 5 is fine); it never invents a sixth.**
 
 ```python
-import emailer
+import emailer, runlog
+agentic_rejections = [d for d in log.manifest()["decisions"] if d["account"] == "agentic" and d.get("gate_failed")]
+individual_rejections = [d for d in log.manifest()["decisions"] if d["account"] == "individual" and d.get("gate_failed")]
 subject, html = emailer.render_email(
     log.manifest(),
-    sections=[("Agentic account — activity", emailer.idea_cards(agentic_ideas)),
-              ("Individual account — suggestions", emailer.idea_cards(suggestion_ideas)),
+    sections=[("Agentic account — activity",
+               emailer.idea_cards(agentic_ideas, closest_calls=runlog.closest_calls(agentic_rejections))),
+              ("Individual account — suggestions",
+               emailer.idea_cards(suggestion_ideas, closest_calls=runlog.closest_calls(individual_rejections))),
               ("Prior-day review", prior_day_frag),
               ("Diversification", diversification_frag),
               ("System health", health_frag)],
@@ -141,8 +145,8 @@ subject, html = emailer.render_email(
 )
 ```
 
-- **"Agentic account — activity"**: build `agentic_ideas` as a list of dicts, one per symbol touched this run (or, under the DRY RUN guard, one per order that *would* have been placed) — `{"symbol": ..., "action": "buy"|"sell"|"trim"|"hold", "quantity": "2 shares", "detail": "limit 61.80, stop 58.09, 12.48% weight", "bullets": [(text, source), ...]}`. Every bullet is one concrete reason the idea moved in the direction of the call, each tagged with the specific source that supports it. Include existing held positions too (`action: "hold"`), briefly, with the broker's actual response as a bullet where an order was really sent.
-- **"Individual account — suggestions"**: same `idea_card` shape, one card per idea that cleared the gate in Stage 4 — symbol, buy or sell, how many shares, and bullets sourced the same way as above. Skip anything that didn't clear the gate; `emailer.idea_cards([])` on a do-nothing day renders "Nothing today."
+- **"Agentic account — activity"**: build `agentic_ideas` as a list of dicts, one per symbol touched this run (or, under the DRY RUN guard, one per order that *would* have been placed) — `{"symbol": ..., "action": "buy"|"sell"|"trim"|"hold", "quantity": "2 shares", "detail": "limit 61.80, stop 58.09, 12.48% weight", "bullets": [(text, source), ...]}`. Every bullet is one concrete reason the idea moved in the direction of the call, each tagged with the specific source that supports it. Include existing held positions too (`action: "hold"`), briefly, with the broker's actual response as a bullet where an order was really sent. When `agentic_ideas` is empty, `emailer.idea_cards`'s `closest_calls` argument (above) reports the rejected idea(s) that got furthest through the gate instead of bare "Nothing today." — this is only visible at all when Stage 3 set `gate_failed` to one of `runlog.GATE_CONDITIONS`'s exact strings.
+- **"Individual account — suggestions"**: same `idea_card` shape, one card per idea that cleared the gate in Stage 4 — symbol, buy or sell, how many shares, and bullets sourced the same way as above. Skip anything that didn't clear the gate; `emailer.idea_cards([])` on a do-nothing day renders "Nothing today.", or the closest call(s) when any rejection reached the gate at all.
 - **"Prior-day review"**: the Stage 0.5 `evidence.assess` verdict and the Stage 0.6 `runlog.score_closed_decisions` verdict, one or two sentences each, in that order. Two different questions about the same track record — do not merge them into one sentence or drop either one because they happen to agree.
 - **"Diversification"**: the Stage 2 `correlation_concentration` result — whether the book is `concentrated`, the effective-bets count against the number of names examined, and the most correlated pair when it is informative. If `status` is `"insufficient"` (too few names or too little history), say so plainly instead of omitting the section silently.
 - **"System health"**: the run's overall status, the circuit breaker's status from Stage 5 whenever it is not fully clear, and — only when this run was a watchdog retry — a plain-English note on what was diagnosed and, if a fix was written and merged to `main`, a one-line description of the fix and the commit it landed in. The evidence and prior-day-review verdicts no longer belong here — see "Prior-day review" above.

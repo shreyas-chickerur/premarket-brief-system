@@ -413,6 +413,61 @@ def test_stop_filled_decision_feeds_a_real_journal_entry():
     assert manifest["decisions"][0]["action"] == "stop_filled"
 
 
+# --------------------------------------------------------------- closest_calls
+
+def _rejection(symbol, gate_failed):
+    return {"symbol": symbol, "action": "reject", "account": "agentic",
+            "executed": False, "reason": "failed gate", "gate_failed": gate_failed}
+
+
+def test_gate_conditions_is_the_five_from_handoff_section_7():
+    assert R.GATE_CONDITIONS == (
+        "catalyst", "two_sources", "invalidation_level", "risk_sized",
+        "no_blocking_conflict")
+
+
+def test_closest_calls_ranks_by_how_far_the_gate_was_cleared():
+    decisions = [
+        _rejection("AAA", "catalyst"),               # cleared 0
+        _rejection("BBB", "no_blocking_conflict"),    # cleared 4 -- closest
+        _rejection("CCC", "invalidation_level"),      # cleared 2
+    ]
+    out = R.closest_calls(decisions)
+    assert [c["symbol"] for c in out] == ["BBB", "CCC", "AAA"]
+    assert out[0]["conditions_cleared"] == 4
+    assert out[0]["conditions_total"] == 5
+
+
+def test_closest_calls_excludes_rejections_that_never_reached_the_gate():
+    """A data-quality rejection (DAILY_PROCEDURE.md Stage 2) never reached
+    condition 1 -- it must not be ranked as an infinitely close miss."""
+    decisions = [
+        _rejection("AAA", "data quality"),
+        _rejection("BBB", "catalyst"),
+    ]
+    out = R.closest_calls(decisions)
+    assert [c["symbol"] for c in out] == ["BBB"]
+
+
+def test_closest_calls_respects_the_top_limit():
+    decisions = [_rejection(f"S{i}", "no_blocking_conflict") for i in range(5)]
+    assert len(R.closest_calls(decisions, top=2)) == 2
+
+
+def test_closest_calls_empty_when_nothing_was_rejected():
+    assert R.closest_calls([]) == []
+
+
+def test_closest_calls_empty_when_every_rejection_missed_the_gate_entirely():
+    assert R.closest_calls([_rejection("AAA", "data quality")]) == []
+
+
+def test_closest_calls_ties_broken_by_input_order():
+    decisions = [_rejection("FIRST", "risk_sized"), _rejection("SECOND", "risk_sized")]
+    out = R.closest_calls(decisions)
+    assert [c["symbol"] for c in out] == ["FIRST", "SECOND"]
+
+
 # ---------------------------------------------------------------- scoring
 
 def test_scoring_refuses_to_certify_a_small_sample():

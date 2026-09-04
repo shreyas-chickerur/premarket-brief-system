@@ -325,3 +325,46 @@ def test_idea_cards_renders_one_card_per_idea():
 
 def test_idea_cards_is_part_of_the_public_api():
     assert "idea_card" in E.__all__ and "idea_cards" in E.__all__
+
+
+# -------------------------------------------------------- closest-call reporting
+
+def _closest_call(symbol="OXY", cleared=4, total=5, gate_failed="no_blocking_conflict"):
+    return {"symbol": symbol, "gate_failed": gate_failed,
+            "conditions_cleared": cleared, "conditions_total": total}
+
+
+def test_idea_cards_reports_the_closest_call_when_nothing_cleared_the_gate():
+    """4 September 2026: a day nothing clears the gate used to look
+    identical whether the closest miss failed on condition 1 or condition
+    5 -- both rendered bare 'Nothing today.'"""
+    html = E.idea_cards([], closest_calls=[_closest_call()])
+    assert "nothing today" in html.lower()
+    assert "OXY" in html
+    assert "cleared 4 of 5" in html
+    assert "no_blocking_conflict" in html
+
+
+def test_idea_cards_renders_multiple_closest_calls_in_order():
+    html = E.idea_cards([], closest_calls=[
+        _closest_call("AAA", cleared=4),
+        _closest_call("BBB", cleared=2),
+    ])
+    assert html.index("AAA") < html.index("BBB")
+
+
+def test_idea_cards_ignores_closest_calls_when_real_ideas_exist():
+    """Closest-call reporting is only for a genuinely empty day -- it must
+    never appear alongside real activity."""
+    html = E.idea_cards(
+        [{"symbol": "OXY", "action": "buy"}],
+        closest_calls=[_closest_call("VTI")])
+    assert "VTI" not in html
+    assert "Closest" not in html
+
+
+def test_idea_cards_closest_call_escapes_its_fields():
+    html = E.idea_cards([], closest_calls=[
+        _closest_call(symbol="<script>bad</script>", gate_failed="<b>x</b>")])
+    assert "<script>bad</script>" not in html
+    assert "<b>x</b>" not in html

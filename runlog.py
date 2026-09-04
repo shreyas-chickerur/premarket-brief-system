@@ -124,6 +124,56 @@ def stop_filled_decision(order: dict, *, account: str) -> Optional["Decision"]:
     )
 
 
+# The five-condition confidence gate, HANDOFF.md section 7, in the fixed
+# order they are evaluated. Pinned here as the single canonical name for
+# each condition -- `runlog.Decision.gate_failed` must be set to one of
+# these exact strings (never free text) for `closest_calls` below to be
+# able to rank a rejection by how far it got. A rejection recorded before
+# even reaching the gate (e.g. a data-quality rejection, DAILY_PROCEDURE.md
+# Stage 2) uses a different string and is deliberately not one of these.
+GATE_CONDITIONS = (
+    "catalyst",              # 1. a named catalyst with a date or window
+    "two_sources",           # 2. two independent corroborating sources
+    "invalidation_level",    # 3. a stated invalidation level
+    "risk_sized",            # 4. size derived from the risk dial
+    "no_blocking_conflict",  # 5. no wash sale / adding to a loser /
+                             #    concentration / cash floor / whole-share /
+                             #    anomaly conflict
+)
+
+
+def closest_calls(decisions: Sequence[dict], *, top: int = 3) -> list[dict]:
+    """Which rejected ideas got furthest through the five-condition gate
+    before failing -- worth surfacing on a day nothing clears it, instead
+    of the email reporting bare silence (see `HANDOFF.md` section 7:
+    "failing one demotes it to the watchlist with the failing condition
+    named" -- that name is exactly what this ranks by).
+
+    `decisions` are expected in `runlog.Decision.to_dict()` shape.
+    `gate_failed`'s position in `GATE_CONDITIONS` is how many conditions a
+    rejection cleared before it failed — later position, closer call. A
+    decision whose `gate_failed` is not one of the five canonical
+    condition names (never reached the gate at all -- a data-quality
+    rejection, for instance) is excluded rather than ranked as an
+    infinitely close miss.
+
+    Returns up to `top` decisions closest first (ties broken by input
+    order), each with `conditions_cleared`/`conditions_total` added so a
+    caller can render "cleared N of 5" without needing `GATE_CONDITIONS`
+    itself. Empty input, or a day with no gate rejections at all, returns
+    `[]`.
+    """
+    total = len(GATE_CONDITIONS)
+    ranked = []
+    for d in decisions:
+        g = d.get("gate_failed")
+        if g in GATE_CONDITIONS:
+            idx = GATE_CONDITIONS.index(g)
+            ranked.append((idx, {**d, "conditions_cleared": idx, "conditions_total": total}))
+    ranked.sort(key=lambda t: -t[0])
+    return [d for _, d in ranked[:top]]
+
+
 @dataclass
 class CircuitBreakerVerdict:
     """What `circuit_breaker_usd` / `hard_stop_usd` actually do, enforced

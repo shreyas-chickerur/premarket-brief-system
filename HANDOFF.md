@@ -242,23 +242,23 @@ by default. Two properties of the connector, and the fix each one forced:
 | `WATCHDOG_PROCEDURE.md` | The watchdog's own procedure: assess today's manifest, and on a real problem, diagnose, attempt a fix, merge it, and re-run `DAILY_PROCEDURE.md` once |
 | `research.py` | Deterministic Stage 1 research — replaces "research by web search" with a defined candidate universe and one parser per feed (news, congressional/insider activity, scheduled events, filings, macro, commodities, positioning), every item graded `ok`/`thin`/`degraded`/`failed` and required to attach to a symbol or channel |
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration (thresholds read from config, not hardcoded), direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection |
-| `runlog.py` | Run manifests, staged timing, preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals (`stop_distance` removed — see section 11), real `stop_filled` decisions via `stop_filled_decision`, honest scoring |
+| `runlog.py` | Run manifests, staged timing, preflight self-audit (including a blocking `journal_fully_readable` check), verified market calendar, regression review, optimization proposals (`stop_distance` removed — see section 11), real `stop_filled` decisions via `stop_filled_decision`, the pinned `GATE_CONDITIONS` five-condition order and `closest_calls` gate-miss ranking, honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings |
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; the append-only journal fold; the bounded-staleness fills/split-events cache (positions themselves are still never cached); optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads; `Journal.closed_for_scoring` joins thesis + outcome entries for `score_closed_decisions` |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
-| `emailer.py` | HTML brief rendering, failure diagnosis, subject lines, the five-section cap (`CANONICAL_SECTIONS`/`MAX_SECTIONS`) enforced in code |
+| `emailer.py` | HTML brief rendering, failure diagnosis, subject lines, the five-section cap (`CANONICAL_SECTIONS`/`MAX_SECTIONS`) enforced in code, closest-call reporting in `idea_cards` for a day nothing clears the gate |
 | `watchdog.py` | The outside check: did the daily run happen at all, and was it healthy — catches a hung run that never reached its own email |
 | `pipeline_demo.py` | End-to-end demonstration run |
 | `make_fixtures.py` | Regenerates the deterministic synthetic fixtures the demo falls back to |
 | `test_quantcore.py` | 84 tests, including known-answer volatility and correlation recovery, the floor/cap quality-conflation regression, and proof that `concentration_bets_floor_ratio`/`concentration_eigen_share_cap` from config actually change the `concentrated` verdict in both directions |
-| `test_runlog.py` | 63 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, `abort()`'s first-reason-wins semantics, and `stop_filled_decision` against real order shapes |
+| `test_runlog.py` | 70 tests, including daylight-saving drift, market-calendar integrity, circuit-breaker enforcement, the blocking `journal_fully_readable` check, `abort()`'s first-reason-wins semantics, `stop_filled_decision` against real order shapes, and `closest_calls` ranking (including exclusion of non-gate rejections and tie-breaking) |
 | `test_washsale.py` | 32 tests |
 | `test_ledger.py` | 93 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache (fold, watermark, horizon boundary, round-trip equivalence to a direct fetch), monthly journal compaction (exact equivalence to the daily fold, the monthly-file-supersedes-leftover-daily-files guarantee), `run_entry` (schema pinning, round-trip through a folded journal directly into `runlog.find_optimizations`), and `closed_for_scoring` (thesis/outcome join, round-trip directly into `runlog.score_closed_decisions`) |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
 | `test_watchdog.py` | 15 tests |
 | `test_research.py` | 45 tests, against recorded fixtures in `fixtures/research/`, never the live API |
 | `test_procedure_docs.py` | 6 tests: the DRY RUN guard's exact text, and that every stage has a matching rationale section |
-| `test_emailer.py` | 41 tests, including escaping, no-research-on-abort, the `idea_card`/`idea_cards` bulleted format, and the five-section cap (exact set, over-cap, unrecognised title, duplicate title, and that the cap is not enforced on an aborted run) |
+| `test_emailer.py` | 45 tests, including escaping, no-research-on-abort, the `idea_card`/`idea_cards` bulleted format, the five-section cap (exact set, over-cap, unrecognised title, duplicate title, and that the cap is not enforced on an aborted run), and closest-call reporting (only shown on an empty day, ordering, escaping) |
 
 Key API surface:
 
@@ -1492,6 +1492,32 @@ none render at all). A day with nothing to say for a section omits it —
 fewer than 5 is fine, a sixth is not.
 
 `emailer.py`/`test_emailer.py`: 34 → 41 tests. Full suite: 438 → 445.
+
+### 4 September 2026 — closest-call reporting when nothing clears the gate
+
+A day nothing clears the five-condition gate used to render bare "Nothing
+today." with no way for the reader to tell whether the closest miss failed
+on condition 1 (a named catalyst) or condition 5 (no blocking conflict) —
+an early review flagged this missing capability directly.
+
+`runlog.GATE_CONDITIONS` pins the five conditions from `HANDOFF.md` section
+7 as exact strings, in their published order, for the first time —
+`gate_failed` was free text before this. `runlog.closest_calls` ranks a
+run's gate rejections by how far each got (later failing condition =
+closer call), excluding anything that never reached the gate at all (a
+data-quality rejection uses different text on purpose, per Stage 1).
+`emailer.idea_cards` renders the result only when there is no real
+activity to show — "Closest: OXY — cleared 4 of 5 conditions, failed on
+'no_blocking_conflict'." — never alongside genuine trades or suggestions.
+
+`DAILY_PROCEDURE.md` Stage 3 now requires `gate_failed` to use
+`runlog.GATE_CONDITIONS`'s exact strings (a misspelled or freely-worded
+value is silently invisible to the ranking, not an error — the same
+schema-drift risk `ledger.run_entry` exists to prevent elsewhere), and
+Stage 6 wires `runlog.closest_calls` into both account sections.
+
+`runlog.py`/`test_runlog.py`: 63 → 70 tests. `emailer.py`/`test_emailer.py`:
+41 → 45 tests. Full suite: 445 → 456.
 
 ## 12. Open and unverified
 

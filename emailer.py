@@ -245,19 +245,39 @@ def idea_card(symbol: str, action: str, quantity: str = "", detail: str = "",
     return _well(head + body)
 
 
-def idea_cards(ideas: Sequence[dict]) -> str:
+def idea_cards(ideas: Sequence[dict], *, closest_calls: Sequence[dict] = ()) -> str:
     """Render a whole section (e.g. the individual account's suggestions, or
     the agentic account's activity) as one card per symbol instead of a
     paragraph. Each dict in `ideas` needs `symbol` and `action`; `quantity`,
     `detail`, and `bullets` (a list of `(text, source)` pairs) are optional.
     An empty list renders a plain "nothing today" line — a do-nothing day is
-    a correct, expected output, not an omission to explain away."""
-    if not ideas:
+    a correct, expected output, not an omission to explain away.
+
+    `closest_calls` (see `runlog.closest_calls`) are rejected ideas that got
+    furthest through the five-condition gate before failing, rendered only
+    when `ideas` is empty — a symbol that cleared 4 of 5 conditions is worth
+    naming even on a day nothing actually traded, rather than the reader
+    seeing the exact same "nothing today" whether the gate came close or
+    was not close at all. Each dict needs `symbol`, `gate_failed`,
+    `conditions_cleared`, and `conditions_total` — the shape
+    `runlog.closest_calls` already returns; this module does not import
+    `runlog` to render it.
+    """
+    if ideas:
+        return "".join(
+            idea_card(i["symbol"], i["action"], i.get("quantity", ""),
+                     i.get("detail", ""), i.get("bullets", ()))
+            for i in ideas)
+    if not closest_calls:
         return _p("Nothing today.", color=MUTED)
-    return "".join(
-        idea_card(i["symbol"], i["action"], i.get("quantity", ""),
-                 i.get("detail", ""), i.get("bullets", ()))
-        for i in ideas)
+    lines = [_p("Nothing today.", color=MUTED)]
+    for c in closest_calls:
+        lines.append(_p(
+            f'Closest: <strong>{escape(str(c["symbol"]))}</strong> — cleared '
+            f'{escape(str(c["conditions_cleared"]))} of {escape(str(c["conditions_total"]))} '
+            f'conditions, failed on "{escape(str(c["gate_failed"]))}".',
+            size=13, color=MUTED))
+    return "".join(lines)
 
 
 # --------------------------------------------------------------------------
