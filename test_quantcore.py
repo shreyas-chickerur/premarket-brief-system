@@ -630,26 +630,28 @@ def _plan(entry=100.0, stop_fraction=0.08):
                        floor=stop_fraction * 0.5, cap=stop_fraction * 2)
 
 
-def test_cash_limited_sizing_matches_the_real_agentic_account():
-    """992.50 equity, 251.88 settled cash -- the account this was built for on
-    31 August 2026. At the current 18% cap the cap-derived notional ($178.65)
-    already sits below that cash, so this exact config is not where it bites --
-    but the code must not rely on that coincidence, and cash must never be
-    exceeded regardless of how the cap and risk budget are dialed."""
+def test_cash_limited_sizing_matches_a_small_cash_account():
+    """A representative small-account shape: equity somewhat above settled
+    cash. At an 18% cap the cap-derived notional already sits below that
+    cash, so this exact config is not where it bites -- but the code must
+    not rely on that coincidence, and cash must never be exceeded
+    regardless of how the cap and risk budget are dialed."""
+    equity, cash = 992.50, 251.88
     plan = _plan(entry=25.0, stop_fraction=0.08)
-    size = q.size_position(992.50, 25.0, plan, risk_budget_fraction=0.02,
-                           max_weight=0.18, buying_power=251.88)
-    assert size.notional <= 251.88 + 1e-9
+    size = q.size_position(equity, 25.0, plan, risk_budget_fraction=0.02,
+                           max_weight=0.18, buying_power=cash)
+    assert size.notional <= cash + 1e-9
     assert size.cash_limited is False          # the cap already binds first here
 
-    # Same account and cash, a cap dialed to what the aggressiveness table
-    # allows at level 8 (up to 25%+). Now the cap-derived notional ($248) is
-    # comfortably inside equity but would ask for more than the $251.88 that
-    # is actually spendable is NOT the case either at 25%; push to a scenario
-    # that genuinely exceeds it: a richer risk budget, same real dollars.
-    size2 = q.size_position(992.50, 25.0, plan, risk_budget_fraction=0.05,
-                            max_weight=0.30, buying_power=251.88)
-    assert size2.notional <= 251.88 + 1e-9
+    # Same equity and cash, a cap dialed to what the aggressiveness table
+    # allows at level 8 (up to 25%+). Now the cap-derived notional is
+    # comfortably inside equity but would ask for more than the settled
+    # cash that is actually spendable is NOT the case either at 25%; push
+    # to a scenario that genuinely exceeds it: a richer risk budget, same
+    # dollars.
+    size2 = q.size_position(equity, 25.0, plan, risk_budget_fraction=0.05,
+                            max_weight=0.30, buying_power=cash)
+    assert size2.notional <= cash + 1e-9
     assert size2.cash_limited is True
     assert "cash" in size2.reason.lower()
 

@@ -544,30 +544,31 @@ connector) for the ability to fix and finish the same day.
 ## Stage 0 step 8 — why the wash-sale report is a pinned schema, not a note
 
 Discovered 5 September 2026, during a rehearsal that reran the real Stage 0
-directly against the real 870 fills both accounts had already produced that
-morning. The rehearsal's rebuild blocked seven symbols (CMG, CRM, GLDM,
-MRVL, MU, TSLA, XLE); that morning's own journal `"note"` entry named only
-two (GLDM, XLE). Read on its own, that looks exactly like the failure this
-system is built to prevent — `HANDOFF.md` section 11's registry that had
-forgotten a loss sale and approved the repurchase that disallowed it,
+directly against the real fills both accounts had already produced that
+morning (real fill count, real symbols — not repeated here; a blocked-
+symbol list is account-specific data of the same class as an account
+number, and this file is public. See `HANDOFF.private.md` if the exact
+symbols matter for a future investigation). The rehearsal's rebuild
+blocked several symbols; that morning's own journal `"note"` entry named
+only two of them. Read on its own, that looks exactly like the failure
+this system is built to prevent — `HANDOFF.md` section 11's registry that
+had forgotten a loss sale and approved the repurchase that disallowed it,
 recurring in a new shape.
 
-It was not that. Every one of the five missing symbols was re-verified
-directly against `washsale.Registry.blocked_symbols`, called on the actual
-fills, with each symbol's real split history fetched fresh (three of the
-five — MRVL, CRM, TSLA — had never been split-checked before because
-none of them are currently held, so no earlier run had reason to fetch
-their splits): all five came back genuine, unexpired loss sales, the
-registry itself never stopped blocking them. The run-manifest's own
-`washsale_registry_rebuilt` check confirmed it too, on both days: "870
-split-adjusted trades, both accounts, never read from storage" — no symbol
-list at all, block-severity, nothing more. The only place either day's
-blocked-symbol list existed anywhere was a free-form journal `"note"`
-entry, hand-composed by that morning's run for the email's benefit. One
-morning wrote out the complete list; the next, for whatever reason,
-wrote only the two names relevant to that day's actual candidates (GLDM
-was a held position being reconsidered, XLE a rejected one) and never
-mentioned the other five, who touched nothing decided that day.
+It was not that. Every one of the missing symbols was re-verified directly
+against `washsale.Registry.blocked_symbols`, called on the actual fills,
+with each symbol's real split history fetched fresh (several of them had
+never been split-checked before because none are currently held, so no
+earlier run had reason to fetch their splits): all came back genuine,
+unexpired loss sales, the registry itself never stopped blocking them. The
+run-manifest's own `washsale_registry_rebuilt` check confirmed it too, on
+both days — split-adjusted trades, both accounts, never read from storage
+— no symbol list at all, block-severity, nothing more. The only place
+either day's blocked-symbol list existed anywhere was a free-form journal
+`"note"` entry, hand-composed by that morning's run for the email's
+benefit. One morning wrote out the complete list; the next, for whatever
+reason, wrote only the names relevant to that day's actual candidates and
+never mentioned the rest, who touched nothing decided that day.
 
 The registry was correct and identical both times. Nothing had ever
 required a run to log what it actually returned, so two truthful summaries
@@ -585,13 +586,12 @@ identical shape of problem in run-history reporting.
 ## Stage 0 step 7 — `all_symbols` is derived from fills, in code, not assembled
 
 Found while investigating the wash-sale note above, 5 September 2026. The
-manual reconciliation that surfaced the note's missing five symbols had
-itself built its split-check list from currently HELD positions (24
-symbols) rather than from the combined fill history (70 symbols) — and
-three of the five missing wash-sale symbols, MRVL, CRM, and TSLA, are
-exactly the ones that difference excludes: all fully sold, none held that
-day, all still needing their own split history for `cost_basis`,
-`loss_sales`, and the registry regardless.
+manual reconciliation that surfaced the note's missing symbols had itself
+built its split-check list from currently HELD positions (24 symbols)
+rather than from the combined fill history (70 symbols) — and several of
+the missing wash-sale symbols are exactly the ones that difference
+excludes: fully sold, none held that day, all still needing their own
+split history for `cost_basis`, `loss_sales`, and the registry regardless.
 
 Whether the live daily runs themselves ever made the same mistake could not
 be settled directly — each morning's run is a fresh session with no
@@ -778,3 +778,116 @@ days (`HANDOFF.md` section 12), so a `warn`-severity System-health line
 fires once 3 days have passed since the last confirmed-successful
 brokerage call — a day of runway before the failure a same-day operator
 would otherwise discover only from a bounced run.
+
+## Stage 1 — the researched set is a budget, ranked by the gate's own first condition
+
+Found 5 September 2026, immediately after widening the candidate universe:
+the same session that added a real scanner (hundreds of matches) and
+congressional discovery (thousands of trades per tracked member) also
+fixed `NEWS_SENTIMENT` to fetch strictly sequentially, one symbol per
+call. Individually correct; multiplied together, they made Stage 1
+unbounded and serialised on its slowest call at the same time. A rehearsal
+measured roughly 25 seconds of wall-clock time per researched symbol
+(~620s for ~25 symbols) BEFORE either change — an eligible universe in the
+hundreds would turn that into a run unable to finish before the market
+opens or before the watchdog's own 60-minute limit fires, and the actual
+failure mode would not be a clean abort: it would be that morning's agent
+quietly researching some improvised subset instead, which is exactly the
+nondeterminism `research.py` exists to remove, just relocated one level up
+and made harder to see.
+
+The fix keeps the eligible universe exactly as wide as it is —
+`research.candidates()` is a filter result, not a resource decision, and
+narrowing it back down would undo the whole point of widening it — and
+instead bounds a NEW, separate concept: `research.researched_set`, the
+subset Stage 1 actually spends calls on today. The ranking inside it is
+deliberately NOT "how attractive does this name look" — that would smuggle
+investment judgment into what is supposed to be a pure budget cutoff, the
+same mistake congressional discovery's first committee-leadership attempt
+made in a different shape. Instead it ranks by the gate's own first
+condition: a named catalyst WITH A DATE. A symbol with no dated catalyst
+inside the horizon cannot clear the gate today regardless of how much
+research it receives, so researching it ahead of one that could clear the
+gate is waste, not diligence. `EARNINGS_CALENDAR`'s bulk pull (already
+fetched for the narrower `earnings_calendar_items` call) costs nothing
+extra to also check against the full eligible universe via
+`symbols_with_dated_catalyst` — one bulk response, two consumers.
+
+Congressional recency is the next tier, not because it is a weaker signal
+in principle, but because it is the next-cheapest one actually available
+without spending the calls the ceiling exists to avoid: `congress_recency`
+comes from data `congress_trade_items_by_politician` already fetched for
+discovery, at zero extra cost. Insider-activity recency is explicitly NOT
+in this tier for the same reason committee leadership was abandoned as a
+selection criterion for discovery itself — `INSIDER_TRANSACTIONS` has no
+bulk, symbol-agnostic pull, so knowing whether an eligible-but-not-held
+name has recent insider activity would require calling it per symbol
+before the researched set is even decided, which is circular. Held
+positions already get insider data regardless (they are always
+researched, tier or no tier), so this gap costs nothing where it matters
+most; it is recorded honestly in `researched_set`'s own docstring rather
+than silently claimed as a signal the function does not actually see.
+
+`21` days as `CANDIDATE_CATALYST_HORIZON_DAYS` matches an existing horizon
+already in use elsewhere in this codebase (an open thesis's own horizon),
+kept consistent rather than introducing a second, unrelated number for a
+similar-sounding concept. `40` as `DEFAULT_RESEARCH_SET_CEILING` is a
+starting point, not a tuned constant: ~25s/symbol observed, times a target
+of keeping the gather stage to roughly 15-20 minutes inside the run's
+60-minute total budget, landing near 40-48 symbols; 40 was chosen with a
+little headroom rather than at the edge of that estimate. `cut_for_budget`
+is recorded specifically so this number can be revisited from evidence —
+if it stays large every day, the ceiling is wrong and should move, and
+that is a fact this system should surface, not one that should require
+asking.
+
+## Stage 1 — congressional discovery needed a recency and materiality bound
+
+Found 5 September 2026, same session. `CONGRESS_TRADES(bioguide_id=...)`
+has no date-range parameter and always returns a member's ENTIRE disclosed
+trading history — one real bioguide_id returned thousands of trades
+spanning years. Without a bound, a purchase from years ago became a
+candidate on equal footing with one disclosed last week, and
+`researched_set`'s congressional-recency tier had no honest "recency" to
+rank by if the underlying set was not actually recent.
+
+`research.recent_congress_items` filters on two independent things:
+`transaction_date` within `CONGRESS_DISCOVERY_RECENCY_DAYS` (90) of `asof`,
+and `amount_min` at or above `CONGRESS_DISCOVERY_MIN_AMOUNT` ($15,000).
+Ninety days is wide enough to survive the up-to-45-day disclosure filing
+lag Congress's own STOCK Act allows without discarding a trade that is, in
+practice, still recent — half the window is deliberate slack, not a number
+picked to look round. $15,000 is the floor of the smallest disclosure
+bracket Congress itself uses (`$1,001-$15,000`); excluding it keeps a
+member's smallest, least-informative disclosures from diluting a real one.
+This does NOT additionally require a second disclosure before a symbol
+counts, which was considered and rejected: requiring multiplicity would
+discard the single freshest possible signal (a disclosure made yesterday,
+alone on file) in exchange for a corroboration test that
+`researched_set`'s recency-weighted ranking is already better positioned
+to handle on its own — a single very recent, above-floor disclosure
+outranks an old one regardless, without needing the old one thrown away
+first. This is a different concept from `ledger.CONGRESS_DISCOVERY_HORIZON_DAYS`
+(the weekly cadence for how often a member's full history is RE-PULLED,
+unaffected by this change) and is not a replacement for it.
+
+## Stage 0 step 1 — a real scan_id is account-specific data, not a code constant
+
+Found 5 September 2026: the scan created for `screener.py` had its real
+scan_id committed, by name, in `screener.py`, `DAILY_PROCEDURE.md`, and
+`HANDOFF.md` — all three public. This repository's own existing rule
+(`HANDOFF.md` section 5) is that account numbers and storage identifiers
+live only in `HANDOFF.private.md`, never the public repo; a saved-scan
+identifier on the live account is exactly that class of thing and had
+simply not been recognised as one when it was first created. Fixed by
+moving the value to `HANDOFF.private.md`'s config table under
+`screener_scan_id` and replacing all three public references with the
+config key name (`get_scans` plus a title match, `CORE_UNIVERSE_SCAN_TITLE`,
+recovers it if it is ever lost). The same pass also found the wash-sale
+registry note-drift finding's rationale (Stage 0 step 8 above) had, while
+documenting a REPORTING bug, itself reported a real blocked-symbol list —
+the actual composition of a real wash-sale block is exactly as
+account-specific as a scan_id or an account number, and both the
+`DAILY_PROCEDURE.md` and this file's account of that finding were rewritten
+to describe the shape of the bug without repeating which real symbols were
+involved.

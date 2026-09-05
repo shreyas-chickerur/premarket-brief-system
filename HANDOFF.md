@@ -240,10 +240,10 @@ by default. Two properties of the connector, and the fix each one forced:
 |---|---|
 | `DAILY_PROCEDURE.md` | The canonical Stage 0–6 trading procedure, followed by both the main routine and the watchdog's retry — not code, but the single source of truth for what either one actually does |
 | `WATCHDOG_PROCEDURE.md` | The watchdog's own procedure: assess today's manifest, and on a real problem, diagnose, attempt a fix, merge it, and re-run `DAILY_PROCEDURE.md` once |
-| `research.py` | Deterministic Stage 1 research — replaces "research by web search" with a defined candidate universe and one parser per feed (news, congressional/insider activity, scheduled events, filings, macro, commodities, positioning), every item graded `ok`/`thin`/`degraded`/`failed` and required to attach to a symbol or channel. `candidates()` unions five sources as of 5 September 2026 (held, watchlist, top movers, `screener.py` results, politician-discovered symbols) — `SECTOR_MAP` is gone; `sector_from_company_overview`/`sector_from_etf_profile` and `congress_trade_items_by_politician`/`bioguide_ids_from_congress_items` replaced it. `NEWS_SENTIMENT` now filters on each article's own `ticker_sentiment` rather than trusting the requested symbol (the batching cross-wiring bug), and `macro_item`/`commodity_items` share the preview-envelope handling `CONGRESS_TRADES`/`INSIDER_TRANSACTIONS` already had. `universe_funnel` records how many symbols entered from each source |
-| `screener.py` | The real Robinhood scanner as a candidate source (`get_scanner_filter_specs`, `create_scan`, `update_scan_filters`, `run_scan` — all previously uncalled). `CORE_UNIVERSE_FILTERS_V1` is enum-filter-only (`get_scanner_datapoints`/`preview_scan`, needed to validate an expression filter, were unavailable this session); `build_filters` adds a real `FILTER_TYPE_SECTOR` filter scoped to held positions' actual sectors; `affordable_for_agentic` narrows results to what the agentic account's current equity and weight cap could ever hold, computed fresh every call, never cached |
+| `research.py` | Deterministic Stage 1 research — replaces "research by web search" with a defined candidate universe and one parser per feed (news, congressional/insider activity, scheduled events, filings, macro, commodities, positioning), every item graded `ok`/`thin`/`degraded`/`failed` and required to attach to a symbol or channel. `candidates()` unions five sources as of 5 September 2026 (held, watchlist, top movers, `screener.py` results, politician-discovered symbols) — `SECTOR_MAP` is gone; `sector_from_company_overview`/`sector_from_etf_profile` and `congress_trade_items_by_politician`/`bioguide_ids_from_congress_items` replaced it. `NEWS_SENTIMENT` now filters on each article's own `ticker_sentiment` rather than trusting the requested symbol (the batching cross-wiring bug), and `macro_item`/`commodity_items` share the preview-envelope handling `CONGRESS_TRADES`/`INSIDER_TRANSACTIONS` already had. `universe_funnel` records how many symbols entered from each source. As of the SAME day, `candidates()`'s eligible universe (verified live against 229 real symbols the day this was built) is explicitly NOT what Stage 1 researches — `researched_set` bounds that to `DEFAULT_RESEARCH_SET_CEILING` (40), ranked by the gate's own first condition (`symbols_with_dated_catalyst`, reading the same bulk `EARNINGS_CALENDAR` pull for free) then congressional recency (`most_recent_congress_activity` on `recent_congress_items`' 90-day/$15,000-floor-bounded output) then liquidity, held positions always included regardless of the ceiling; `cut_for_budget` makes an over-tight ceiling visible instead of guessable |
+| `screener.py` | The real Robinhood scanner as a candidate source (`get_scanner_filter_specs`, `create_scan`, `update_scan_filters`, `run_scan` — all previously uncalled). `CORE_UNIVERSE_FILTERS_V1` is enum-filter-only (`get_scanner_datapoints`/`preview_scan`, needed to validate an expression filter, were unavailable this session); `build_filters` adds a real `FILTER_TYPE_SECTOR` filter scoped to held positions' actual sectors; `affordable_for_agentic` narrows results to what the agentic account's current equity and weight cap could ever hold, computed fresh every call, never cached. `parse_scan_result` also keeps each result's `avg_volume` (5 September 2026) — the liquidity tiebreak `research.researched_set` ranks by, from data the scan already returned. The real scan's identifier is deliberately not in this file or anywhere else in the public repo — see `HANDOFF.private.md` |
 | `quantcore.py` | Five volatility estimators, ATR, GARCH, RSI, trend, volatility percentile, Ledoit-Wolf concentration (thresholds read from config, not hardcoded), direction-aware stop derivation, cash- and quality-aware sizing, eight anomaly classes including split detection, `sector_exposure` (the sector cap `DAILY_PROCEDURE.md` Stage 4 always described but nothing computed until 5 September 2026) |
-| `runlog.py` | Run manifests, staged timing (against per-stage budgets, `STAGE_TIMING_BUDGETS_MS`/`stage_budget_overruns` — `preflight`'s budget corrected from an unmeasured 15s to 180s, 5 September 2026), preflight self-audit (including a blocking `journal_fully_readable` check and, new the same day, `washsale_registry_stable`, block-severity), verified market calendar, regression review, optimization proposals (`stop_distance` removed — see section 11), real `stop_filled` decisions via `stop_filled_decision`, the pinned `GATE_CONDITIONS` five-condition order and `closest_calls` gate-miss ranking, `gate_funnel` (reached/cleared counts, distinct from a housekeeping decision that never touched the gate), `brokerage_token_health` (forecasts the observed token-expiry window before a run aborts on it), honest scoring |
+| `runlog.py` | Run manifests, staged timing (against per-stage budgets, `STAGE_TIMING_BUDGETS_MS`/`stage_budget_overruns` — `preflight`'s budget corrected from an unmeasured 15s to 180s, 5 September 2026; `gather`'s corrected the same day from an equally unmeasured 120s to 1,800s once `research.researched_set` bounded what that stage actually costs), preflight self-audit (including a blocking `journal_fully_readable` check and, new the same day, `washsale_registry_stable`, block-severity), verified market calendar, regression review, optimization proposals (`stop_distance` removed — see section 11), real `stop_filled` decisions via `stop_filled_decision`, the pinned `GATE_CONDITIONS` five-condition order and `closest_calls` gate-miss ranking, `gate_funnel` (reached/cleared counts, distinct from a housekeeping decision that never touched the gate), `brokerage_token_health` (forecasts the observed token-expiry window before a run aborts on it), honest scoring |
 | `washsale.py` | Cross-account registry, both directions, proxy warnings, `Registry.report(asof)` — the pinned journal schema for what the registry actually returned, replacing a hand-composed note that could (and once did) say something narrower than the real computation |
 | `ledger.py` | Positions and the wash-sale trade list rebuilt from broker order history; `all_traded_symbols(fills)` (the split-check universe, derived from fills, not from held positions, which had silently excluded every closed-out symbol); the append-only journal fold, `Journal.days_since_last_brokerage_success` and `latest_washsale_report`; the bounded-staleness fills/split-events cache plus the newer sector cache (180-day horizon) and congress-discovery cache (weekly horizon), all the same create-only dated-file pattern; optional monthly journal compaction, exactly equivalent to the daily fold it replaces; `run_entry(log)` pins the `"run"` journal entry's schema to exactly what `find_optimizations` reads, now including `brokerage_ok`; `Journal.closed_for_scoring` joins thesis + outcome entries for `score_closed_decisions` |
 | `evidence.py` | Pre-registered hypothesis testing, sample-size planning, futility stopping, and the policy that pauses new positions when the claimed edge is ruled out |
@@ -258,8 +258,8 @@ by default. Two properties of the connector, and the fix each one forced:
 | `test_ledger.py` | 121 tests: real broker order-history fixtures, split adjustment, the partially-filled-rest-cancelled fix, the opening-balance mechanism, the standing circuit-breaker fold, the fills/split-events cache, the sector and congress-discovery caches (same fold/horizon pattern), `all_traded_symbols` (including the fully-closed-position case), `days_since_last_brokerage_success`, monthly journal compaction, `run_entry` (schema pinning including `brokerage_ok`), and `closed_for_scoring` |
 | `test_evidence.py` | 28 tests, including known-answer edge detection and futility |
 | `test_watchdog.py` | 15 tests |
-| `test_research.py` | 107 tests, against recorded fixtures in `fixtures/research/`, never the live API — including the `NEWS_SENTIMENT` cross-wiring regression, the macro/commodity preview branches, `sector_from_company_overview`/`sector_from_etf_profile`, `congress_trade_items_by_politician`, and `universe_funnel` |
-| `test_screener.py` | 20 tests, against `fixtures/scanner/`, the real recorded `get_scanner_filter_specs`/`run_scan` responses -- not hand-built, and not matching either tool's own docstring shape |
+| `test_research.py` | 131 tests, against recorded fixtures in `fixtures/research/`, never the live API — including the `NEWS_SENTIMENT` cross-wiring regression, the macro/commodity preview branches, `sector_from_company_overview`/`sector_from_etf_profile`, `congress_trade_items_by_politician`, `universe_funnel`, `researched_set` (tier priority, the held-always-included rule, `cut_for_budget`), `symbols_with_dated_catalyst`, and `recent_congress_items`' recency/materiality bound |
+| `test_screener.py` | 21 tests, against `fixtures/scanner/`, the real recorded `get_scanner_filter_specs`/`run_scan` responses -- not hand-built, and not matching either tool's own docstring shape |
 | `test_procedure_docs.py` | 6 tests: the DRY RUN guard's exact text, and that every stage has a matching rationale section |
 | `test_emailer.py` | 79 tests, including escaping, no-research-on-abort, the `idea_card`/`idea_cards` bulleted format, the five-section cap (exact set, over-cap, unrecognised title, duplicate title, and that the cap is not enforced on an aborted run), closest-call reporting, `verify_email` (quantity mismatch, no matching decision, wrong-account decision, empty/unrecognised source, every allowed source prefix, untraceable and tolerance-matched numbers, date/ordinal exemption), and that `render_email` cannot render an account section without `verify_email` passing first |
 
@@ -1139,7 +1139,8 @@ five-condition gate in the first four real sessions (1-4 September 2026) —
 the gate was working correctly on an input that barely varied. `SECTOR_MAP`
 is gone as of 5 September 2026. `candidates()` now unions five sources; the
 two that replaced it are a real Robinhood scan (`screener.py`, scan
-`PBS Core Universe v1`, scan_id `b0a6268e-2d60-4b26-8df9-80c00738d3e8`,
+`PBS Core Universe v1` — its scan_id is not recorded here, see
+`HANDOFF.private.md`, same as an account number —
 liquidity/volatility/price/instrument-type filters plus a real sector
 filter scoped to held positions' ACTUAL sectors — `research.sector_from_company_overview`/
 `sector_from_etf_profile`, Alpha Vantage data, cached like splits at a
@@ -1743,10 +1744,10 @@ the check.
   `washsale_report` entry exists to fold. The mechanism exists; it has not
   yet done the thing it exists to do.
 - **The screener (`screener.py`) has never run inside a real
-  `DAILY_PROCEDURE.md` execution.** `PBS Core Universe v1` (scan_id
-  `b0a6268e-2d60-4b26-8df9-80c00738d3e8`) was created and exercised
-  manually in the session that built it — real filters, real 397-instrument
-  results, real fixture — but no actual daily run has ever called
+  `DAILY_PROCEDURE.md` execution.** `PBS Core Universe v1` (scan_id in
+  `HANDOFF.private.md`) was created and exercised manually in the session
+  that built it — real filters, real 397-instrument results, real fixture
+  — but no actual daily run has ever called
   `update_scan_filters` with a live-derived sector list, run it, or fed its
   results into `research.candidates()`. First real contact is the next
   scheduled trading day. The `Sector` result column's opaque numeric codes
@@ -1760,6 +1761,20 @@ the check.
   morning gets checked fresh) and the caching benefit — not re-pulling a
   member's entire disclosed history every day — only shows up starting the
   second run that observes the same member again.
+- **`research.researched_set` has been exercised against real, live data
+  once (5 September 2026) but never inside a real `DAILY_PROCEDURE.md`
+  execution.** A live rehearsal built the real eligible universe (229
+  symbols: 23 held, 200 from the real scanner, 8 from real congressional
+  discovery after the recency/materiality bound) and ran it through
+  `researched_set` with a real `EARNINGS_CALENDAR` pull, real congressional
+  recency data, and real screener liquidity — 40 researched, 189 cut for
+  budget, tiers populated from all three non-held sources. `cut_for_budget`
+  at 189 against 229 eligible is a real first data point on whether 40 is
+  the right ceiling, not yet a trend — it needs several real daily runs
+  before concluding anything about whether it should move. `gather`'s
+  re-timed 1,800s budget rests on the same rehearsal's per-call timing plus
+  the pre-ceiling ~25s/symbol figure, not yet on a full real run at the new
+  ceiling end to end.
 - **The self-heal loop's status is unchanged by any of the above, and its
   surface area is larger.** `SELF_HEAL_EXERCISE_PROPOSAL.md` (5 September
   2026) lays out three ways to deliberately exercise a real
