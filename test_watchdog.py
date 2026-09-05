@@ -7,7 +7,7 @@ August, a sandbox permission prompt with nobody there to answer it), and a
 run that writes one but aborted (every live run before 1 September).
 """
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -17,6 +17,7 @@ import watchdog as W
 
 
 TODAY = date(2026, 9, 2)
+NOW = datetime(2026, 9, 2, 13, 0, 0, tzinfo=timezone.utc)
 
 
 def _file(name, content_dict):
@@ -71,6 +72,120 @@ def test_a_corrupt_manifest_file_is_treated_as_absent_not_a_crash():
     assert W.latest_manifest_for(files, TODAY) is None
 
 
+# ------------------------------------------------------------------ latest_heartbeat_for
+
+def test_finds_the_heartbeat_for_today_among_other_dates():
+    files = [
+        _file("run-heartbeat-2026-09-01-0.json", {"run_id": "yesterday"}),
+        _file("run-heartbeat-2026-09-02-0.json", {"run_id": "today"}),
+        _file("run-manifest-2026-09-02.json", {"run_id": "not a heartbeat"}),
+    ]
+    assert W.latest_heartbeat_for(files, TODAY) == {"run_id": "today"}
+
+
+def test_no_heartbeat_for_today_returns_none():
+    files = [_file("run-heartbeat-2026-09-01-0.json", {"run_id": "yesterday"})]
+    assert W.latest_heartbeat_for(files, TODAY) is None
+
+
+def test_an_empty_folder_returns_none_heartbeat():
+    assert W.latest_heartbeat_for([], TODAY) is None
+
+
+def test_a_corrupt_heartbeat_file_is_treated_as_absent_not_a_crash():
+    files = [{"title": "run-heartbeat-2026-09-02-0.json", "content": "{not json"}]
+    assert W.latest_heartbeat_for(files, TODAY) is None
+
+
+def test_a_later_sequence_heartbeat_is_preferred_over_an_earlier_one():
+    """The connector can create a file but not modify one already written --
+    each stage's 'update' is really a new, higher-numbered file, mirroring
+    latest_manifest_for's own -N handling exactly."""
+    files = [
+        _file("run-heartbeat-2026-09-02-0.json", {"run_id": "r1", "last_stage_completed": None}),
+        _file("run-heartbeat-2026-09-02-1.json", {"run_id": "r1", "last_stage_completed": "preflight"}),
+        _file("run-heartbeat-2026-09-02-2.json", {"run_id": "r1", "last_stage_completed": "gather"}),
+    ]
+    assert W.latest_heartbeat_for(files, TODAY)["last_stage_completed"] == "gather"
+
+
+def test_heartbeat_sequence_order_in_the_file_list_does_not_matter():
+    files = [
+        _file("run-heartbeat-2026-09-02-2.json", {"last_stage_completed": "gather"}),
+        _file("run-heartbeat-2026-09-02-0.json", {"last_stage_completed": None}),
+        _file("run-heartbeat-2026-09-02-1.json", {"last_stage_completed": "preflight"}),
+    ]
+    assert W.latest_heartbeat_for(files, TODAY)["last_stage_completed"] == "gather"
+
+
+# ---------------------------------------------------------------------- heartbeat_status
+
+def _hb(updated_at, **extra):
+    return {"run_id": "r1", "started_at": "2026-09-02T12:00:00+00:00",
+           "last_stage_completed": "preflight", "updated_at": updated_at, **extra}
+
+
+def test_heartbeat_status_absent_when_none():
+    assert W.heartbeat_status(None, now=NOW) == "absent"
+
+
+def test_heartbeat_status_alive_when_recently_updated():
+    hb = _hb((NOW - timedelta(minutes=5)).isoformat())
+    assert W.heartbeat_status(hb, now=NOW) == "alive"
+
+
+def test_heartbeat_status_hung_when_stale():
+    hb = _hb((NOW - timedelta(seconds=W.HEARTBEAT_STALE_AFTER_SECONDS + 1)).isoformat())
+    assert W.heartbeat_status(hb, now=NOW) == "hung"
+
+
+def test_heartbeat_status_boundary_is_alive_not_hung():
+    """The threshold is the ceiling, not the floor -- hitting it exactly is
+    not yet stale, matching stage_budget_overruns' own boundary rule."""
+    hb = _hb((NOW - timedelta(seconds=W.HEARTBEAT_STALE_AFTER_SECONDS)).isoformat())
+    assert W.heartbeat_status(hb, now=NOW) == "alive"
+
+
+def test_heartbeat_status_one_second_past_the_boundary_is_hung():
+    hb = _hb((NOW - timedelta(seconds=W.HEARTBEAT_STALE_AFTER_SECONDS + 1)).isoformat())
+    assert W.heartbeat_status(hb, now=NOW) == "hung"
+
+
+def test_heartbeat_status_missing_updated_at_is_hung_not_alive():
+    """A malformed liveness signal must never resolve in the run's favour."""
+    hb = {"run_id": "r1", "last_stage_completed": "preflight"}
+    assert W.heartbeat_status(hb, now=NOW) == "hung"
+
+
+def test_heartbeat_status_unparseable_updated_at_is_hung():
+    hb = _hb("not-a-timestamp")
+    assert W.heartbeat_status(hb, now=NOW) == "hung"
+
+
+def test_heartbeat_status_custom_threshold_is_honoured():
+    hb = _hb((NOW - timedelta(seconds=61)).isoformat())
+    assert W.heartbeat_status(hb, now=NOW, stale_after_seconds=60) == "hung"
+    assert W.heartbeat_status(hb, now=NOW, stale_after_seconds=120) == "alive"
+
+
+def test_heartbeat_payload_round_trips_through_watchdog_alive():
+    """A real RunLog's own heartbeat_payload, read straight back by the
+    watchdog -- the actual writer/reader pair, not two independently
+    hand-built fixtures that happen to agree today."""
+    log = R.RunLog("2026-09-02-live", now=NOW - timedelta(minutes=2))
+    with log.stage("preflight"):
+        pass
+    hb = R.heartbeat_payload(log, now=NOW)
+    assert W.heartbeat_status(hb, now=NOW) == "alive"
+    assert hb["last_stage_completed"] == "preflight"
+
+
+def test_heartbeat_payload_before_any_stage_has_last_stage_completed_none():
+    log = R.RunLog("2026-09-02-live", now=NOW)
+    hb = R.heartbeat_payload(log, now=NOW)
+    assert hb["last_stage_completed"] is None
+
+
 # ------------------------------------------------------------------------ assess
 
 def test_missing_manifest_is_the_no_run_problem():
@@ -115,6 +230,51 @@ def test_assess_reuses_emailer_diagnose_rather_than_a_second_cause_table():
     d = emailer.diagnose(m)
     assert a.cause == d["cause"]
     assert a.remedy == d["remedy"]
+
+
+# ------------------------------------------------------- assess with a heartbeat
+
+def test_assess_no_manifest_but_fresh_heartbeat_is_alive_not_no_run():
+    """The 2 September near-miss this exists to close: a run still legitimately
+    working must not be indistinguishable from one that never started."""
+    hb = _hb((NOW - timedelta(minutes=5)).isoformat())
+    a = W.assess(None, heartbeat=hb, now=NOW)
+    assert a.problem is False
+    assert a.kind == "alive"
+    assert a.run_id == "r1"
+
+
+def test_assess_no_manifest_and_stale_heartbeat_is_hung_not_no_run():
+    hb = _hb((NOW - timedelta(seconds=W.HEARTBEAT_STALE_AFTER_SECONDS + 1)).isoformat())
+    a = W.assess(None, heartbeat=hb, now=NOW)
+    assert a.problem is True
+    assert a.kind == "hung"
+    assert a.run_id == "r1"
+    assert "preflight" in a.detail
+
+
+def test_assess_no_manifest_and_no_heartbeat_is_still_no_run():
+    """Backward compatible with every existing call site: omitting heartbeat
+    entirely must behave exactly as before this feature existed."""
+    a = W.assess(None)
+    assert a.problem is True
+    assert a.kind == "no_run"
+
+
+def test_assess_a_completed_manifest_wins_over_a_stale_heartbeat():
+    """A run's own final word is authoritative -- a heartbeat that happened
+    to go stale near the very end (e.g. during Stage 6's own send) must not
+    override a manifest that did, in fact, get written."""
+    hb = _hb((NOW - timedelta(seconds=W.HEARTBEAT_STALE_AFTER_SECONDS + 1)).isoformat())
+    a = W.assess(_healthy_manifest(), heartbeat=hb, now=NOW)
+    assert a.kind == "healthy"
+
+
+def test_render_alert_works_for_a_hung_assessment():
+    a = W.Assessment(problem=True, kind="hung", detail="stuck after gather", run_id="r1")
+    subject, html = W.render_alert(a, today=TODAY)
+    assert "hung" in subject
+    assert "stuck after gather" in html
 
 
 # -------------------------------------------------------------------- render_alert

@@ -371,6 +371,16 @@ class RunLog:
     def stage(self, name: str):
         return _StageCtx(self, name)
 
+    def elapsed_seconds(self) -> float:
+        """Wall-clock time since the run started -- the same monotonic clock
+        `manifest()`'s `duration_ms` already uses, exposed so `DAILY_PROCEDURE.md`
+        can check it against `WALL_CLOCK_DEADLINE_SECONDS` between stages
+        without reading a private attribute."""
+        return time.monotonic() - self._t0
+
+    def last_stage_name(self) -> Optional[str]:
+        return self.stages[-1].name if self.stages else None
+
     # -- derived ---------------------------------------------------------
     @property
     def blocking_failures(self) -> list[Check]:
@@ -807,6 +817,56 @@ def stage_budget_overruns(stages: Sequence[dict], *,
             out.append({"name": name, "duration_ms": dur, "budget_ms": budget,
                         "over_by_ms": dur - budget})
     return out
+
+
+# --------------------------------------------------------------------------
+# the run's own liveness -- a wall-clock deadline, and a heartbeat for a
+# watchdog to read from outside
+# --------------------------------------------------------------------------
+
+# Per-stage budgets (above) are advisory: `stage_budget_overruns` reports
+# after the fact, to an email that only gets sent if the run finishes. They
+# sum to roughly 35 minutes, well inside the watchdog's 60-minute offset --
+# but nothing actually stops a stage that runs long, so the real worst case
+# was unbounded. This is the one true STOP: checked between stages (never
+# mid-stage -- a single hung external call cannot be interrupted from
+# inside the run itself; see HEARTBEAT_STALE_AFTER_SECONDS in watchdog.py
+# for that case), and past it `DAILY_PROCEDURE.md` stops wherever it is,
+# calls `log.abort(...)`, and proceeds straight to Stage 6 -- an incomplete
+# brief that arrives beats a complete one that never does. 2,700s (45
+# minutes) leaves real margin under the 60-minute watchdog offset for
+# Stage 6 (manifest write, email send) to still complete even if the
+# deadline is hit deep into Stage 5. See PROCEDURE_RATIONALE.md, 5
+# September 2026, for the full ordering this sits in relative to
+# STAGE_TIMING_BUDGETS_MS["gather"] and watchdog.HEARTBEAT_STALE_AFTER_SECONDS.
+DEFAULT_WALL_CLOCK_DEADLINE_SECONDS = 2_700
+
+
+def heartbeat_payload(log: "RunLog", *, now: Optional[datetime] = None) -> dict:
+    """The run's own liveness signal, written to a new
+    `run-heartbeat-YYYY-MM-DD-N.json` (`N` incrementing from 0) as the run
+    reaches Stage 0 and after every stage completes. There is no in-place
+    update -- the Drive connector can create a file but not modify one
+    already written (the same constraint `ledger.compact_journal_month`
+    documents), so "update the heartbeat" means a new, higher-numbered file
+    each time; `watchdog.latest_heartbeat_for` picks the highest sequence
+    for today, exactly like `latest_manifest_for` already does for `-N`.
+
+    `watchdog.heartbeat_status` reads exactly this shape to tell an alive-
+    but-slow run apart from one that never started (no file at all) and one
+    that is genuinely stuck (a file that stopped updating). `last_stage_completed`
+    is `None` on the very first write, before any stage has finished --
+    that write's whole purpose is to prove the run reached Stage 0 at all,
+    which is exactly the 31 August failure mode (a hang before Stage 6, and
+    therefore before any manifest) this exists to catch from outside.
+    """
+    return {
+        "run_id": log.run_id,
+        "started_at": log.started_at,
+        "updated_at": (now or datetime.now(timezone.utc)).isoformat(),
+        "last_stage_completed": log.last_stage_name(),
+        "health": log.health(),
+    }
 
 
 def find_optimizations(history: Sequence[dict]) -> list[dict]:

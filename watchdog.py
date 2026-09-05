@@ -21,21 +21,44 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Iterable, Optional
 
 import emailer
 
-__all__ = ["Assessment", "latest_manifest_for", "assess", "render_alert"]
+__all__ = ["Assessment", "latest_manifest_for", "latest_heartbeat_for",
+          "heartbeat_status", "HEARTBEAT_STALE_AFTER_SECONDS", "assess", "render_alert"]
 
 MANIFEST_RE = re.compile(r"^run-manifest-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.json$")
+# Same (?:-(\d+))? sequence suffix as MANIFEST_RE, and for the identical
+# reason: the Drive connector can create a file but not modify one already
+# written (ledger.py's compact_journal_month has the same constraint) --
+# "update it as each stage completes" cannot mean editing one file's
+# content in place, only writing a new file each time and letting the
+# highest sequence number for today be the current one. Old heartbeat
+# files are never deleted for the same reason old daily journal files
+# survive compaction: expected leftover clutter, not an error, since
+# `latest_heartbeat_for` only ever looks at today's highest sequence.
+HEARTBEAT_RE = re.compile(r"^run-heartbeat-(\d{4}-\d{2}-\d{2})-(\d+)\.json$")
+
+# A stage's own budget (runlog.STAGE_TIMING_BUDGETS_MS) bounds the longest
+# legitimate gap between two heartbeat writes -- the heartbeat updates once
+# per completed stage, so a run genuinely still working can go quiet for up
+# to its CURRENT stage's own budget without being stuck. The largest single
+# budget is "gather" at 1,800s (30 minutes); 2,100s (35 minutes) gives that
+# real headroom without waiting so long that a truly stuck run sits
+# undetected for most of the watchdog's own 60-minute offset. See
+# PROCEDURE_RATIONALE.md, 5 September 2026, for the full ordering this sits
+# in: gather budget (30m) < this (35m) < runlog.DEFAULT_WALL_CLOCK_DEADLINE_SECONDS
+# (45m) < the watchdog's own 60-minute offset.
+HEARTBEAT_STALE_AFTER_SECONDS = 2_100
 
 
 @dataclass(frozen=True)
 class Assessment:
     """What the watchdog concluded, and whether it is worth waking anyone for."""
     problem: bool
-    kind: str            # "no_run" | "aborted" | "healthy"
+    kind: str            # "no_run" | "aborted" | "healthy" | "alive" | "hung"
     detail: str = ""
     cause: Optional[str] = None
     remedy: Optional[str] = None
@@ -70,7 +93,72 @@ def latest_manifest_for(files: Iterable[dict], today: date) -> Optional[dict]:
     return best[1] if best else None
 
 
-def assess(manifest: Optional[dict]) -> Assessment:
+def latest_heartbeat_for(files: Iterable[dict], today: date) -> Optional[dict]:
+    """Pick the highest-sequence `run-heartbeat-YYYY-MM-DD-N.json` for
+    `today`, if any -- exactly `latest_manifest_for`'s own logic, because
+    it faces the identical constraint: the Drive connector can create a
+    file but not modify one already written, so "update the heartbeat"
+    means writing a new, higher-numbered file each time, never editing the
+    last one in place.
+
+    A file that will not parse as JSON, same as a manifest, is treated as
+    absent rather than raising -- a corrupt heartbeat is not proof of
+    anything, and `heartbeat_status` already treats "no readable heartbeat"
+    and "no heartbeat at all" the same way (`"absent"`).
+    """
+    iso = today.isoformat()
+    best: tuple[int, dict] | None = None
+    for f in files:
+        m = HEARTBEAT_RE.match(str(f.get("title", "")))
+        if not m or m.group(1) != iso:
+            continue
+        seq = int(m.group(2))
+        try:
+            content = json.loads(f.get("content") or "{}")
+        except (ValueError, TypeError):
+            continue
+        if best is None or seq > best[0]:
+            best = (seq, content)
+    return best[1] if best else None
+
+
+def heartbeat_status(heartbeat: Optional[dict], *, now: datetime,
+                     stale_after_seconds: int = HEARTBEAT_STALE_AFTER_SECONDS) -> str:
+    """`"alive"`, `"hung"`, or `"absent"` -- the three things a heartbeat can
+    tell a watchdog that a manifest alone cannot, because a manifest only
+    exists once a run has already finished (successfully or not).
+
+    `"absent"` means what it means today: no heartbeat file, same as no
+    manifest -- the run may never have started, or hung before Stage 0
+    could write anything at all (still possible; the heartbeat's first
+    write is not instantaneous with the run's own start).
+
+    `"hung"` also covers a heartbeat that parsed but is missing or cannot
+    parse its own `updated_at` -- a malformed liveness signal must never
+    resolve in the run's favour; only a readable, sufficiently recent
+    timestamp counts as proof of life.
+
+    A gap up to `stale_after_seconds` is `"alive"`: the heartbeat updates
+    once per completed stage, so a run legitimately deep into a single slow
+    stage (gather's own budget is the largest, 1,800s) can go quiet for a
+    while without being stuck -- see `HEARTBEAT_STALE_AFTER_SECONDS`'s own
+    comment for why 2,100s was chosen relative to that.
+    """
+    if heartbeat is None:
+        return "absent"
+    try:
+        updated_at = datetime.fromisoformat(str(heartbeat["updated_at"]))
+    except (KeyError, ValueError):
+        return "hung"
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    age_seconds = (now - updated_at).total_seconds()
+    return "hung" if age_seconds > stale_after_seconds else "alive"
+
+
+def assess(manifest: Optional[dict], *, heartbeat: Optional[dict] = None,
+          now: Optional[datetime] = None,
+          stale_after_seconds: int = HEARTBEAT_STALE_AFTER_SECONDS) -> Assessment:
     """The core judgment: is there a problem, and if so, what kind.
 
     `aborted` is the precise signal for "something is actually wrong" -- a
@@ -78,15 +166,54 @@ def assess(manifest: Optional[dict]) -> Assessment:
     nothing to do), so gating on `aborted` rather than "did research happen"
     means the watchdog stays quiet on every ordinary weekend-adjacent day and
     speaks up only when a blocking check actually failed.
+
+    A completed `manifest` is always authoritative -- it is the run's own
+    final word, and a heartbeat (necessarily earlier, and necessarily less
+    complete) has nothing to add once it exists. `heartbeat` only matters
+    when `manifest is None`: before 5 September 2026 that always meant
+    `"no_run"`, the SAME conclusion whether the run had never started or
+    was still working normally two minutes from finishing. A recent
+    heartbeat now distinguishes those -- `kind="alive"`, not a problem, the
+    watchdog says so and leaves the run alone rather than beginning a retry
+    against a run that is still in progress (the near-miss this was built
+    to close: 2 September, a 39-minute run against a 30-minute watchdog
+    offset nearly triggered a second, duplicate run). A stale heartbeat is
+    `kind="hung"` -- a specific, actionable finding ("stuck after stage X",
+    not just "nothing found") this watchdog could never make before.
     """
     if manifest is None:
+        status = heartbeat_status(heartbeat, now=now or datetime.now(timezone.utc),
+                                  stale_after_seconds=stale_after_seconds)
+        if status == "absent":
+            return Assessment(
+                problem=True, kind="no_run",
+                detail="No run-manifest found for today. The scheduled run may "
+                      "have failed to fire, or hung before it could write one -- "
+                      "the same shape as the 31 August permission-prompt stall, "
+                      "where a run froze waiting on a prompt nobody was present "
+                      "to answer.",
+            )
+        last_stage = heartbeat.get("last_stage_completed") if heartbeat else None
+        updated_at = heartbeat.get("updated_at") if heartbeat else None
+        run_id = heartbeat.get("run_id") if heartbeat else None
+        if status == "alive":
+            return Assessment(
+                problem=False, kind="alive",
+                detail=(f"No run-manifest yet, but the heartbeat is current "
+                        f"(last stage completed: {last_stage or 'none yet'}, "
+                        f"updated {updated_at}). The run appears to still be "
+                        f"in progress; leaving it alone."),
+                run_id=run_id,
+            )
         return Assessment(
-            problem=True, kind="no_run",
-            detail="No run-manifest found for today. The scheduled run may "
-                  "have failed to fire, or hung before it could write one -- "
-                  "the same shape as the 31 August permission-prompt stall, "
-                  "where a run froze waiting on a prompt nobody was present "
-                  "to answer.",
+            problem=True, kind="hung",
+            detail=(f"The heartbeat has not updated since {updated_at} "
+                    f"(last stage completed: {last_stage or 'none yet'}), past "
+                    f"the {stale_after_seconds}s staleness threshold. No "
+                    f"run-manifest exists, so this is not an abort -- the run "
+                    f"appears to be stuck, most likely inside a hung external "
+                    f"call that never returned."),
+            run_id=run_id,
         )
 
     if manifest.get("aborted"):

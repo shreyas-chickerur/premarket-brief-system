@@ -891,3 +891,81 @@ account-specific as a scan_id or an account number, and both the
 `DAILY_PROCEDURE.md` and this file's account of that finding were rewritten
 to describe the shape of the bug without repeating which real symbols were
 involved.
+
+## Stage 0 / Stage 6 — a heartbeat, because a budget is not a timeout
+
+Found 5 September 2026. `STAGE_TIMING_BUDGETS_MS` (the `preflight` and
+`gather` entries above) are advisory: `stage_budget_overruns` reports after
+the fact, to an email that only gets sent if the run finishes. The nine
+budgets sum to roughly 35 minutes against a 60-minute watchdog offset, which
+looks like 25 minutes of headroom -- but nothing stops a stage that runs
+long, so the real worst case was unbounded, and the failure it leads to had
+already happened once: on 2 September a 39-minute run against a
+30-minute watchdog offset nearly triggered a second, duplicate trading run
+(`HANDOFF.md` section 11) before the offset was widened to 60 with a single
+recheck. Both of those are still finite numbers. A gather stage that stalls
+on a single hung external call puts a run past 70 minutes, and the
+watchdog -- unable to tell "slow" from "stuck" from a Drive folder alone --
+concludes `no_run` and begins the exact same retry race, just later.
+
+**Widening the offset again was considered and rejected.** It is the same
+patch a third time: trade one unbounded wait for a longer unbounded one,
+with no new information gained. The actual gap is that the watchdog has
+never had anything to read except a manifest, which by definition does not
+exist until the run is either finished or aborted -- there was no way to
+distinguish "in progress" from "not going to happen" from outside. The fix
+is for the run to say so itself, continuously, and cheaply enough that
+writing it never becomes the reason a run is slow.
+
+**Design constraint discovered while building this**: the Drive connector
+can create a file but not modify one already written -- the exact
+limitation `ledger.compact_journal_month` already documents for the
+journal. "Update it as each stage completes" therefore cannot mean editing
+one file's content in place; it means a new file each time, same as every
+other dated artifact in this system (`run-manifest-*-N.json`,
+`fills-cache-*-N.json`, ...). `run-heartbeat-YYYY-MM-DD-N.json` uses
+`len(log.stages)` as `N` -- 0 before any stage has completed, then 1, 2,
+3... -- which needs no separate counter and falls naturally out of state
+`RunLog` already tracks. Old heartbeat files are never deleted, for the
+same reason old daily journal files survive monthly compaction: expected
+leftover clutter the fold/lookup logic already ignores by date and
+sequence, not an error worth building delete support to avoid.
+
+**Two independent mechanisms, because they catch two different failures:**
+
+- `runlog.DEFAULT_WALL_CLOCK_DEADLINE_SECONDS` (2,700s / 45 minutes),
+  checked between stages, is a proactive self-stop for a run that is
+  genuinely slow but still executing normally -- past it, the run calls
+  `log.abort(...)` and goes straight to Stage 6, sending an incomplete
+  brief rather than continuing into the watchdog's own window at all. This
+  CANNOT catch a single hung call: the deadline check is code, and code
+  does not run while blocked inside a call that never returns.
+- `watchdog.HEARTBEAT_STALE_AFTER_SECONDS` (2,100s / 35 minutes) is the
+  backstop for exactly that case, read from OUTSIDE the run by a process
+  that is not blocked on anything the run is blocked on. The heartbeat
+  updates once per completed stage, so a run legitimately deep into a
+  single slow stage can go quiet for up to that stage's own budget without
+  being mistaken for stuck -- gather's is the largest at 1,800s, and 2,100s
+  gives it real headroom (10 minutes) without waiting so long that a truly
+  stuck run sits undetected for most of the watchdog's own offset.
+
+The four numbers are deliberately ordered with real margin between each:
+`STAGE_TIMING_BUDGETS_MS["gather"]` (30m) < `HEARTBEAT_STALE_AFTER_SECONDS`
+(35m) < `DEFAULT_WALL_CLOCK_DEADLINE_SECONDS` (45m) < the watchdog's own
+60-minute offset. Each threshold has headroom over the one before it for a
+reason: a legitimately slow gather stage must never look hung; a run
+correctly self-stopping at its deadline must never race the watchdog's own
+recheck; and the watchdog must have real lead time to notice a genuine
+stall before its own offset would otherwise fire anyway.
+
+**What this does not prove.** A stale heartbeat is evidence a run has
+stopped making progress, not proof the underlying process has actually
+terminated or released whatever it was doing when it stalled. The retry
+`WATCHDOG_PROCEDURE.md` starts on a `hung` verdict is a fresh attempt, not
+a resumption -- if the original process were somehow still consuming
+resources (a connector-level hang rather than a process-level one), a
+concurrent retry could in principle still collide with it. This is a
+smaller, more specific version of the same risk `no_run` already carried
+before any of this existed; it is not new, and it is not eliminated by a
+heartbeat that can only observe silence, never confirm death. Recorded
+here plainly rather than implied to be solved.

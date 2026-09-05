@@ -466,6 +466,85 @@ def test_preflight_budget_reflects_what_the_stage_actually_costs():
     assert R.STAGE_TIMING_BUDGETS_MS["preflight"] >= 140_000
 
 
+def test_gather_budget_reflects_what_the_stage_actually_costs():
+    """5 September 2026: the original 120s budget predated the researched-set
+    ceiling and was never measured either -- see PROCEDURE_RATIONALE.md."""
+    assert R.STAGE_TIMING_BUDGETS_MS["gather"] >= 1_000_000
+
+
+def test_wall_clock_deadline_leaves_margin_under_the_watchdog_offset():
+    """The whole point of the deadline is to stop before the watchdog's own
+    60-minute offset would otherwise conclude no_run/hung -- if it did not
+    leave real margin, it would not actually prevent that race."""
+    assert R.DEFAULT_WALL_CLOCK_DEADLINE_SECONDS < 3_600
+    assert R.DEFAULT_WALL_CLOCK_DEADLINE_SECONDS >= R.STAGE_TIMING_BUDGETS_MS["gather"] / 1000
+
+
+# -------------------------------------------------------------- run liveness
+
+def test_elapsed_seconds_reflects_real_wall_clock_time():
+    log = R.RunLog("r1")
+    import time as _time
+    _time.sleep(0.02)
+    assert log.elapsed_seconds() >= 0.02
+
+
+def test_last_stage_name_is_none_before_any_stage():
+    log = R.RunLog("r1")
+    assert log.last_stage_name() is None
+
+
+def test_last_stage_name_is_the_most_recently_completed_stage():
+    log = R.RunLog("r1")
+    with log.stage("preflight"):
+        pass
+    with log.stage("gather"):
+        pass
+    assert log.last_stage_name() == "gather"
+
+
+def test_last_stage_name_updates_even_when_a_stage_raises():
+    """_StageCtx records the stage on exit regardless of exception -- a
+    stage that crashed still completed, in the sense that matters here: it
+    is no longer silently running."""
+    log = R.RunLog("r1")
+    with pytest.raises(ValueError):
+        with log.stage("gather"):
+            raise ValueError("boom")
+    assert log.last_stage_name() == "gather"
+
+
+def test_heartbeat_payload_carries_run_id_and_started_at():
+    log = R.RunLog("2026-09-05-live")
+    hb = R.heartbeat_payload(log)
+    assert hb["run_id"] == "2026-09-05-live"
+    assert hb["started_at"] == log.started_at
+
+
+def test_heartbeat_payload_last_stage_completed_is_none_before_any_stage():
+    log = R.RunLog("r1")
+    assert R.heartbeat_payload(log)["last_stage_completed"] is None
+
+
+def test_heartbeat_payload_reflects_the_most_recently_completed_stage():
+    log = R.RunLog("r1")
+    with log.stage("preflight"):
+        pass
+    assert R.heartbeat_payload(log)["last_stage_completed"] == "preflight"
+
+
+def test_heartbeat_payload_health_matches_log_health():
+    log = R.RunLog("r1")
+    log.check("some_check", False, "block", "failed")
+    assert R.heartbeat_payload(log)["health"] == log.health() == "critical"
+
+
+def test_heartbeat_payload_updated_at_uses_the_supplied_now():
+    log = R.RunLog("r1")
+    now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=timezone.utc)
+    assert R.heartbeat_payload(log, now=now)["updated_at"] == now.isoformat()
+
+
 # ---------------------------------------------------------------- optimizations
 
 def test_optimizer_is_silent_without_enough_history():
