@@ -596,12 +596,21 @@ def test_sector_exposure_of_no_positions_is_clean():
     assert out["by_sector"] == {} and out["breaches"] == {} and not out["concentrated"]
 
 
-def test_sector_exposure_uses_research_sector_map_end_to_end():
-    """The production wiring: `research.SECTOR_MAP` really does cover the
-    real energy-sector breach a rehearsal would need to catch."""
+def test_sector_exposure_composes_with_a_live_derived_sector_map():
+    """5 September 2026: sector_exposure's `sector_map` argument is now
+    populated at runtime from `research.sector_from_company_overview`/
+    `sector_from_etf_profile` (cached via `ledger.fold_sector_cache`), not
+    from a hand-typed `research.SECTOR_MAP` global -- that global no longer
+    exists. This proves the composition still works given the shape a real
+    cache fold produces (symbol -> sector), independent of where the
+    mapping came from."""
     import research
+    live_sector_map = {
+        "XOM": research.sector_from_company_overview({"Sector": "Energy"}),
+        "OXY": research.sector_from_company_overview({"Sector": "Energy"}),
+    }
     weights = {"XOM": 0.20, "OXY": 0.20}
-    out = q.sector_exposure(weights, research.SECTOR_MAP, cap=0.35)
+    out = q.sector_exposure(weights, live_sector_map, cap=0.35)
     assert out["by_sector"]["energy"] == pytest.approx(0.40)
     assert out["concentrated"] is True
 

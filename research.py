@@ -266,39 +266,164 @@ def _numeric_quality(value: Any) -> str:
 # candidate generation -- the other half of an undefined research process
 # --------------------------------------------------------------------------
 
-SECTOR_MAP: dict[str, str] = {
-    "XOM": "energy", "CVX": "energy", "COP": "energy", "SLB": "energy",
-    "HAL": "energy", "OXY": "energy", "XLE": "energy", "USO": "energy",
-    "VDE": "energy", "XOP": "energy", "OIH": "energy",
-    "AAPL": "technology", "MSFT": "technology", "GOOGL": "technology",
-    "META": "technology", "NVDA": "technology", "CRWD": "technology",
-    "AMZN": "consumer_discretionary", "WMT": "consumer_staples",
-    "SPGI": "financials", "JPM": "financials", "IBM": "technology",
-    "GLDM": "commodities", "GLD": "commodities", "IAU": "commodities",
-    "SGOV": "cash_equivalent", "VGSH": "cash_equivalent",
-    "VTI": "broad_market", "VOO": "broad_market", "SPY": "broad_market",
-    "VXUS": "international",
-}
+def sector_from_company_overview(raw: Optional[dict]) -> Optional[str]:
+    """A stock's real sector, from Alpha Vantage `COMPANY_OVERVIEW`.
+
+    Verified live, 5 September 2026, against a real AAPL response:
+    `raw["Sector"] == "TECHNOLOGY"`. Lower-cased and space-to-underscore
+    normalised so it composes with the rest of this module's existing
+    sector-name convention (`quantcore.sector_exposure`'s `by_sector` keys).
+    `None` when the field is missing or blank -- some asset types carry no
+    `Sector` at all, and a missing sector must be reported as unmapped
+    (`quantcore.sector_exposure`'s `unmapped` list), never guessed.
+    """
+    sector = (raw or {}).get("Sector")
+    if not sector:
+        return None
+    return str(sector).strip().lower().replace(" ", "_")
+
+
+ETF_SECTOR_CONCENTRATION_THRESHOLD = 0.60
+
+
+def sector_from_etf_profile(raw: Optional[dict]) -> Optional[str]:
+    """An ETF's dominant sector, from Alpha Vantage `ETF_PROFILE`, ONLY when
+    the fund is genuinely concentrated in it.
+
+    Verified live, 5 September 2026, against a real VTI response:
+    `raw["sectors"]` is a BREAKDOWN, not one label -- `[{"sector":
+    "INFORMATION TECHNOLOGY", "weight": "0.35"}, {"sector": "FINANCIALS",
+    "weight": "0.102"}, ...]`, eleven sectors in VTI's case. That is a
+    total-market fund doing exactly what it is supposed to do; treating its
+    largest 35% slice as "the" sector would misrepresent a genuinely
+    diversified holding as a concentrated bet in exactly the way
+    `quantcore.sector_exposure` exists to catch.
+
+    Returns the dominant sector only when its weight is at least
+    `ETF_SECTOR_CONCENTRATION_THRESHOLD` (a real single-sector fund like
+    `XLE`), and `None` otherwise -- a diversified fund is not "in" a sector,
+    and `None` here means exactly that, reported as unmapped, not a failure
+    to look one up.
+    """
+    sectors = (raw or {}).get("sectors") or []
+    if not sectors:
+        return None
+    try:
+        top = max(sectors, key=lambda s: float(s.get("weight") or 0))
+        weight = float(top.get("weight"))
+    except (TypeError, ValueError):
+        return None
+    if weight < ETF_SECTOR_CONCENTRATION_THRESHOLD:
+        return None
+    sector = top.get("sector")
+    return str(sector).strip().lower().replace(" ", "_") if sector else None
+
+
+def bioguide_ids_from_congress_items(items: Sequence["ResearchItem"]) -> list[str]:
+    """Unique bioguide_ids already observed disclosing a trade in a
+    held-or-candidate symbol -- the data-driven, non-editorial seed for
+    which members' full trading history is worth pulling by `bioguide_id`
+    (see `congress_trade_items_by_politician`). No name is hand-picked: the
+    set is exactly whoever has already shown up trading in this system's
+    own universe, which sidesteps any judgment call about which sitting
+    members "matter" and self-corrects as the held/candidate universe
+    changes. See PROCEDURE_RATIONALE.md, 5 September 2026, for why an
+    initial attempt at a hand-picked set (financial-committee leadership)
+    was abandoned: all four tried had zero disclosed trades on record."""
+    seen = set()
+    for i in items:
+        if i.channel != "congress_trade" or not i.usable:
+            continue
+        bid = (i.value or {}).get("bioguide_id")
+        if bid:
+            seen.add(str(bid))
+    return sorted(seen)
+
+
+def congress_trade_items_by_politician(raw: Optional[dict], *, bioguide_id: str,
+                                       asof: str) -> list[ResearchItem]:
+    """`CONGRESS_TRADES` for ONE politician via `bioguide_id` -- the only
+    discovery path this endpoint supports. A `symbol`-keyed call can only
+    ever confirm a symbol already in `held_or_candidate`, because nothing
+    fetches it for any other symbol in the first place; this is what lets a
+    name outside that set actually surface.
+
+    Verified live, 5 September 2026, against a real response for bioguide_id
+    C001123 (2,248 disclosed trades on record): identical `{"symbol": "",
+    "bioguide_id":, "trades": [...]}` shape to the symbol-keyed call, except
+    each row's own `symbol` field varies -- the two real trades this
+    verification saw were DSGX and TXRH, neither OXY nor anywhere near the
+    symbol whose fixture originally surfaced this member. Always a preview
+    envelope in practice (no date-range parameter exists on this endpoint,
+    so a member with any trading history returns their entire record) --
+    handled the same way as the symbol-keyed call.
+
+    Every item carries `bioguide_id` in its `value`, same as the
+    symbol-keyed parser -- this is what lets `bioguide_ids_from_congress_items`
+    bootstrap the tracked set from either call's results without needing a
+    separate lookup."""
+    if raw is None:
+        return [ResearchItem(channel="congress_trade", symbol=None,
+                             mechanism=f"CONGRESS_TRADES unavailable for bioguide_id {bioguide_id}",
+                             value=None, source="Alpha Vantage CONGRESS_TRADES",
+                             asof=asof, quality="failed")]
+    if _is_preview_envelope(raw):
+        return [_preview_item("congress_trade", None, "Alpha Vantage CONGRESS_TRADES", raw, asof)]
+    _shape_guard(raw, ("trades",), "CONGRESS_TRADES")
+    out = []
+    for row in raw["trades"]:
+        sym = row.get("symbol")
+        if not sym:
+            continue
+        politician = row.get("politician_canonical") or row.get("politician") or "an unnamed member"
+        party = row.get("party") or "party unrecorded"
+        state = row.get("state") or "state unrecorded"
+        txn = row.get("transaction_type", "transaction")
+        out.append(ResearchItem(
+            channel="congress_trade", symbol=str(sym).upper(),
+            mechanism=f"{politician} ({party}, {state}) disclosed a {txn} in {sym}",
+            value={"politician": politician, "bioguide_id": row.get("bioguide_id", bioguide_id),
+                  "transaction_type": txn, "amount_min": row.get("amount_min"),
+                  "amount_max": row.get("amount_max"),
+                  "transaction_date": row.get("transaction_date")},
+            source="Alpha Vantage CONGRESS_TRADES", asof=asof, quality="ok"))
+    return out
+
+
+def symbols_from_congress_items(items: Sequence["ResearchItem"]) -> list[str]:
+    """Unique symbols discovered across a set of (typically bioguide_id-keyed)
+    congress-trade items -- what gets fed into `candidates()`'s
+    `congress_discovered` and, when caching, into a `congress-discovery-cache`
+    row's `symbols`."""
+    return sorted({i.symbol for i in items if i.channel == "congress_trade" and i.usable and i.symbol})
 
 
 def candidates(*, held_symbols: Sequence[str],
                 watchlist_symbols: Sequence[str] = (),
                 top_movers: Sequence[str] = (),
-                sector_map: dict[str, str] = None) -> list[str]:
-    """The candidate universe, defined once, in code. Four sources, unioned
+                screener_symbols: Sequence[str] = (),
+                congress_discovered: Sequence[str] = ()) -> list[str]:
+    """The candidate universe, defined once, in code. Five sources, unioned
     and deduplicated: held positions; `state.json.config.watchlist`;
-    today's `TOP_GAINERS_LOSERS` (flatten with `top_movers_symbols()` first);
-    names sharing a sector (via `sector_map`, default `SECTOR_MAP`) with a
-    held position."""
-    sector_map = SECTOR_MAP if sector_map is None else sector_map
+    today's `TOP_GAINERS_LOSERS` (flatten with `top_movers_symbols()`
+    first); `screener_symbols`, real Robinhood scanner results scoped to
+    liquidity, price, volatility, and the real sectors of held positions
+    (see `screener.py` and `research.sector_from_company_overview`/
+    `sector_from_etf_profile`); and `congress_discovered`, symbols surfaced
+    by `congress_trade_items_by_politician` for a member already observed
+    trading in this universe (see `bioguide_ids_from_congress_items`).
+
+    Before 5 September 2026 the fourth source was a hand-typed 31-symbol
+    `SECTOR_MAP`, expanded against itself -- which meant the only names
+    ever considered outside held positions and the day's biggest movers
+    were thirty-one tickers someone had typed in. `SECTOR_MAP` is gone;
+    sector membership now comes from real data, and the candidate universe
+    it feeds comes from a real scan, not a dictionary literal.
+    """
     held = {s.upper() for s in held_symbols}
     out = set(held) | {s.upper() for s in watchlist_symbols} | {s.upper() for s in top_movers}
-
-    held_sectors = {sector_map[s] for s in held if s in sector_map}
-    for sym, sec in sector_map.items():
-        if sec in held_sectors:
-            out.add(sym)
-
+    out |= {s.upper() for s in screener_symbols}
+    out |= {s.upper() for s in congress_discovered}
     return sorted(out)
 
 
@@ -317,6 +442,40 @@ def top_movers_symbols(raw: Optional[dict]) -> list[str]:
             if t:
                 out.append(str(t).upper())
     return out
+
+
+def universe_funnel(*, held_symbols: Sequence[str],
+                    watchlist_symbols: Sequence[str] = (),
+                    top_movers: Sequence[str] = (),
+                    screener_symbols: Sequence[str] = (),
+                    congress_discovered: Sequence[str] = ()) -> dict:
+    """How many symbols came from each source, and how many survive
+    deduplication into `candidates()`'s final list -- the "how wide did
+    Stage 1 actually look" half of the funnel `DAILY_PROCEDURE.md` Stage 6
+    reports in System health.
+
+    The other half -- how many of those reached the five-condition gate and
+    how many cleared it -- is `runlog.gate_funnel`, computed from Stage 3's
+    own decisions rather than here: this function only knows what entered
+    the universe, not what Stage 3 did with it. Recording both halves
+    separately is the point (5 September 2026): a strict gate and an empty
+    universe look identical from "0 ideas cleared" alone, and call for
+    opposite fixes.
+    """
+    sources = {
+        "held": sorted({s.upper() for s in held_symbols}),
+        "watchlist": sorted({s.upper() for s in watchlist_symbols}),
+        "top_movers": sorted({s.upper() for s in top_movers}),
+        "screener": sorted({s.upper() for s in screener_symbols}),
+        "congress_discovered": sorted({s.upper() for s in congress_discovered}),
+    }
+    universe = candidates(held_symbols=held_symbols, watchlist_symbols=watchlist_symbols,
+                          top_movers=top_movers, screener_symbols=screener_symbols,
+                          congress_discovered=congress_discovered)
+    return {
+        "source_counts": {k: len(v) for k, v in sources.items()},
+        "universe_size": len(universe),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -485,7 +644,14 @@ def congress_trade_items(raw: Optional[dict], *, symbol: str,
     ...}]}`. `party`/`state`/`state_district` are already on each row --
     some rows have them `null` (redacted upstream, not every discloser's
     metadata is complete), but `POLITICIAN_METADATA` is not needed to fill
-    them in and is not called here."""
+    them in and is not called here.
+
+    Each item's `value` carries `bioguide_id` (added 5 September 2026) --
+    this is what lets `bioguide_ids_from_congress_items` bootstrap a
+    discovery set from calls this function ALREADY makes, with no separate
+    lookup and no hand-picked roster: whoever discloses a trade in a symbol
+    this system already examines becomes a candidate to follow more widely
+    via `congress_trade_items_by_politician`."""
     if raw is None:
         return [ResearchItem(channel="congress_trade", symbol=symbol,
                              mechanism=f"CONGRESS_TRADES unavailable for {symbol}",
@@ -503,8 +669,9 @@ def congress_trade_items(raw: Optional[dict], *, symbol: str,
         out.append(ResearchItem(
             channel="congress_trade", symbol=symbol,
             mechanism=f"{politician} ({party}, {state}) disclosed a {txn} in {symbol}",
-            value={"politician": politician, "transaction_type": txn,
-                  "amount_min": row.get("amount_min"), "amount_max": row.get("amount_max"),
+            value={"politician": politician, "bioguide_id": row.get("bioguide_id"),
+                  "transaction_type": txn, "amount_min": row.get("amount_min"),
+                  "amount_max": row.get("amount_max"),
                   "transaction_date": row.get("transaction_date")},
             source="Alpha Vantage CONGRESS_TRADES", asof=asof, quality="ok"))
     return out

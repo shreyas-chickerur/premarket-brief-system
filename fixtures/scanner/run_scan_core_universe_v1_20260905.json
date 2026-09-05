@@ -1,0 +1,136 @@
+{
+  "scan_id": "b0a6268e-2d60-4b26-8df9-80c00738d3e8",
+  "scan_title": "PBS Core Universe v1",
+  "sorted_by": "Last asc",
+  "filters_applied": [
+    {
+      "filter_type": "Asset type",
+      "filter_type_enum": "FILTER_TYPE_INSTRUMENT_TYPE",
+      "predicate": "ANY_OF",
+      "values": [
+        "STOCK",
+        "ETF"
+      ],
+      "expression": "type"
+    },
+    {
+      "filter_type": "Average volume",
+      "filter_type_enum": "FILTER_TYPE_AVERAGE_VOLUME",
+      "predicate": ">",
+      "values": [
+        "500000"
+      ],
+      "interval": "1d",
+      "length": 30,
+      "expression": "volumeAvg(candlePeriod=\"1d\", candleCount=30, session=\"all\")"
+    },
+    {
+      "filter_type": "Historical volatility",
+      "filter_type_enum": "FILTER_TYPE_HISTORICAL_VOLATILITY",
+      "predicate": "BETWEEN",
+      "values": [
+        "0.15",
+        "0.80"
+      ],
+      "expression": "statVol1Month"
+    },
+    {
+      "filter_type": "Last",
+      "filter_type_enum": "FILTER_TYPE_LAST",
+      "predicate": ">",
+      "values": [
+        "5"
+      ],
+      "expression": "tradeAllDay.price"
+    }
+  ],
+  "total_items": 397,
+  "cortex_managed": false,
+  "results": [
+    {
+      "ticker": "AMBP",
+      "instrument_id": "2ed20624-bf9f-443c-9d01-87abcff5de8f",
+      "instrument_type": "EQUITY",
+      "columns": {
+        "% Change": "0",
+        "Asset type": "STOCK",
+        "Average volume": "2.384658316207e+06",
+        "Historical volatility": "0.27955964124277394",
+        "Last": "5.01",
+        "Name": "Ardagh Metal Packaging",
+        "Net change": "0",
+        "Sector": "102",
+        "Symbol": "AMBP",
+        "Volume": "1.495427448474e+06"
+      }
+    },
+    {
+      "ticker": "TIGR",
+      "instrument_id": "5c561726-45e0-42de-af23-0791ec5343a6",
+      "instrument_type": "EQUITY",
+      "columns": {
+        "% Change": "-0.0074803149606299715",
+        "Asset type": "STOCK",
+        "Average volume": "2.4344650704068e+06",
+        "Historical volatility": "0.5235972970442739",
+        "Last": "5.042",
+        "Name": "UP Fintech Holding",
+        "Net change": "-0.038000000000000256",
+        "Sector": "103",
+        "Symbol": "TIGR",
+        "Volume": "1.96452351388e+06"
+      }
+    },
+    {
+      "ticker": "GRNT",
+      "instrument_id": "7286feee-9482-413d-9a2d-49797f7dd7a2",
+      "instrument_type": "EQUITY",
+      "columns": {
+        "% Change": "0.000984251968503916",
+        "Asset type": "STOCK",
+        "Average volume": "1.0533134848046e+06",
+        "Historical volatility": "0.30412524270201663",
+        "Last": "5.085",
+        "Name": "Granite Ridge Resources",
+        "Net change": "0.004999999999999893",
+        "Sector": "309",
+        "Symbol": "GRNT",
+        "Volume": "1.196247138504e+06"
+      }
+    },
+    {
+      "ticker": "JBI",
+      "instrument_id": "d3b25e39-78af-43ae-af98-bb4117738c93",
+      "instrument_type": "EQUITY",
+      "columns": {
+        "% Change": "0",
+        "Asset type": "STOCK",
+        "Average volume": "1.6752227998711998e+06",
+        "Historical volatility": "0.42215078774175124",
+        "Last": "5.09",
+        "Name": "Janus International Group",
+        "Net change": "0",
+        "Sector": "310",
+        "Symbol": "JBI",
+        "Volume": "1.473415684282e+06"
+      }
+    },
+    {
+      "ticker": "TKC",
+      "instrument_id": "40f233ae-7e94-42b6-aa07-c3af6b073ddf",
+      "instrument_type": "EQUITY",
+      "columns": {
+        "% Change": "0",
+        "Asset type": "STOCK",
+        "Average volume": "2.505589599921934e+06",
+        "Historical volatility": "0.2747462778655155",
+        "Last": "5.1",
+        "Name": "Turkcell",
+        "Net change": "0",
+        "Sector": "308",
+        "Symbol": "TKC",
+        "Volume": "2.468275537072e+06"
+      }
+    }
+  ]
+}

@@ -381,7 +381,7 @@ def test_run_entry_accepts_a_real_runlog_via_manifest():
 def test_run_entry_defaults_missing_fields_rather_than_raising():
     entry = L.run_entry({})
     assert entry == {"run_id": "", "health": "", "duration_ms": 0,
-                     "decisions": [], "stages": []}
+                     "decisions": [], "stages": [], "brokerage_ok": None}
 
 
 def test_run_entry_round_trips_through_the_journal_into_find_optimizations():
@@ -405,6 +405,65 @@ def test_run_entry_round_trips_through_the_journal_into_find_optimizations():
     journal = L.fold_journal(entries)
     findings = R.find_optimizations(journal.runs)
     assert any(f["kind"] == "gate_balance" for f in findings)
+
+
+# ------------------------------------------------------------ brokerage_ok
+
+def test_run_entry_brokerage_ok_true_when_every_robinhood_call_succeeded():
+    manifest = {"calls": [{"service": "robinhood", "operation": "get_accounts", "ok": True},
+                          {"service": "robinhood", "operation": "get_portfolio", "ok": True},
+                          {"service": "alpha_vantage", "operation": "MARKET_STATUS", "ok": True}]}
+    assert L.run_entry(manifest)["brokerage_ok"] is True
+
+
+def test_run_entry_brokerage_ok_false_when_any_robinhood_call_failed():
+    manifest = {"calls": [{"service": "robinhood", "operation": "get_accounts", "ok": True},
+                          {"service": "robinhood", "operation": "get_portfolio", "ok": False}]}
+    assert L.run_entry(manifest)["brokerage_ok"] is False
+
+
+def test_run_entry_brokerage_ok_none_when_no_robinhood_call_made():
+    """An abort before Stage 0 step 3 (tools_available) never reaches a
+    brokerage call at all -- distinct from a call that was made and
+    failed."""
+    manifest = {"calls": [{"service": "alpha_vantage", "operation": "MARKET_STATUS", "ok": True}]}
+    assert L.run_entry(manifest)["brokerage_ok"] is None
+
+
+def test_run_entry_brokerage_ok_ignores_service_name_case():
+    manifest = {"calls": [{"service": "Robinhood", "operation": "get_accounts", "ok": True}]}
+    assert L.run_entry(manifest)["brokerage_ok"] is True
+
+
+# ------------------------------------------ days_since_last_brokerage_success
+
+def test_no_run_entries_means_no_brokerage_history():
+    j = L.fold_journal([_file("journal-2026-09-01.json", [])])
+    assert j.days_since_last_brokerage_success(date(2026, 9, 5)) is None
+
+
+def test_days_since_last_brokerage_success_counts_from_the_most_recent_true():
+    j = L.fold_journal([
+        _file("journal-2026-09-01.json",
+              [{"run_id": "a", "kind": "run", "on": "2026-09-01", "payload": {"brokerage_ok": True}}]),
+        _file("journal-2026-09-04.json",
+              [{"run_id": "b", "kind": "run", "on": "2026-09-04", "payload": {"brokerage_ok": True}}]),
+    ])
+    assert j.days_since_last_brokerage_success(date(2026, 9, 5)) == 1
+
+
+def test_days_since_last_brokerage_success_ignores_false_and_none():
+    """A failed or skipped brokerage call is not evidence the token still
+    works -- it must not reset the count back to zero."""
+    j = L.fold_journal([
+        _file("journal-2026-09-01.json",
+              [{"run_id": "a", "kind": "run", "on": "2026-09-01", "payload": {"brokerage_ok": True}}]),
+        _file("journal-2026-09-04.json",
+              [{"run_id": "b", "kind": "run", "on": "2026-09-04", "payload": {"brokerage_ok": False}}]),
+        _file("journal-2026-09-05.json",
+              [{"run_id": "c", "kind": "run", "on": "2026-09-05", "payload": {"brokerage_ok": None}}]),
+    ])
+    assert j.days_since_last_brokerage_success(date(2026, 9, 5)) == 4
 
 
 # ------------------------------------------------------- journal compaction
@@ -1094,3 +1153,120 @@ def test_splits_cache_round_trip_feeds_apply_splits_directly():
     adjusted = L.apply_splits(fills, splits_by_symbol)
     assert adjusted[0].quantity == 100.0
     assert adjusted[0].price == 100.0
+
+
+# -------------------------------------------------------------- sector cache
+
+def test_sector_cache_filename_matches_convention():
+    assert L.sector_cache_filename(date(2026, 9, 5)) == "sector-cache-2026-09-05.json"
+    assert L.sector_cache_filename(date(2026, 9, 5), 2) == "sector-cache-2026-09-05-2.json"
+
+
+def _sector_row(symbol, checked_through, sector):
+    return {"symbol": symbol, "checked_through": checked_through, "sector": sector}
+
+
+def test_fold_sector_cache_keeps_the_latest_check_per_symbol():
+    cache, bad = L.fold_sector_cache([
+        _cache_file("sector-cache-2026-08-20.json", [_sector_row("AAPL", "2026-08-20", "old_label")]),
+        _cache_file("sector-cache-2026-09-05.json", [_sector_row("AAPL", "2026-09-05", "technology")]),
+    ])
+    assert bad == []
+    assert cache["AAPL"] == {"sector": "technology", "checked_through": date(2026, 9, 5)}
+
+
+def test_fold_sector_cache_stores_none_for_a_diversified_fund():
+    """A fund with no single dominant sector is cached as sector=None -- a
+    real, useful answer (checked and found diversified), not a gap."""
+    cache, bad = L.fold_sector_cache([
+        _cache_file("sector-cache-2026-09-05.json", [_sector_row("VTI", "2026-09-05", None)]),
+    ])
+    assert cache["VTI"] == {"sector": None, "checked_through": date(2026, 9, 5)}
+
+
+def test_fold_sector_cache_records_unreadable_content():
+    cache, bad = L.fold_sector_cache([{"title": "sector-cache-2026-09-05.json", "content": "not json"}])
+    assert cache == {} and len(bad) == 1
+
+
+def test_fold_sector_cache_records_a_malformed_row():
+    cache, bad = L.fold_sector_cache([
+        _cache_file("sector-cache-2026-09-05.json", [{"symbol": "AAPL"}]),  # missing checked_through
+    ])
+    assert cache == {} and len(bad) == 1
+
+
+def test_symbols_needing_sector_check_includes_never_checked_symbols():
+    assert L.symbols_needing_sector_check(["AAPL", "VTI"], {}, today=date(2026, 9, 5)) == ["AAPL", "VTI"]
+
+
+def test_symbols_needing_sector_check_skips_recently_checked_symbols():
+    cache = {"AAPL": {"sector": "technology", "checked_through": date(2026, 9, 1)}}
+    assert L.symbols_needing_sector_check(["AAPL", "VTI"], cache, today=date(2026, 9, 5)) == ["VTI"]
+
+
+def test_symbols_needing_sector_check_rechecks_after_the_long_horizon():
+    cache = {"AAPL": {"sector": "technology", "checked_through": date(2026, 1, 1)}}
+    out = L.symbols_needing_sector_check(["AAPL"], cache, today=date(2026, 9, 5))
+    assert out == ["AAPL"]
+
+
+def test_symbols_needing_sector_check_horizon_is_much_longer_than_splits():
+    """The whole point: a sector classification is stable for months, so
+    this cache must not re-fetch on the same cadence as splits."""
+    assert L.SECTOR_CACHE_HORIZON_DAYS > L.SPLITS_CACHE_HORIZON_DAYS * 10
+
+
+# -------------------------------------------------------- congress discovery cache
+
+def test_congress_discovery_cache_filename_matches_convention():
+    assert (L.congress_discovery_cache_filename(date(2026, 9, 5))
+            == "congress-discovery-cache-2026-09-05.json")
+    assert (L.congress_discovery_cache_filename(date(2026, 9, 5), 2)
+            == "congress-discovery-cache-2026-09-05-2.json")
+
+
+def _congress_row(bioguide_id, checked_through, symbols):
+    return {"bioguide_id": bioguide_id, "checked_through": checked_through, "symbols": symbols}
+
+
+def test_fold_congress_discovery_cache_keeps_latest_symbols_per_member():
+    cache, bad = L.fold_congress_discovery_cache([
+        _cache_file("congress-discovery-cache-2026-08-29.json",
+            [_congress_row("C001123", "2026-08-29", ["OXY"])]),
+        _cache_file("congress-discovery-cache-2026-09-05.json",
+            [_congress_row("C001123", "2026-09-05", ["OXY", "DSGX", "TXRH"])]),
+    ])
+    assert bad == []
+    assert cache["C001123"]["symbols"] == ["DSGX", "OXY", "TXRH"]
+    assert cache["C001123"]["checked_through"] == date(2026, 9, 5)
+
+
+def test_fold_congress_discovery_cache_records_unreadable_content():
+    cache, bad = L.fold_congress_discovery_cache(
+        [{"title": "congress-discovery-cache-2026-09-05.json", "content": "not json"}])
+    assert cache == {} and len(bad) == 1
+
+
+def test_fold_congress_discovery_cache_records_a_malformed_row():
+    cache, bad = L.fold_congress_discovery_cache([
+        _cache_file("congress-discovery-cache-2026-09-05.json", [{"bioguide_id": "C001123"}]),
+    ])
+    assert cache == {} and len(bad) == 1
+
+
+def test_bioguides_needing_discovery_check_includes_never_checked():
+    out = L.bioguides_needing_discovery_check(["C001123", "W000817"], {}, today=date(2026, 9, 5))
+    assert out == ["C001123", "W000817"]
+
+
+def test_bioguides_needing_discovery_check_skips_recently_checked():
+    cache = {"C001123": {"symbols": ["OXY"], "checked_through": date(2026, 9, 3)}}
+    out = L.bioguides_needing_discovery_check(["C001123", "W000817"], cache, today=date(2026, 9, 5))
+    assert out == ["W000817"]
+
+
+def test_bioguides_needing_discovery_check_rechecks_after_a_week():
+    cache = {"C001123": {"symbols": ["OXY"], "checked_through": date(2026, 8, 20)}}
+    out = L.bioguides_needing_discovery_check(["C001123"], cache, today=date(2026, 9, 5))
+    assert out == ["C001123"]

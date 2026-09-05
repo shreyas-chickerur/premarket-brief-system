@@ -41,6 +41,11 @@ __all__ = [
     "fold_fills_cache", "fills_cache_watermark", "fills_ready_to_cache",
     "SPLITS_CACHE_HORIZON_DAYS", "splits_cache_filename", "SPLITS_CACHE_RE",
     "SplitsCacheEntry", "fold_splits_cache", "symbols_needing_split_check",
+    "SECTOR_CACHE_HORIZON_DAYS", "sector_cache_filename", "SECTOR_CACHE_RE",
+    "fold_sector_cache", "symbols_needing_sector_check",
+    "CONGRESS_DISCOVERY_HORIZON_DAYS", "congress_discovery_cache_filename",
+    "CONGRESS_DISCOVERY_CACHE_RE", "fold_congress_discovery_cache",
+    "bioguides_needing_discovery_check",
 ]
 
 # Quantities are compared with a tolerance because broker payloads carry six
@@ -673,7 +678,7 @@ def journal_filename(run_date: date, seq: int = 0) -> str:
 # belongs in a "run" journal entry, which is why it stays a small, pinned
 # projection of the full manifest rather than the manifest itself (that
 # already gets written whole to run-manifest-YYYY-MM-DD[-N].json).
-RUN_ENTRY_SCHEMA_FIELDS = ("run_id", "health", "duration_ms", "decisions", "stages")
+RUN_ENTRY_SCHEMA_FIELDS = ("run_id", "health", "duration_ms", "decisions", "stages", "brokerage_ok")
 
 
 def run_entry(log: Any) -> dict:
@@ -699,12 +704,28 @@ def run_entry(log: Any) -> dict:
     `RunLog` instance.
     """
     m = log.manifest() if hasattr(log, "manifest") else dict(log)
+
+    # brokerage_ok (added 5 September 2026): a single, cheap summary of
+    # whether this run's Robinhood calls succeeded, so
+    # `Journal.days_since_last_brokerage_success` has something to walk
+    # back through without the full journal needing to carry every call's
+    # detail (`calls` itself is NOT part of this pinned schema, same reason
+    # `decisions`/`stages` are trimmed projections rather than the full
+    # manifest). `None` when the run made no brokerage call at all --
+    # distinct from `False`, which means a call was actually attempted and
+    # failed. See runlog.brokerage_token_health and
+    # PROCEDURE_RATIONALE.md, 5 September 2026.
+    brokerage_calls = [c for c in m.get("calls", [])
+                       if str(c.get("service", "")).lower() == "robinhood"]
+    brokerage_ok = all(c.get("ok") for c in brokerage_calls) if brokerage_calls else None
+
     return {
         "run_id": m.get("run_id", ""),
         "health": m.get("health", ""),
         "duration_ms": m.get("duration_ms", 0),
         "decisions": m.get("decisions", []),
         "stages": m.get("stages", []),
+        "brokerage_ok": brokerage_ok,
     }
 
 
@@ -733,6 +754,30 @@ class Journal:
     def runs(self) -> list[dict]:
         """Past run manifests, oldest first — what find_optimizations reads."""
         return [e.payload for e in self.of_kind("run")]
+
+    def days_since_last_brokerage_success(self, asof: date) -> Optional[int]:
+        """How many days since a run last recorded `brokerage_ok: true` in
+        its `"run"` journal entry, or `None` if no run ever has.
+
+        Feeds `runlog.brokerage_token_health`, which warns before the
+        brokerage token's observed ~4-day expiry window is reached
+        (`HANDOFF.md` section 12) rather than only after a run aborts at
+        `tools_available` with no warning at all. `self.entries` is already
+        folded oldest-first, so the last matching entry is the most recent
+        real success -- a run with `brokerage_ok: False` or `None` (no
+        brokerage call attempted, e.g. an abort before Stage 0 step 3) does
+        not reset this count, since neither one is evidence the token is
+        still good.
+        """
+        last_ok: Optional[date] = None
+        for e in self.of_kind("run"):
+            if e.payload.get("brokerage_ok") is True:
+                d = _as_date(e.on)
+                if d is not None:
+                    last_ok = d
+        if last_ok is None:
+            return None
+        return (asof - last_ok).days
 
     @property
     def opening_balances(self) -> dict[str, float]:
@@ -984,3 +1029,180 @@ def compact_journal_month(daily_files: Iterable[dict]) -> dict:
             "-- compact one month at a time")
     j = fold_journal(daily_files)
     return {"entries": [e.to_dict() for e in j.entries]}
+
+
+# --------------------------------------------------------------------------
+# sector cache -- replacing the hand-maintained research.SECTOR_MAP
+# --------------------------------------------------------------------------
+#
+# A company's sector classification changes on the order of years, not
+# days -- nothing like a split, which can happen with a week's notice.
+# SECTOR_CACHE_HORIZON_DAYS is deliberately long (see PROCEDURE_RATIONALE.md,
+# 5 September 2026) so a symbol's sector is fetched from Alpha Vantage
+# (`research.sector_from_company_overview` / `sector_from_etf_profile`)
+# roughly once and reused for months, the same create-only, dated-file
+# pattern the fills and splits caches already use.
+
+SECTOR_CACHE_HORIZON_DAYS = 180
+SECTOR_CACHE_RE = re.compile(r"^sector-cache-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.json$")
+
+
+def sector_cache_filename(run_date: date, seq: int = 0) -> str:
+    """Same create-only convention as `splits_cache_filename`."""
+    stem = f"sector-cache-{run_date.isoformat()}"
+    return f"{stem}.json" if seq == 0 else f"{stem}-{seq}.json"
+
+
+def fold_sector_cache(files: Iterable[dict]) -> tuple[dict[str, dict], list[str]]:
+    """Fold dated sector-cache files into one entry per symbol, plus any
+    files/rows that would not parse.
+
+    `files` are `{"title": str, "content": str}`, same shape as
+    `fold_splits_cache`. A symbol can be rechecked over time (a genuine
+    reclassification, however rare); the entry with the LATEST
+    `checked_through` wins per symbol, folded oldest-file-first exactly like
+    `fold_splits_cache`. Each returned entry is `{"sector": Optional[str],
+    "checked_through": date}` -- `sector` is `None` when the symbol was
+    checked and found to have no single sector (a diversified fund; see
+    `research.sector_from_etf_profile`), which is itself worth caching so
+    the next run does not re-fetch it hoping for a different answer.
+    """
+    by_symbol: dict[str, dict] = {}
+    bad: list[str] = []
+    dated: list[tuple[str, int, Any]] = []
+
+    for f in files:
+        title = str(f.get("title", ""))
+        m = SECTOR_CACHE_RE.match(title)
+        if not m:
+            continue
+        try:
+            body = json.loads(f.get("content") or "[]")
+        except (ValueError, TypeError):
+            bad.append(title)
+            continue
+        dated.append((m.group(1), int(m.group(2) or 0), body))
+
+    dated.sort(key=lambda t: (t[0], t[1]))
+
+    for iso, seq, body in dated:
+        for row in body:
+            try:
+                sym = str(row["symbol"]).upper()
+                checked_through = _as_date(row["checked_through"])
+                if checked_through is None:
+                    raise ValueError("unparseable checked_through")
+                sector = row.get("sector")
+                sector = str(sector) if sector is not None else None
+            except (KeyError, TypeError, ValueError):
+                bad.append(f"{sector_cache_filename(date.fromisoformat(iso), seq)} entry")
+                continue
+            existing = by_symbol.get(sym)
+            if existing is None or checked_through >= existing["checked_through"]:
+                by_symbol[sym] = {"sector": sector, "checked_through": checked_through}
+
+    return by_symbol, bad
+
+
+def symbols_needing_sector_check(symbols: Sequence[str],
+                                 cache: dict[str, dict], *,
+                                 horizon_days: int = SECTOR_CACHE_HORIZON_DAYS,
+                                 today: Optional[date] = None) -> list[str]:
+    """Which symbols need a fresh COMPANY_OVERVIEW/ETF_PROFILE call this
+    run: never checked before, or checked more than `horizon_days` ago.
+    Mirrors `symbols_needing_split_check` exactly, at a far longer horizon
+    because a sector classification is far more stable than a split
+    calendar."""
+    today = today or date.today()
+    boundary = today - timedelta(days=horizon_days)
+    out = set()
+    for sym in symbols:
+        entry = cache.get(sym.upper())
+        if entry is None or entry["checked_through"] < boundary:
+            out.add(sym.upper())
+    return sorted(out)
+
+
+# --------------------------------------------------------------------------
+# congressional-discovery cache -- bioguide_id -> symbols they have traded
+# --------------------------------------------------------------------------
+#
+# CONGRESS_TRADES by bioguide_id returns a member's ENTIRE disclosed trading
+# history every call (no date-range parameter exists) -- often thousands of
+# rows, always a preview envelope in practice. Re-fetching that for the same
+# member every day to find maybe one new disclosure is the same mistake the
+# fills/splits caches exist to avoid, at a much worse ratio. This cache
+# stores only the DISCOVERED SYMBOLS per member, not the trade rows
+# themselves (the trade detail is not needed once a symbol has been fed into
+# `research.candidates()` -- from there it is treated exactly like any other
+# candidate and re-researched normally), at a weekly horizon matching the
+# fills/splits caches' cadence.
+
+CONGRESS_DISCOVERY_HORIZON_DAYS = 7
+CONGRESS_DISCOVERY_CACHE_RE = re.compile(
+    r"^congress-discovery-cache-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.json$")
+
+
+def congress_discovery_cache_filename(run_date: date, seq: int = 0) -> str:
+    """Same create-only convention as the fills/splits caches."""
+    stem = f"congress-discovery-cache-{run_date.isoformat()}"
+    return f"{stem}.json" if seq == 0 else f"{stem}-{seq}.json"
+
+
+def fold_congress_discovery_cache(files: Iterable[dict]
+                                  ) -> tuple[dict[str, dict], list[str]]:
+    """Fold dated congress-discovery-cache files into one entry per
+    bioguide_id, plus any files/rows that would not parse. Same shape and
+    same latest-`checked_through`-wins fold as `fold_sector_cache`. Each
+    entry is `{"symbols": list[str], "checked_through": date}`.
+    """
+    by_id: dict[str, dict] = {}
+    bad: list[str] = []
+    dated: list[tuple[str, int, Any]] = []
+
+    for f in files:
+        title = str(f.get("title", ""))
+        m = CONGRESS_DISCOVERY_CACHE_RE.match(title)
+        if not m:
+            continue
+        try:
+            body = json.loads(f.get("content") or "[]")
+        except (ValueError, TypeError):
+            bad.append(title)
+            continue
+        dated.append((m.group(1), int(m.group(2) or 0), body))
+
+    dated.sort(key=lambda t: (t[0], t[1]))
+
+    for iso, seq, body in dated:
+        for row in body:
+            try:
+                bioguide_id = str(row["bioguide_id"])
+                checked_through = _as_date(row["checked_through"])
+                if checked_through is None:
+                    raise ValueError("unparseable checked_through")
+                symbols = sorted({str(s).upper() for s in row.get("symbols", [])})
+            except (KeyError, TypeError, ValueError):
+                bad.append(f"{congress_discovery_cache_filename(date.fromisoformat(iso), seq)} entry")
+                continue
+            existing = by_id.get(bioguide_id)
+            if existing is None or checked_through >= existing["checked_through"]:
+                by_id[bioguide_id] = {"symbols": symbols, "checked_through": checked_through}
+
+    return by_id, bad
+
+
+def bioguides_needing_discovery_check(bioguide_ids: Sequence[str],
+                                      cache: dict[str, dict], *,
+                                      horizon_days: int = CONGRESS_DISCOVERY_HORIZON_DAYS,
+                                      today: Optional[date] = None) -> list[str]:
+    """Which tracked bioguide_ids need a fresh CONGRESS_TRADES(bioguide_id=)
+    pull this run. Mirrors `symbols_needing_split_check` exactly."""
+    today = today or date.today()
+    boundary = today - timedelta(days=horizon_days)
+    out = set()
+    for bid in bioguide_ids:
+        entry = cache.get(bid)
+        if entry is None or entry["checked_through"] < boundary:
+            out.add(bid)
+    return sorted(out)

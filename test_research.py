@@ -140,15 +140,155 @@ def test_candidates_includes_watchlist_and_top_movers():
     assert "VTI" in out and "NVDA" in out
 
 
-def test_candidates_adds_sector_adjacent_names():
-    out = RS.candidates(held_symbols=["XOM"])
-    assert "CVX" in out
+def test_candidates_includes_screener_symbols():
+    """5 September 2026: the hand-typed 31-symbol SECTOR_MAP is gone.
+    Sector-adjacent candidates now come from a real scan (screener.py),
+    passed in as screener_symbols -- candidates() itself no longer knows
+    anything about sectors."""
+    out = RS.candidates(held_symbols=["XOM"], screener_symbols=["CVX", "SLB"])
+    assert "CVX" in out and "SLB" in out
+
+
+def test_candidates_includes_congress_discovered():
+    out = RS.candidates(held_symbols=["OXY"], congress_discovered=["DSGX", "TXRH"])
+    assert "DSGX" in out and "TXRH" in out
 
 
 def test_candidates_is_deduplicated_and_sorted():
-    out = RS.candidates(held_symbols=["oxy", "OXY"], watchlist_symbols=["oxy"])
+    out = RS.candidates(held_symbols=["oxy", "OXY"], watchlist_symbols=["oxy"],
+                        screener_symbols=["oxy"], congress_discovered=["OXY"])
     assert out.count("OXY") == 1
     assert out == sorted(out)
+
+
+def test_candidates_has_no_sector_map_left():
+    assert not hasattr(RS, "SECTOR_MAP")
+
+
+# --------------------------------------------------------- sector lookup (real)
+
+def test_sector_from_company_overview_parses_the_real_aapl_response():
+    """Verified live, 5 September 2026: raw['Sector'] == 'TECHNOLOGY'."""
+    assert RS.sector_from_company_overview({"Sector": "TECHNOLOGY"}) == "technology"
+
+
+def test_sector_from_company_overview_normalises_multi_word_sectors():
+    assert RS.sector_from_company_overview({"Sector": "Consumer Cyclical"}) == "consumer_cyclical"
+
+
+def test_sector_from_company_overview_none_when_missing():
+    assert RS.sector_from_company_overview({}) is None
+    assert RS.sector_from_company_overview(None) is None
+
+
+def test_sector_from_etf_profile_none_for_a_diversified_fund():
+    """Real VTI shape, verified live 5 September 2026: eleven sectors, the
+    largest (Information Technology) at 35% -- a total-market fund doing
+    exactly what it should, not a technology fund."""
+    raw = {"sectors": [{"sector": "INFORMATION TECHNOLOGY", "weight": "0.35"},
+                       {"sector": "FINANCIALS", "weight": "0.102"}]}
+    assert RS.sector_from_etf_profile(raw) is None
+
+
+def test_sector_from_etf_profile_returns_the_dominant_sector_for_a_concentrated_fund():
+    raw = {"sectors": [{"sector": "ENERGY", "weight": "0.97"},
+                       {"sector": "UTILITIES", "weight": "0.03"}]}
+    assert RS.sector_from_etf_profile(raw) == "energy"
+
+
+def test_sector_from_etf_profile_none_when_no_sectors():
+    assert RS.sector_from_etf_profile({}) is None
+    assert RS.sector_from_etf_profile(None) is None
+
+
+def test_sector_from_etf_profile_threshold_is_documented_and_used():
+    raw = {"sectors": [{"sector": "ENERGY", "weight": str(RS.ETF_SECTOR_CONCENTRATION_THRESHOLD)}]}
+    assert RS.sector_from_etf_profile(raw) == "energy"
+    raw_below = {"sectors": [{"sector": "ENERGY",
+                              "weight": str(RS.ETF_SECTOR_CONCENTRATION_THRESHOLD - 0.01)}]}
+    assert RS.sector_from_etf_profile(raw_below) is None
+
+
+# ------------------------------------------------- congress discovery (real)
+
+def test_congress_trade_items_carries_bioguide_id():
+    raw = {"trades": [{"symbol": "OXY", "bioguide_id": "C001123",
+                       "politician_canonical": "Gilbert Ray Cisneros, Jr.",
+                       "transaction_type": "BUY"}]}
+    items = RS.congress_trade_items(raw, symbol="OXY", asof=ASOF)
+    assert items[0].value["bioguide_id"] == "C001123"
+
+
+def test_bioguide_ids_from_congress_items_bootstraps_from_symbol_keyed_calls():
+    raw = {"trades": [{"symbol": "OXY", "bioguide_id": "C001123",
+                       "transaction_type": "BUY"}]}
+    items = RS.congress_trade_items(raw, symbol="OXY", asof=ASOF)
+    assert RS.bioguide_ids_from_congress_items(items) == ["C001123"]
+
+
+def test_bioguide_ids_from_congress_items_ignores_failed_items():
+    items = RS.congress_trade_items(None, symbol="OXY", asof=ASOF)
+    assert RS.bioguide_ids_from_congress_items(items) == []
+
+
+def test_congress_trade_items_by_politician_parses_the_real_bioguide_response():
+    """Verified live, 5 September 2026, bioguide_id C001123 (Gilbert
+    Cisneros): two of his real disclosed trades, neither OXY -- DSGX and
+    TXRH, surfaced only because this call has no symbol filter at all."""
+    raw = {"symbol": "", "bioguide_id": "C001123", "trades": [
+        {"symbol": "DSGX", "politician_canonical": "Gilbert Ray Cisneros, Jr.",
+         "bioguide_id": "C001123", "transaction_type": "BUY", "party": "D", "state": "CA"},
+        {"symbol": "TXRH", "politician_canonical": "Gilbert Ray Cisneros, Jr.",
+         "bioguide_id": "C001123", "transaction_type": "BUY", "party": "D", "state": "CA"},
+    ]}
+    items = RS.congress_trade_items_by_politician(raw, bioguide_id="C001123", asof=ASOF)
+    symbols = {i.symbol for i in items}
+    assert symbols == {"DSGX", "TXRH"}
+    assert "OXY" not in symbols
+    assert all(i.value["bioguide_id"] == "C001123" for i in items)
+
+
+def test_congress_trade_items_by_politician_handles_a_preview_envelope():
+    """This endpoint has no date-range parameter, so any member with
+    real trading history returns their entire disclosed record -- always a
+    preview in practice, confirmed live 5 September 2026 (2,248 trades for
+    one moderately active member)."""
+    fake_preview = {"preview": True, "total_lines": 44966, "full_data_tokens": 437439,
+                    "data_url": "https://example.test/x.json", "message": "truncated"}
+    items = RS.congress_trade_items_by_politician(fake_preview, bioguide_id="C001123", asof=ASOF)
+    assert len(items) == 1 and items[0].quality == "degraded"
+
+
+def test_congress_trade_items_by_politician_failed_on_none():
+    items = RS.congress_trade_items_by_politician(None, bioguide_id="C001123", asof=ASOF)
+    assert items[0].quality == "failed"
+
+
+def test_symbols_from_congress_items_dedupes_across_rows():
+    raw = {"symbol": "", "bioguide_id": "C001123", "trades": [
+        {"symbol": "DSGX", "transaction_type": "BUY"},
+        {"symbol": "DSGX", "transaction_type": "SELL"},
+        {"symbol": "TXRH", "transaction_type": "BUY"},
+    ]}
+    items = RS.congress_trade_items_by_politician(raw, bioguide_id="C001123", asof=ASOF)
+    assert RS.symbols_from_congress_items(items) == ["DSGX", "TXRH"]
+
+
+# ----------------------------------------------------------- universe funnel
+
+def test_universe_funnel_reports_source_counts_and_final_size():
+    out = RS.universe_funnel(held_symbols=["OXY", "SGOV"], watchlist_symbols=["XOM"],
+                             top_movers=["NVDA"], screener_symbols=["CVX"],
+                             congress_discovered=["DSGX"])
+    assert out["source_counts"] == {"held": 2, "watchlist": 1, "top_movers": 1,
+                                     "screener": 1, "congress_discovered": 1}
+    assert out["universe_size"] == 6
+
+
+def test_universe_funnel_deduplicates_overlapping_sources():
+    out = RS.universe_funnel(held_symbols=["OXY"], watchlist_symbols=["OXY"],
+                             screener_symbols=["OXY"])
+    assert out["universe_size"] == 1
 
 
 def test_top_movers_symbols_flattens_the_real_response():
