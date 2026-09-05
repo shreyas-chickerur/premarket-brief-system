@@ -752,7 +752,24 @@ STAGE_TIMING_BUDGETS_MS = {
     "preflight": 180_000,          # Stage 0
     "evidence_review": 10_000,    # Stage 0.5
     "prior_day_review": 5_000,    # Stage 0.6
-    "gather": 120_000,            # Stage 1 -- the most external calls by far
+    # 120s was set before the candidate universe was widened (real scanner,
+    # congressional discovery) and before NEWS_SENTIMENT was fixed to fetch
+    # strictly sequentially -- both correct changes that, multiplied
+    # together, made this stage's real cost scale with however large the
+    # eligible universe happened to be, with no cap. `research.researched_set`
+    # (5 September 2026) bounds it back down to `DEFAULT_RESEARCH_SET_CEILING`
+    # (40) symbols; ~25s/researched-symbol was observed in a real run before
+    # the ceiling existed (~620s for ~25 symbols), and a live rehearsal the
+    # same day independently timed three real sequential NEWS_SENTIMENT
+    # calls at roughly 7-9s each, consistent with that per-symbol figure
+    # once the other four per-symbol feeds (price, congress, insider,
+    # put/call) are added in. 40 symbols x ~25s, plus the fixed cost of the
+    # bulk calls (EARNINGS_CALENDAR, the screener scan, per-tracked-member
+    # congressional discovery) this stage also makes once per run regardless
+    # of researched-set size, lands near 1,100s -- 1,800,000ms (30 minutes)
+    # is a budget with real headroom over that, not a number picked to stop
+    # tripping the check -- see PROCEDURE_RATIONALE.md, 5 September 2026.
+    "gather": 1_800_000,           # Stage 1 -- the most external calls by far
     "measure": 30_000,            # Stage 2
     "gate": 5_000,                # Stage 3 -- pure computation, no external calls
     "individual_account": 15_000, # Stage 4

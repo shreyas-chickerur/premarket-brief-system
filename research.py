@@ -60,7 +60,7 @@ import csv
 import io
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional, Sequence
 
 QUALITY = ("ok", "thin", "degraded", "failed")
@@ -390,11 +390,94 @@ def congress_trade_items_by_politician(raw: Optional[dict], *, bioguide_id: str,
     return out
 
 
+CONGRESS_DISCOVERY_RECENCY_DAYS = 90
+CONGRESS_DISCOVERY_MIN_AMOUNT = 15000
+
+
+def recent_congress_items(items: Sequence["ResearchItem"], *, asof: str,
+                          window_days: int = CONGRESS_DISCOVERY_RECENCY_DAYS,
+                          min_amount: float = CONGRESS_DISCOVERY_MIN_AMOUNT
+                          ) -> list["ResearchItem"]:
+    """`congress_trade` items disclosed within `window_days` of `asof`, at
+    or above `min_amount` -- the recency/materiality bound discovery lacked
+    entirely until 5 September 2026. `congress_trade_items_by_politician`
+    returns a member's ENTIRE disclosed history (no date-range parameter
+    exists on `CONGRESS_TRADES`); one real bioguide_id returned 2,248
+    trades spanning years, and without this filter a purchase from years
+    ago became a candidate on equal footing with one disclosed last week.
+
+    90 days is wide enough to survive Congress's own disclosure filing lag
+    (members have up to 45 days to report a transaction under the STOCK
+    Act) without discarding a trade that is, in practice, still recent --
+    this is a materially different concept from
+    `ledger.CONGRESS_DISCOVERY_HORIZON_DAYS` (how often to re-pull a
+    member's history, currently weekly), not a stand-in for it.
+    `$15,000` is the floor of the smallest disclosure bracket
+    (`$1,001-$15,000`) Congress uses; excluding it keeps a member's
+    smallest, least-informative disclosures from diluting a real signal.
+    This deliberately does NOT require a second disclosure before a symbol
+    counts -- doing so would throw away the freshest possible signal (the
+    first, most recent disclosure) in exchange for a multiplicity test that
+    `researched_set`'s recency-weighted ranking is already better
+    positioned to handle: a single very recent, above-floor disclosure
+    ranks ahead of an old one regardless, without needing to be discarded
+    outright while it is still the only one on file.
+
+    A row with no `transaction_date`, an unparseable one, or no
+    `amount_min` is dropped -- silently passing an unbounded item through
+    would defeat the entire point of this filter."""
+    asof_date = date.fromisoformat(asof[:10])
+    floor_date = asof_date - timedelta(days=window_days)
+    out = []
+    for i in items:
+        if i.channel != "congress_trade" or not i.usable:
+            continue
+        v = i.value or {}
+        txn_date = v.get("transaction_date")
+        if not txn_date:
+            continue
+        try:
+            d = date.fromisoformat(str(txn_date)[:10])
+        except ValueError:
+            continue
+        if d < floor_date or d > asof_date:
+            continue
+        try:
+            amount = float(v.get("amount_min"))
+        except (TypeError, ValueError):
+            continue
+        if amount < min_amount:
+            continue
+        out.append(i)
+    return out
+
+
+def most_recent_congress_activity(items: Sequence["ResearchItem"]) -> dict[str, str]:
+    """Latest disclosed `transaction_date` per symbol, from congress-trade
+    items already fetched -- the recency signal `researched_set`'s tier 3
+    ranks non-catalyst candidates by. No extra call: this reads a field
+    `congress_trade_items`/`congress_trade_items_by_politician` already
+    attach to every item. Callers should pass `recent_congress_items`'
+    output here, not the raw unfiltered items -- this function itself does
+    not apply any recency or amount bound of its own."""
+    out: dict[str, str] = {}
+    for i in items:
+        if i.channel != "congress_trade" or not i.usable or not i.symbol:
+            continue
+        d = (i.value or {}).get("transaction_date")
+        if not d:
+            continue
+        if i.symbol not in out or d > out[i.symbol]:
+            out[i.symbol] = d
+    return out
+
+
 def symbols_from_congress_items(items: Sequence["ResearchItem"]) -> list[str]:
     """Unique symbols discovered across a set of (typically bioguide_id-keyed)
     congress-trade items -- what gets fed into `candidates()`'s
     `congress_discovered` and, when caching, into a `congress-discovery-cache`
-    row's `symbols`."""
+    row's `symbols`. Callers should pass `recent_congress_items`' output
+    here, not raw unfiltered items -- see its docstring for why."""
     return sorted({i.symbol for i in items if i.channel == "congress_trade" and i.usable and i.symbol})
 
 
@@ -475,6 +558,159 @@ def universe_funnel(*, held_symbols: Sequence[str],
     return {
         "source_counts": {k: len(v) for k, v in sources.items()},
         "universe_size": len(universe),
+    }
+
+
+# --------------------------------------------------------------------------
+# the researched set -- a budget, not a second gate
+# --------------------------------------------------------------------------
+
+CANDIDATE_CATALYST_HORIZON_DAYS = 21
+
+DEFAULT_RESEARCH_SET_CEILING = 40
+
+
+def symbols_with_dated_catalyst(raw: Optional[dict], *, symbols: Sequence[str],
+                                asof: str,
+                                horizon_days: int = CANDIDATE_CATALYST_HORIZON_DAYS
+                                ) -> dict[str, str]:
+    """Which of `symbols` report earnings within `horizon_days` of `asof`,
+    read from the SAME bulk `EARNINGS_CALENDAR` pull `earnings_calendar_items`
+    already parses -- no extra call. `EARNINGS_CALENDAR` returns every
+    symbol reporting in its own lookback window regardless of what this
+    system holds or is considering; `earnings_calendar_items` narrows that
+    to `held_or_candidate` for the news brief, and this function narrows it
+    the same way for a DIFFERENT purpose -- ranking the wider eligible
+    universe (hundreds of names, not just held-or-candidate) by whether
+    each one has a reason to be researched today at all.
+
+    Returns `{symbol: report_date}` (ISO date strings), only for dates
+    that parse and fall within `[asof, asof + horizon_days]`. A row with a
+    missing or unparseable `reportDate` is simply absent, not defaulted --
+    the five-condition gate's first condition requires a named catalyst
+    WITH a date, so a symbol this function cannot date is not, in fact, a
+    dated-catalyst candidate.
+    """
+    if not raw:
+        return {}
+    watch = {s.upper() for s in symbols}
+    asof_date = date.fromisoformat(asof[:10])
+    cutoff = asof_date + timedelta(days=horizon_days)
+    rows = _parse_av_csv_result(raw, "EARNINGS_CALENDAR")
+    out: dict[str, str] = {}
+    for row in rows:
+        sym = str(row.get("symbol", "")).upper()
+        if sym not in watch:
+            continue
+        report_date = row.get("reportDate")
+        try:
+            d = date.fromisoformat(str(report_date)[:10])
+        except (TypeError, ValueError):
+            continue
+        if asof_date <= d <= cutoff:
+            if sym not in out or report_date < out[sym]:
+                out[sym] = report_date
+    return out
+
+
+def researched_set(*, held_symbols: Sequence[str], eligible_symbols: Sequence[str],
+                   catalyst_dates: Optional[dict[str, str]] = None,
+                   congress_recency: Optional[dict[str, str]] = None,
+                   liquidity_by_symbol: Optional[dict[str, float]] = None,
+                   ceiling: int = DEFAULT_RESEARCH_SET_CEILING) -> dict:
+    """The bounded subset of `eligible_symbols` Stage 1 actually spends
+    calls researching today -- separate from `candidates()`'s much larger
+    eligible universe, which is a filter result (hundreds of names), not a
+    resource budget.
+
+    Added 5 September 2026, after widening the candidate universe to
+    include a real scanner (hundreds of matches) and congressional
+    discovery (thousands of trades across the tracked set) turned Stage 1's
+    "every feed, every held-or-candidate symbol" instruction into an
+    unbounded, uncapped cost -- roughly 25s of wall-clock time per
+    researched symbol observed in a real rehearsal (~620s for ~25 symbols,
+    with `NEWS_SENTIMENT` deliberately serialised per
+    `PROCEDURE_RATIONALE.md`), which an eligible universe in the hundreds
+    would turn into a run that cannot finish before the market opens or
+    before the watchdog's own 60-minute limit fires.
+
+    **The ranking is a resource cutoff, never a second gate.** Ordering by
+    "how attractive a name looks" would smuggle investment judgment into
+    what is supposed to be a budget decision -- the actual gate is Stage
+    3's five conditions, applied uniformly to whatever made it into today's
+    researched set. The order here is instead driven by the gate's own
+    first condition: a named catalyst WITH a date. A name with no dated
+    catalyst in the horizon cannot clear the gate today no matter how much
+    research it gets, so spending a research budget on it first is waste,
+    not rigour. In priority order:
+
+    1. Every symbol in `held_symbols`, unconditionally -- a held position
+       is never a budget decision, regardless of how large `held_symbols`
+       is relative to `ceiling`.
+    2. Symbols in `catalyst_dates` (see `symbols_with_dated_catalyst`),
+       soonest report date first -- the nearer a dated catalyst, the more
+       actionable researching it today actually is.
+    3. Symbols in `congress_recency` (see `most_recent_congress_activity`,
+       fed `recent_congress_items`' already-bounded output) not already
+       selected above, most recent disclosure first. Insider-activity
+       recency is NOT included here: unlike congressional discovery,
+       `INSIDER_TRANSACTIONS` has no bulk, symbol-agnostic pull -- knowing
+       whether a candidate outside `held_symbols` has recent insider
+       activity would require calling it per symbol, which is exactly the
+       cost this ceiling exists to avoid spending before the researched set
+       is even decided. This is stated here rather than silently
+       pretending the tier considers a signal it cannot actually see.
+    4. Everything else, ranked by `liquidity_by_symbol` (see
+       `screener.parse_scan_result`'s `avg_volume`) descending, as the
+       tiebreak the gate itself is silent on.
+
+    Returns `{"researched": [...], "eligible_count":, "researched_count":,
+    "cut_for_budget":, "tiers": {"held":, "dated_catalyst":,
+    "congress_recency":, "liquidity":}}` -- `cut_for_budget` is the number
+    that belongs in System health next to `universe_funnel`'s counts: if it
+    is large every day, the ceiling is wrong, and that should be visible
+    rather than guessed at.
+    """
+    catalyst_dates = catalyst_dates or {}
+    congress_recency = congress_recency or {}
+    liquidity_by_symbol = liquidity_by_symbol or {}
+
+    held = sorted({s.upper() for s in held_symbols})
+    held_set = set(held)
+    eligible = sorted({s.upper() for s in eligible_symbols} | held_set)
+    remaining = [s for s in eligible if s not in held_set]
+
+    catalyst_tier = sorted((s for s in remaining if s in catalyst_dates),
+                          key=lambda s: (catalyst_dates[s], s))
+    catalyst_set = set(catalyst_tier)
+
+    congress_tier = sorted((s for s in remaining if s in congress_recency and s not in catalyst_set),
+                          key=lambda s: (congress_recency[s], s), reverse=True)
+    congress_set = set(congress_tier)
+
+    already = held_set | catalyst_set | congress_set
+    liquidity_tier = sorted((s for s in remaining if s not in already),
+                           key=lambda s: (liquidity_by_symbol.get(s, 0.0), s), reverse=True)
+
+    budget = max(ceiling - len(held), 0)
+    catalyst_kept = catalyst_tier[:budget]
+    budget -= len(catalyst_kept)
+    congress_kept = congress_tier[:budget]
+    budget -= len(congress_kept)
+    liquidity_kept = liquidity_tier[:budget]
+
+    researched = held + catalyst_kept + congress_kept + liquidity_kept
+    return {
+        "researched": researched,
+        "eligible_count": len(eligible),
+        "researched_count": len(researched),
+        "cut_for_budget": max(len(eligible) - len(researched), 0),
+        "tiers": {
+            "held": held,
+            "dated_catalyst": catalyst_kept,
+            "congress_recency": congress_kept,
+            "liquidity": liquidity_kept,
+        },
     }
 
 

@@ -106,8 +106,10 @@ def test_parse_scan_result_parses_the_real_recorded_response():
     raw = _load("run_scan_core_universe_v1_20260905.json")
     out = S.parse_scan_result(raw)
     assert len(out) == 5
-    assert out[0] == {"symbol": "AMBP", "last": 5.01, "sector_code": "102"}
+    assert out[0] == {"symbol": "AMBP", "last": 5.01, "avg_volume": 2384658.316207,
+                      "sector_code": "102"}
     assert all(r["last"] >= 5.0 for r in out)
+    assert all(r["avg_volume"] > 500000 for r in out)
 
 
 def test_parse_scan_result_empty_on_none():
@@ -122,7 +124,14 @@ def test_parse_scan_result_drops_a_row_with_no_ticker():
 def test_parse_scan_result_drops_an_uncastable_last_rather_than_crashing():
     raw = {"results": [{"ticker": "XYZ", "columns": {"Last": "not_a_number"}}]}
     out = S.parse_scan_result(raw)
-    assert out == [{"symbol": "XYZ", "last": None, "sector_code": None}]
+    assert out == [{"symbol": "XYZ", "last": None, "avg_volume": None, "sector_code": None}]
+
+
+def test_parse_scan_result_drops_an_uncastable_avg_volume_rather_than_crashing():
+    raw = {"results": [{"ticker": "XYZ",
+                        "columns": {"Last": "10.0", "Average volume": "not_a_number"}}]}
+    out = S.parse_scan_result(raw)
+    assert out == [{"symbol": "XYZ", "last": 10.0, "avg_volume": None, "sector_code": None}]
 
 
 def test_parse_scan_result_uppercases_symbols():

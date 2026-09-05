@@ -274,6 +274,77 @@ def test_symbols_from_congress_items_dedupes_across_rows():
     assert RS.symbols_from_congress_items(items) == ["DSGX", "TXRH"]
 
 
+# ------------------------------------------------- congress recency bound
+
+def _congress_item(symbol, *, transaction_date, amount_min=50000):
+    return RS.ResearchItem(
+        channel="congress_trade", symbol=symbol,
+        mechanism=f"a member disclosed a trade in {symbol}",
+        value={"politician": "test", "bioguide_id": "C000000",
+              "transaction_type": "BUY", "amount_min": amount_min,
+              "amount_max": amount_min * 2, "transaction_date": transaction_date},
+        source="Alpha Vantage CONGRESS_TRADES", asof=ASOF, quality="ok")
+
+
+def test_recent_congress_items_keeps_a_disclosure_inside_the_window():
+    items = [_congress_item("DSGX", transaction_date="2026-08-20")]
+    out = RS.recent_congress_items(items, asof="2026-09-04")
+    assert [i.symbol for i in out] == ["DSGX"]
+
+
+def test_recent_congress_items_drops_a_disclosure_outside_the_window():
+    """The real finding this guards against: one bioguide_id returned 2,248
+    trades spanning years -- a 2021 purchase must not count as fresh."""
+    items = [_congress_item("TXRH", transaction_date="2021-03-01")]
+    assert RS.recent_congress_items(items, asof="2026-09-04") == []
+
+
+def test_recent_congress_items_boundary_is_inclusive():
+    items = [_congress_item("DSGX", transaction_date="2026-06-06")]  # exactly 90 days before
+    out = RS.recent_congress_items(items, asof="2026-09-04", window_days=90)
+    assert [i.symbol for i in out] == ["DSGX"]
+
+
+def test_recent_congress_items_drops_a_disclosure_one_day_past_the_boundary():
+    items = [_congress_item("DSGX", transaction_date="2026-06-05")]
+    assert RS.recent_congress_items(items, asof="2026-09-04", window_days=90) == []
+
+
+def test_recent_congress_items_drops_below_the_minimum_amount():
+    items = [_congress_item("DSGX", transaction_date="2026-08-20", amount_min=1001)]
+    assert RS.recent_congress_items(items, asof="2026-09-04", min_amount=15000) == []
+
+
+def test_recent_congress_items_keeps_at_the_minimum_amount():
+    items = [_congress_item("DSGX", transaction_date="2026-08-20", amount_min=15000)]
+    out = RS.recent_congress_items(items, asof="2026-09-04", min_amount=15000)
+    assert [i.symbol for i in out] == ["DSGX"]
+
+
+def test_recent_congress_items_drops_a_row_with_no_transaction_date():
+    item = RS.ResearchItem(channel="congress_trade", symbol="DSGX", mechanism="m",
+                           value={"amount_min": 50000}, source="s", asof=ASOF, quality="ok")
+    assert RS.recent_congress_items([item], asof="2026-09-04") == []
+
+
+def test_recent_congress_items_ignores_a_failed_item():
+    item = RS.ResearchItem(channel="congress_trade", symbol="DSGX", mechanism="",
+                           value=None, source="s", asof=ASOF, quality="failed")
+    assert RS.recent_congress_items([item], asof="2026-09-04") == []
+
+
+def test_most_recent_congress_activity_keeps_the_latest_date_per_symbol():
+    items = [_congress_item("DSGX", transaction_date="2026-07-01"),
+            _congress_item("DSGX", transaction_date="2026-08-20"),
+            _congress_item("TXRH", transaction_date="2026-08-01")]
+    out = RS.most_recent_congress_activity(items)
+    assert out == {"DSGX": "2026-08-20", "TXRH": "2026-08-01"}
+
+
+def test_most_recent_congress_activity_empty_for_no_items():
+    assert RS.most_recent_congress_activity([]) == {}
+
+
 # ----------------------------------------------------------- universe funnel
 
 def test_universe_funnel_reports_source_counts_and_final_size():
@@ -289,6 +360,119 @@ def test_universe_funnel_deduplicates_overlapping_sources():
     out = RS.universe_funnel(held_symbols=["OXY"], watchlist_symbols=["OXY"],
                              screener_symbols=["OXY"])
     assert out["universe_size"] == 1
+
+
+# --------------------------------------------------- symbols_with_dated_catalyst
+
+def _earnings_raw(rows):
+    header = "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay"
+    lines = [header] + [f"{s},NAME,{d},2026-09-30,1.0,USD," for s, d in rows]
+    return {"result": "\r\n".join(lines) + "\r\n"}
+
+
+def test_symbols_with_dated_catalyst_parses_the_real_fixture():
+    """Real AAPL fixture reports 2026-10-29 -- 55 days after this ASOF, so
+    it needs a horizon wide enough to see it; this is the same real
+    CSV-wrapped shape earnings_calendar_items already parses, read for a
+    different purpose (ranking the wider eligible universe, not just
+    held-or-candidate)."""
+    raw = _load("earnings_calendar_aapl.json")
+    out = RS.symbols_with_dated_catalyst(raw, symbols=["AAPL"], asof="2026-09-04",
+                                         horizon_days=60)
+    assert out == {"AAPL": "2026-10-29"}
+
+
+def test_symbols_with_dated_catalyst_excludes_outside_the_horizon():
+    raw = _earnings_raw([("AAPL", "2026-10-29")])
+    out = RS.symbols_with_dated_catalyst(raw, symbols=["AAPL"], asof="2026-09-04",
+                                         horizon_days=21)
+    assert out == {}
+
+
+def test_symbols_with_dated_catalyst_boundary_is_inclusive():
+    raw = _earnings_raw([("AAPL", "2026-09-25")])  # exactly 21 days out
+    out = RS.symbols_with_dated_catalyst(raw, symbols=["AAPL"], asof="2026-09-04",
+                                         horizon_days=21)
+    assert out == {"AAPL": "2026-09-25"}
+
+
+def test_symbols_with_dated_catalyst_filters_to_the_eligible_set():
+    raw = _earnings_raw([("AAPL", "2026-09-10"), ("MSFT", "2026-09-10")])
+    out = RS.symbols_with_dated_catalyst(raw, symbols=["AAPL"], asof="2026-09-04")
+    assert out == {"AAPL": "2026-09-10"}
+
+
+def test_symbols_with_dated_catalyst_drops_unparseable_dates():
+    raw = _earnings_raw([("AAPL", "not-a-date")])
+    assert RS.symbols_with_dated_catalyst(raw, symbols=["AAPL"], asof="2026-09-04") == {}
+
+
+def test_symbols_with_dated_catalyst_empty_for_no_response():
+    assert RS.symbols_with_dated_catalyst(None, symbols=["AAPL"], asof="2026-09-04") == {}
+
+
+# ----------------------------------------------------------- researched_set
+
+def test_researched_set_always_keeps_every_held_symbol():
+    out = RS.researched_set(held_symbols=["OXY", "XOM"], eligible_symbols=["OXY", "XOM", "CVX"],
+                            ceiling=1)
+    assert set(out["researched"]) >= {"OXY", "XOM"}
+    assert out["tiers"]["held"] == ["OXY", "XOM"]
+
+
+def test_researched_set_prioritises_dated_catalyst_over_congress_over_liquidity():
+    out = RS.researched_set(
+        held_symbols=[],
+        eligible_symbols=["CATA", "CONG", "LIQA", "LIQB"],
+        catalyst_dates={"CATA": "2026-09-10"},
+        congress_recency={"CONG": "2026-09-01"},
+        liquidity_by_symbol={"LIQA": 100.0, "LIQB": 50.0},
+        ceiling=2)
+    assert out["researched"] == ["CATA", "CONG"]
+    assert out["tiers"] == {"held": [], "dated_catalyst": ["CATA"],
+                            "congress_recency": ["CONG"], "liquidity": []}
+
+
+def test_researched_set_liquidity_tiebreak_ranks_higher_volume_first():
+    out = RS.researched_set(held_symbols=[], eligible_symbols=["LIQA", "LIQB"],
+                            liquidity_by_symbol={"LIQA": 100.0, "LIQB": 500.0}, ceiling=1)
+    assert out["researched"] == ["LIQB"]
+
+
+def test_researched_set_a_catalyst_symbol_is_not_double_counted_in_congress_tier():
+    out = RS.researched_set(held_symbols=[], eligible_symbols=["BOTH"],
+                            catalyst_dates={"BOTH": "2026-09-10"},
+                            congress_recency={"BOTH": "2026-09-01"}, ceiling=5)
+    assert out["tiers"]["dated_catalyst"] == ["BOTH"]
+    assert out["tiers"]["congress_recency"] == []
+
+
+def test_researched_set_reports_eligible_researched_and_cut_for_budget():
+    out = RS.researched_set(held_symbols=["A"], eligible_symbols=["A", "B", "C", "D"], ceiling=2)
+    assert out["eligible_count"] == 4
+    assert out["researched_count"] == 2
+    assert out["cut_for_budget"] == 2
+
+
+def test_researched_set_no_cut_when_ceiling_covers_everything():
+    out = RS.researched_set(held_symbols=["A"], eligible_symbols=["A", "B"], ceiling=10)
+    assert out["cut_for_budget"] == 0
+    assert out["researched_count"] == 2
+
+
+def test_researched_set_held_count_exceeding_ceiling_is_never_truncated():
+    """Held positions are a standing obligation, not a budget decision --
+    if there are more of them than the ceiling, every one is still
+    researched and the ceiling is exceeded, not the other way around."""
+    out = RS.researched_set(held_symbols=["A", "B", "C"], eligible_symbols=["A", "B", "C", "D"],
+                            ceiling=1)
+    assert set(out["researched"]) == {"A", "B", "C"}
+    assert out["researched_count"] == 3
+
+
+def test_researched_set_default_ceiling_is_the_documented_constant():
+    out = RS.researched_set(held_symbols=[], eligible_symbols=[f"S{i}" for i in range(100)])
+    assert out["researched_count"] == RS.DEFAULT_RESEARCH_SET_CEILING
 
 
 def test_top_movers_symbols_flattens_the_real_response():

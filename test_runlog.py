@@ -406,13 +406,14 @@ def test_healthy_history_raises_no_regressions():
 # ---------------------------------------------------------- stage timing budgets
 
 def test_stage_budget_overruns_flags_a_stage_over_its_budget():
-    stages = [{"name": "gather", "duration_ms": 130_000}]
+    over_ms = R.STAGE_TIMING_BUDGETS_MS["gather"] + 10_000
+    stages = [{"name": "gather", "duration_ms": over_ms}]
     out = R.stage_budget_overruns(stages)
     assert len(out) == 1
     assert out[0]["name"] == "gather"
-    assert out[0]["duration_ms"] == 130_000
+    assert out[0]["duration_ms"] == over_ms
     assert out[0]["budget_ms"] == R.STAGE_TIMING_BUDGETS_MS["gather"]
-    assert out[0]["over_by_ms"] == 130_000 - R.STAGE_TIMING_BUDGETS_MS["gather"]
+    assert out[0]["over_by_ms"] == 10_000
 
 
 def test_stage_budget_overruns_is_silent_when_every_stage_is_within_budget():
@@ -443,7 +444,7 @@ def test_stage_budget_overruns_supports_a_caller_supplied_budget_table():
 def test_stage_budget_overruns_flags_only_the_stages_actually_over():
     stages = [
         {"name": "preflight", "duration_ms": 1_000},   # well within budget
-        {"name": "gather", "duration_ms": 200_000},     # over
+        {"name": "gather", "duration_ms": R.STAGE_TIMING_BUDGETS_MS["gather"] + 1},  # over
         {"name": "gate", "duration_ms": 100},           # within budget
     ]
     out = R.stage_budget_overruns(stages)

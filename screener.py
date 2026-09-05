@@ -11,11 +11,14 @@ The Robinhood connector has carried a real screener the whole time
 `run_scan`, `get_scans`) that nothing in this repository had ever called.
 This module defines, in code, the filters that describe the universe this
 system is willing to consider -- not a list of tickers, a list of
-conditions a ticker must satisfy. A real scan (`PBS Core Universe v1`,
-scan_id `b0a6268e-2d60-4b26-8df9-80c00738d3e8`) was created from
-`CORE_UNIVERSE_FILTERS_V1` on 5 September 2026 and matched 397 real
-instruments; `fixtures/scanner/run_scan_core_universe_v1_20260905.json` is
-its actual, live `run_scan` response, not a hand-built fixture.
+conditions a ticker must satisfy. A real scan (`CORE_UNIVERSE_SCAN_TITLE`)
+was created from `CORE_UNIVERSE_FILTERS_V1` on 5 September 2026 and
+matched 397 real instruments; `fixtures/scanner/run_scan_core_universe_v1_20260905.json`
+is its actual, live `run_scan` response, not a hand-built fixture. **Its
+scan_id is not recorded in this repository** -- like an account number, it
+identifies a real object on a real account and lives only in
+`HANDOFF.private.md`'s config table (`state["config"]["screener_scan_id"]`);
+`get_scans` and match on `CORE_UNIVERSE_SCAN_TITLE` if it is ever lost.
 
 **Things this module deliberately does NOT do:**
 
@@ -196,13 +199,18 @@ def parse_scan_result(raw: Optional[dict]) -> list[dict]:
     actual recorded response this was built against.
 
     `columns` values arrive as strings (Robinhood's own numeric
-    formatting, not JSON numbers) -- `Last` is cast to float here; a value
-    that will not cast is dropped rather than crashing the whole scan, the
-    same "one bad row must not take down the rest" rule `research.py`'s
-    parsers already follow. `total_items` can exceed `len(results)` --
-    397 matched the live run that produced the fixture above, but
-    `run_scan` returned only the first 200 that morning, sorted by
-    whichever column `update_scan_config`'s `sorting_column` last set; a
+    formatting, not JSON numbers, and "Average volume" arrives in
+    scientific notation, e.g. `"2.384658316207e+06"`) -- `Last` and
+    `Average volume` are each cast to float here; a value that will not
+    cast is dropped rather than crashing the whole scan, the same "one bad
+    row must not take down the rest" rule `research.py`'s parsers already
+    follow. `avg_volume` exists so a caller building `research.researched_set`'s
+    liquidity tiebreak has it without a second call -- the scan already
+    filters on `FILTER_TYPE_AVERAGE_VOLUME`, so this is the same number the
+    scan itself used, not a new fetch. `total_items` can exceed
+    `len(results)` -- 397 matched the live run that produced the fixture
+    above, but `run_scan` returned only the first 200 that morning, sorted
+    by whichever column `update_scan_config`'s `sorting_column` last set; a
     scan sorted by `Last desc` returns the WRONG half for the agentic
     account's affordability question (its cheapest, most relevant matches
     would be in the unseen remainder) -- `PBS Core Universe v1` is kept
@@ -222,8 +230,13 @@ def parse_scan_result(raw: Optional[dict]) -> list[dict]:
             last = float(last) if last is not None else None
         except (TypeError, ValueError):
             last = None
+        avg_volume = cols.get("Average volume")
+        try:
+            avg_volume = float(avg_volume) if avg_volume is not None else None
+        except (TypeError, ValueError):
+            avg_volume = None
         out.append({"symbol": str(ticker).upper(), "last": last,
-                    "sector_code": cols.get("Sector")})
+                    "avg_volume": avg_volume, "sector_code": cols.get("Sector")})
     return out
 
 
