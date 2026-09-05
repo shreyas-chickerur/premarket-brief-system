@@ -1,6 +1,6 @@
 """Tests for the health, logging, and self-audit layer."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 import pytest
 
@@ -255,6 +255,96 @@ def test_journal_readability_check_runs_before_ledger_reconciliation():
                       broker_positions={"AAA": 3})
     assert "journal-2026-08-30.json" in log.abort_reason
     assert "BBB" not in log.abort_reason
+
+
+# ------------------------------------------------- washsale_registry_stable
+
+ASOF = date(2026, 9, 4)
+
+
+def test_no_previous_report_passes_trivially():
+    """The first run ever to record one, or a gap from before this schema
+    existed -- nothing to compare against yet."""
+    c = R.washsale_registry_stable({"asof": "2026-09-04", "blocked": {}}, None, asof=ASOF)
+    assert c.passed and c.severity == "block"
+
+
+def test_identical_registry_passes():
+    report = {"asof": "2026-09-03",
+              "blocked": {"XLE": {"severity": "block", "reason": "r",
+                                  "clears_on": "2026-09-27"}}}
+    c = R.washsale_registry_stable(report, report, asof=ASOF)
+    assert c.passed
+
+
+def test_regression_5_september_two_runs_same_fills_disagreeing_notes():
+    """The actual incident: a symbol still blocked as of the previous report,
+    not yet past its own clears_on date, silently missing from today's
+    registry rebuilt from the identical fills. This is the failure
+    HANDOFF.md section 11 already recorded once in a different shape -- a
+    registry that had forgotten a loss sale approved the repurchase that
+    disallowed it. Must be a blocking abort, not a quiet note."""
+    previous = {"asof": "2026-09-03", "blocked": {
+        "CMG": {"severity": "block", "reason": "r", "clears_on": "2026-09-27"},
+        "CRM": {"severity": "block", "reason": "r", "clears_on": "2026-09-24"},
+        "GLDM": {"severity": "block", "reason": "r", "clears_on": "2026-09-27"},
+        "MRVL": {"severity": "block", "reason": "r", "clears_on": "2026-09-24"},
+        "MU": {"severity": "block", "reason": "r", "clears_on": "2026-09-27"},
+        "TSLA": {"severity": "block", "reason": "r", "clears_on": "2026-09-26"},
+        "XLE": {"severity": "block", "reason": "r", "clears_on": "2026-09-27"},
+    }}
+    current = {"asof": "2026-09-04", "blocked": {
+        "GLDM": {"severity": "block", "reason": "r", "clears_on": "2026-09-27"},
+        "XLE": {"severity": "block", "reason": "r", "clears_on": "2026-09-27"},
+    }}
+    c = R.washsale_registry_stable(current, previous, asof=ASOF)
+    assert not c.passed and c.severity == "block"
+    for sym in ("CMG", "CRM", "MRVL", "MU", "TSLA"):
+        assert sym in c.value["unexplained"]
+        assert sym in c.detail
+
+
+def test_a_symbol_past_its_own_clears_on_is_not_flagged():
+    """Legitimate shrinkage: the window actually expired."""
+    previous = {"asof": "2026-09-03",
+                "blocked": {"MRVL": {"severity": "block", "reason": "r",
+                                     "clears_on": "2026-09-04"}}}
+    current = {"asof": "2026-09-04", "blocked": {}}
+    c = R.washsale_registry_stable(current, previous, asof=ASOF)
+    assert c.passed
+
+
+def test_a_symbol_not_yet_past_clears_on_is_flagged():
+    previous = {"asof": "2026-09-03",
+                "blocked": {"MRVL": {"severity": "block", "reason": "r",
+                                     "clears_on": "2026-09-05"}}}
+    current = {"asof": "2026-09-04", "blocked": {}}
+    c = R.washsale_registry_stable(current, previous, asof=ASOF)
+    assert not c.passed
+    assert c.value["unexplained"] == ["MRVL"]
+
+
+def test_a_new_block_since_last_report_is_never_flagged():
+    """Growth in the registry -- a fresh loss sale -- is expected and safe;
+    only unexplained shrinkage is a regression."""
+    previous = {"asof": "2026-09-03", "blocked": {}}
+    current = {"asof": "2026-09-04",
+               "blocked": {"NFLX": {"severity": "block", "reason": "r",
+                                    "clears_on": "2026-10-05"}}}
+    c = R.washsale_registry_stable(current, previous, asof=ASOF)
+    assert c.passed
+
+
+def test_a_dropped_proxy_warning_is_never_flagged():
+    """The IRS has not ruled on substantially-identical funds either way, so
+    a proxy warning appearing or disappearing is a judgment call, not
+    something a deterministic rebuild could get wrong."""
+    previous = {"asof": "2026-09-03",
+                "blocked": {"IAU": {"severity": "warn", "reason": "r",
+                                    "clears_on": "2026-09-27"}}}
+    current = {"asof": "2026-09-04", "blocked": {}}
+    c = R.washsale_registry_stable(current, previous, asof=ASOF)
+    assert c.passed
 
 
 # ---------------------------------------------------------------- regressions

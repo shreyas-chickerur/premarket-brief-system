@@ -540,3 +540,44 @@ trading (or, under the DRY RUN guard, simulate it) rather than waiting for
 tomorrow — a deliberate choice made 2 September 2026, trading a larger
 technical surface (two sessions instead of one holding the trading
 connector) for the ability to fix and finish the same day.
+
+## Stage 0 step 8 — why the wash-sale report is a pinned schema, not a note
+
+Discovered 5 September 2026, during a rehearsal that reran the real Stage 0
+directly against the real 870 fills both accounts had already produced that
+morning. The rehearsal's rebuild blocked seven symbols (CMG, CRM, GLDM,
+MRVL, MU, TSLA, XLE); that morning's own journal `"note"` entry named only
+two (GLDM, XLE). Read on its own, that looks exactly like the failure this
+system is built to prevent — `HANDOFF.md` section 11's registry that had
+forgotten a loss sale and approved the repurchase that disallowed it,
+recurring in a new shape.
+
+It was not that. Every one of the five missing symbols was re-verified
+directly against `washsale.Registry.blocked_symbols`, called on the actual
+fills, with each symbol's real split history fetched fresh (three of the
+five — MRVL, CRM, TSLA — had never been split-checked before because
+none of them are currently held, so no earlier run had reason to fetch
+their splits): all five came back genuine, unexpired loss sales, the
+registry itself never stopped blocking them. The run-manifest's own
+`washsale_registry_rebuilt` check confirmed it too, on both days: "870
+split-adjusted trades, both accounts, never read from storage" — no symbol
+list at all, block-severity, nothing more. The only place either day's
+blocked-symbol list existed anywhere was a free-form journal `"note"`
+entry, hand-composed by that morning's run for the email's benefit. One
+morning wrote out the complete list; the next, for whatever reason,
+wrote only the two names relevant to that day's actual candidates (GLDM
+was a held position being reconsidered, XLE a rejected one) and never
+mentioned the other five, who touched nothing decided that day.
+
+The registry was correct and identical both times. Nothing had ever
+required a run to log what it actually returned, so two truthful summaries
+of the same correct computation looked, side by side, like the computation
+disagreeing with itself — indistinguishable, from a Drive folder, from the
+real thing this file exists to guard against. `washsale.Registry.report`
+now IS the journal record (never a hand-typed summary of it), and
+`runlog.washsale_registry_stable` compares this run's report against the
+last one on file, block-severity only, exempting a symbol only if its OWN
+recorded `clears_on` date has actually passed — treating any other
+disappearance as the genuine, blocking regression it would be if it ever
+really happened. This mirrors `ledger.run_entry`'s existing fix for the
+identical shape of problem in run-history reporting.

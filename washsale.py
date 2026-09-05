@@ -189,6 +189,36 @@ class Registry:
                                   "clears_on": v.clears_on}
         return out
 
+    def report(self, asof: date) -> dict:
+        """The pinned, JSON-serialisable schema for a journal `washsale_report`
+        entry: the complete, real output of `blocked_symbols` for `asof`, and
+        nothing else.
+
+        This exists because nothing forced that output into the journal in any
+        checkable form before. `DAILY_PROCEDURE.md` said only to rebuild the
+        registry; the wash-sale summary a run wrote into its journal `"note"`
+        entry was hand-composed prose, and different days' runs wrote different
+        prose from the SAME correct computation -- one day naming every
+        currently-blocked symbol, another naming only the ones that mattered to
+        that day's candidates. A reader comparing the two prose notes sees what
+        looks like the registry disagreeing with itself. It never did; nothing
+        recorded what it actually returned. See PROCEDURE_RATIONALE.md,
+        5 September 2026, and `runlog.washsale_registry_stable`, which this
+        schema exists to feed.
+        """
+        blocked = self.blocked_symbols(asof)
+        return {
+            "asof": asof.isoformat(),
+            "blocked": {
+                sym: {
+                    "severity": v["severity"],
+                    "reason": v["reason"],
+                    "clears_on": v["clears_on"].isoformat() if v["clears_on"] else None,
+                }
+                for sym, v in blocked.items()
+            },
+        }
+
 
 def seed_from_positions(individual: Sequence[dict], agentic: Sequence[dict]) -> list[str]:
     """Names currently held at a loss in either account.

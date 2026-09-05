@@ -809,6 +809,36 @@ def test_a_second_trip_after_a_clear_is_standing_again():
     assert j.standing_circuit_breaker == {"reason": "second trip"}
 
 
+# ------------------------------------------------------ latest washsale report
+
+def test_no_washsale_report_entries_gives_none():
+    j = L.fold_journal([_file("journal-2026-09-01.json",
+                              [{"run_id": "a", "kind": "run", "payload": {}}])])
+    assert j.latest_washsale_report is None
+
+
+def test_latest_washsale_report_is_the_most_recent():
+    """Oldest-first fold means the last matching entry across ALL files is the
+    most recent run's actual registry output -- not a hand-written summary of
+    it (see washsale.Registry.report)."""
+    j = L.fold_journal([
+        _file("journal-2026-09-03.json", [
+            {"run_id": "a", "kind": "washsale_report",
+             "payload": {"asof": "2026-09-03", "blocked": {"XLE": {"severity": "block"}}}},
+        ]),
+        _file("journal-2026-09-04.json", [
+            {"run_id": "b", "kind": "washsale_report",
+             "payload": {"asof": "2026-09-04",
+                        "blocked": {"GLDM": {"severity": "block"},
+                                    "XLE": {"severity": "block"}}}},
+        ]),
+    ])
+    assert j.latest_washsale_report == {
+        "asof": "2026-09-04",
+        "blocked": {"GLDM": {"severity": "block"}, "XLE": {"severity": "block"}},
+    }
+
+
 # --------------------------------------------------------------------------
 # fills and splits caching -- never positions
 # --------------------------------------------------------------------------

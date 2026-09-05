@@ -558,6 +558,68 @@ def _reconcile(ledger: dict, broker: dict, tol: float = 1e-4) -> dict:
     return out
 
 
+def washsale_registry_stable(current: dict, previous: Optional[dict], *,
+                             asof: date) -> Check:
+    """Does this run's wash-sale registry agree with the last one that
+    recorded a report?
+
+    `current`/`previous` are `washsale.Registry.report(asof)` payloads (see
+    that method's docstring for why a structured report exists at all,
+    rather than a hand-composed journal note). A symbol dropping off the
+    blocked list is legitimate only if ITS OWN recorded `clears_on` date has
+    actually passed by `asof` -- anything else means the SAME broker fills,
+    run through the SAME deterministic registry code, produced a different
+    answer between two runs, which is exactly the failure this system exists
+    to make impossible. `HANDOFF.md` section 11 already recorded one
+    wash-sale miss that let a repurchase disallow a loss the registry had
+    simply forgotten; this is the check that makes a recurrence of that a
+    blocking abort rather than something two disagreeing prose summaries
+    quietly disagreed about (confirmed 5 September 2026: two runs on the same
+    fills produced blocked-symbol NOTES seven names apart; the registry
+    itself, re-run directly against those fills, agreed with the fuller one
+    both times -- nothing had ever forced the note to say what the code
+    actually returned).
+
+    A newly-blocked symbol (a loss sale that happened since `previous`) is
+    never flagged here -- growth in the registry is expected and safe; only
+    an unexplained SHRINKAGE is a regression. A proxy-`"warn"` entry dropping
+    is likewise not flagged: the IRS has not ruled on those either way, so a
+    warning appearing or disappearing is a judgment call, not the kind of
+    fact a deterministic rebuild could get wrong.
+
+    No previous report -- the first run ever to produce one, or a gap from
+    before this schema existed -- always passes; there is nothing to compare
+    against yet.
+    """
+    if not previous:
+        return Check("washsale_registry_stable", True, "block",
+                     "no prior washsale_report entry to compare against", value=None)
+
+    prev_blocked = previous.get("blocked", {})
+    cur_blocked = current.get("blocked", {})
+    today_iso = asof.isoformat()
+
+    unexplained = []
+    for sym, v in prev_blocked.items():
+        if v.get("severity") != "block":
+            continue
+        if sym in cur_blocked:
+            continue
+        clears_on = v.get("clears_on")
+        if clears_on and clears_on <= today_iso:
+            continue
+        unexplained.append(sym)
+    unexplained.sort()
+
+    passed = not unexplained
+    detail = ("agrees with the last recorded report" if passed else
+              f"{unexplained} were blocked as of {previous.get('asof')} (not yet past "
+              f"their clears_on) and are missing from today's registry, rebuilt from "
+              f"the same fills -- investigate before trusting any buy this run clears")
+    return Check("washsale_registry_stable", passed, "block", detail,
+                value={"unexplained": unexplained})
+
+
 def _regressions(history: Sequence[dict]) -> list[Check]:
     """Compare the recent record against itself and flag what is trending wrong."""
     checks: list[Check] = []

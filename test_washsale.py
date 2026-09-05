@@ -199,3 +199,44 @@ def test_seed_finds_positions_currently_underwater():
     assert "NFLX (individual)" in seeded
     assert "GLDM (agentic)" in seeded
     assert not any("NVDA" in s for s in seeded)
+
+
+# --------------------------------------------------------- registry.report()
+
+def test_report_matches_blocked_symbols_exactly():
+    """`report()` must be a pure re-shaping of `blocked_symbols()` -- same
+    symbols, same severities, same reasons, dates as ISO strings instead of
+    `date` objects. Regression case: 5 September 2026, two runs against the
+    identical 870 fills wrote wash-sale journal notes seven names apart
+    (CMG, CRM, GLDM, MRVL, MU, TSLA, XLE vs. just GLDM, XLE) because the
+    note was hand-composed prose, not this method's output. All five of the
+    symbols the narrower note dropped -- CMG, CRM, MRVL, MU, TSLA -- were
+    real, unexpired loss sales the registry itself never stopped blocking;
+    only the retelling of it varied. This pins `report()` so a future
+    caller has no hand-composed step left to vary."""
+    r = W.Registry([
+        loss_sale("CMG", "individual", TODAY - timedelta(days=19)),
+        loss_sale("CRM", "individual", TODAY - timedelta(days=22)),
+        loss_sale("GLDM", "agentic", TODAY - timedelta(days=19)),
+        loss_sale("MRVL", "individual", TODAY - timedelta(days=22)),
+        loss_sale("MU", "individual", TODAY - timedelta(days=19)),
+        loss_sale("TSLA", "individual", TODAY - timedelta(days=20)),
+        loss_sale("XLE", "agentic", TODAY - timedelta(days=19)),
+    ])
+    blocked = r.blocked_symbols(TODAY)
+    report = r.report(TODAY)
+
+    assert report["asof"] == TODAY.isoformat()
+    assert set(report["blocked"]) == set(blocked)
+    for sym, v in blocked.items():
+        assert report["blocked"][sym]["severity"] == v["severity"]
+        assert report["blocked"][sym]["reason"] == v["reason"]
+        assert report["blocked"][sym]["clears_on"] == v["clears_on"].isoformat()
+    # every block-severity symbol from the regression's narrower note is present
+    for sym in ("CMG", "CRM", "MRVL", "MU", "TSLA", "GLDM", "XLE"):
+        assert report["blocked"][sym]["severity"] == "block"
+
+
+def test_report_empty_registry():
+    r = W.Registry([])
+    assert r.report(TODAY) == {"asof": TODAY.isoformat(), "blocked": {}}

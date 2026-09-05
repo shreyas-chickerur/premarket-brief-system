@@ -743,6 +743,21 @@ class Journal:
             return None
         return latest.payload
 
+    @property
+    def latest_washsale_report(self) -> Optional[dict]:
+        """The most recent `washsale_report` entry's payload (see
+        `washsale.Registry.report`), or `None` if no run has ever recorded
+        one. `self.entries` is already folded oldest-first, so the last
+        matching entry is the most recent run's actual, complete
+        `blocked_symbols` output — not a hand-written summary of it. Feeds
+        `runlog.washsale_registry_stable`, which compares this run's fresh
+        report against it."""
+        latest = None
+        for e in self.entries:
+            if e.kind == "washsale_report":
+                latest = e
+        return latest.payload if latest is not None else None
+
     def open_theses(self, asof: date) -> list[dict]:
         """Theses whose horizon has not yet elapsed and which are not closed."""
         closed = {e.payload.get("thesis_id") for e in self.of_kind("close")}
