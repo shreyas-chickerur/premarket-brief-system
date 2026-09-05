@@ -670,3 +670,111 @@ checking splits for every symbol either has ever traded (~68-70 names, see
 180s gives headroom over both without being picked merely to stop the
 check from firing — the point of a budget is that crossing it means
 something, and 15s never let it.
+
+## Stage 1 — the screener uses enum filters only, and needed a price floor added after the fact
+
+Designed 5 September 2026, in response to the standing complaint that the
+five-condition gate looks strict mainly because almost nothing is being
+brought to it. `create_scan`'s and `update_scan_filters`' own docstrings
+reference `get_scanner_datapoints` and `preview_scan` as the way to build
+and sanity-check an expression filter (e.g. "price between what the
+agentic account can size and what `stop_plan` can size against," expressed
+directly rather than approximated by an enum range). Neither tool is
+actually callable this session — calling them returns nothing, not an
+error that could be handled. Rather than guess at an expression filter's
+syntax with no way to check it against real data, `screener.CORE_UNIVERSE_FILTERS_V1`
+uses only enum filters from the real, live `get_scanner_filter_specs`
+catalog (recorded verbatim in `fixtures/scanner/get_scanner_filter_specs_20260905.json`,
+not assumed from memory or from the tool's description text).
+
+That catalog does not include a price filter tight enough on its own:
+liquidity (`FILTER_TYPE_AVERAGE_VOLUME` > 500,000, 30-day) and volatility
+(`FILTER_TYPE_HISTORICAL_VOLATILITY` between 0.15 and 0.80) alone let
+sub-$0.35 names through — PASW at $0.12 among them, verified in the real
+`run_scan` results before the fix. A stock at that price is not a
+meaningfully sizeable idea for an account with a whole-share, position-cap
+sizing rule; it is noise that would have to be filtered by hand downstream
+every single day. `FILTER_TYPE_LAST > 5` was added afterward, once the
+unfiltered results made the gap visible, not designed in up front — the
+real result set is the thing that caught it, which is the same argument
+this project has made for every other "verify against a live call, not a
+docstring" decision in this file.
+
+The scan's default sort ("Last desc") was also wrong for this use case and
+caught the same way: `run_scan` caps results at 200 of the ~400 real
+matches, and sorting by price descending means the 200 THROWN AWAY are the
+cheap half — exactly the half relevant to "what can this account afford."
+`update_scan_config` re-sorts "Last asc" so the kept 200 are the affordable
+end.
+
+One real finding is recorded as unresolved rather than guessed at: the
+scan's `Sector` result column returns opaque numeric codes ("311", "206",
+...) with no decoding table exposed by any available tool. `screener.parse_scan_result`
+passes the code through raw as `sector_code` and does not attempt to map
+it — sector data for the sizing/exposure math instead comes from Alpha
+Vantage's `COMPANY_OVERVIEW`/`ETF_PROFILE`, which use real named sectors,
+not from this column. Decoding it is future work, not a blocking gap,
+because nothing downstream currently reads `sector_code`.
+
+## Stage 1 — congress-discovery: committee leadership was the wrong selection criterion, tried and reverted
+
+Designed 5 September 2026. `congress_trade_items`/`insider_transaction_items`
+can only ever CONFIRM a symbol already in `held_or_candidate` — they take a
+ticker and return trades in it, so they cannot widen the universe on their
+own. `CONGRESS_TRADES` separately accepts a `bioguide_id` and, given one,
+returns that member's entire disclosed trade history regardless of ticker —
+a genuine discovery path, but only if there is a principled way to choose
+whose `bioguide_id`s to track, since tracking all 1,144 members in
+`POLITICIAN_METADATA` daily is neither affordable nor a meaningful signal.
+
+The first criterion tried was financial-committee leadership — French
+Hill, Maxine Waters, Tim Scott, Elizabeth Warren — chosen for looking
+objective and politically neutral. Their real `bioguide_id`s were verified
+live against `POLITICIAN_METADATA` (H001072, W000187, S001184, W000817),
+then each was actually queried against `CONGRESS_TRADES`. All four came
+back with zero disclosed trades. This is very likely genuine — committee
+leadership in the chamber that regulates markets is exactly the position
+most likely to sit behind a blind trust — but a selection criterion that
+verifiably surfaces nothing is not a selection criterion, it is a dead
+end, and the fix was to change the criterion rather than keep it and hope
+a future run finds something.
+
+The replacement is data-driven rather than hand-picked: `bioguide_id` was
+added as a field on each `congress_trade_items` result (it was already in
+the raw API response and simply was not being kept), so any politician who
+has ALREADY disclosed a trade in a symbol this system already examines
+enters the tracked set automatically. This was verified against real data,
+not assumed to work: bioguide_id C001123 (Gilbert Cisneros, sourced from
+the real OXY fixture already on file) returned 2,248 real disclosed
+trades, including DSGX and TXRH — both symbols this project's
+`held_or_candidate` universe had never seen before that call. A hand-picked
+roster requires the roster-picker to already know who is worth tracking,
+which is the same "wasted research" problem as the price/volatility
+mismatch above; a set built from who has already shown up trading in this
+system's own universe needs no such guess and grows only as the universe
+itself grows.
+
+## Stage 0 — `diagnose()` distinguishes a lapsed brokerage token from a misconfigured connector
+
+Designed 5 September 2026. Both failure modes present identically today:
+`tools_available` fails because every Robinhood-prefixed tool is missing
+from the manifest. But the fix is completely different — a lapsed OAuth
+token needs the user to sign in again; a routine with connectors never
+attached needs a configuration change on the routine itself — and an
+operator reading a generic "tools not available" cause has no way to tell
+which one they are looking at without independently checking both.
+`_diagnose_tools_available` reuses the missing-tools list `tools_available`'s
+own check already populates and asks a narrow question: is every missing
+name Robinhood-prefixed? If so, name it as a token-expiry cause and
+remedy specifically; otherwise, keep the existing generic "connectors not
+attached" text, since a genuinely mixed missing-tools list means something
+broader than just the brokerage connection lapsed.
+
+This only helps after the fact, at the moment a run has already failed on
+it. `runlog.brokerage_token_health` (backed by `Journal.days_since_last_brokerage_success`,
+itself backed by the new `run_entry` field `brokerage_ok`) is the
+proactive half: the observed expiry window for this connector is roughly 4
+days (`HANDOFF.md` section 12), so a `warn`-severity System-health line
+fires once 3 days have passed since the last confirmed-successful
+brokerage call — a day of runway before the failure a same-day operator
+would otherwise discover only from a bounced run.
