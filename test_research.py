@@ -182,12 +182,20 @@ def test_weather_items_empty_for_no_mapped_symbols():
 # --------------------------------------------------------------- news (real fixtures)
 
 def test_news_from_alpha_vantage_parses_the_real_recorded_response():
+    """Fixture corrected 5 September 2026 to include the real `ticker_sentiment`
+    array -- the original capture predated the discovery that it exists, and
+    an earlier version of this test would have passed even with no filtering
+    on it at all. Article 2 is a ConocoPhillips story that names OXY only as a
+    lower-relevance secondary ticker; it is correctly kept, with that lower
+    relevance score carried through, not dropped just for being about a peer."""
     raw = _load("news_sentiment_oxy.json")
     items = RS.news_items_from_alpha_vantage(raw, symbol="OXY", asof=ASOF)
     assert len(items) == 2
     assert all(i.symbol == "OXY" and i.quality == "ok" for i in items)
     assert items[0].source == "Alpha Vantage NEWS_SENTIMENT"
     assert "Occidental" in items[0].value["title"]
+    assert items[0].value["relevance_score"] == pytest.approx(0.542931)
+    assert items[1].value["relevance_score"] == pytest.approx(0.091072)
 
 
 def test_news_from_alpha_vantage_fails_on_empty_feed():
@@ -198,6 +206,60 @@ def test_news_from_alpha_vantage_fails_on_empty_feed():
 def test_news_from_alpha_vantage_fails_on_none():
     items = RS.news_items_from_alpha_vantage(None, symbol="OXY", asof=ASOF)
     assert items[0].quality == "failed"
+
+
+def test_news_from_alpha_vantage_rejects_a_cross_wired_response():
+    """The 5 September 2026 regression: batched concurrent NEWS_SENTIMENT
+    calls for different tickers came back with each other's content --
+    real articles, real sentiment scores, wrong ticker entirely. This fixture
+    is what an XOM request actually returned that day: three articles, all
+    genuinely about gold/GLDM, none naming XOM in their own ticker_sentiment.
+    Silently returning them as XOM news would have fed fabricated
+    corroboration into the five-condition gate; the majority-mismatch must
+    surface as one failed item, not three that happen to be wrong."""
+    raw = _load("news_sentiment_cross_wired_xom.json")
+    items = RS.news_items_from_alpha_vantage(raw, symbol="XOM", asof=ASOF)
+    assert len(items) == 1
+    assert items[0].quality == "failed"
+    assert "cross-wired" in items[0].detail
+    assert items[0].value == {"total": 3, "matching": 0, "dropped": 3}
+
+
+def test_news_from_alpha_vantage_drops_a_minority_mismatch_quietly():
+    """A single article genuinely not about the requested symbol -- ordinary
+    Alpha Vantage tagging noise, not the batching bug -- is dropped and the
+    rest returned normally; this is not the majority-mismatch failure case."""
+    raw = {"feed": [
+        {"title": "OXY story", "time_published": "t1", "overall_sentiment_score": 0.1,
+         "overall_sentiment_label": "Neutral",
+         "ticker_sentiment": [{"ticker": "OXY", "relevance_score": "0.5"}]},
+        {"title": "Unrelated story", "time_published": "t2", "overall_sentiment_score": 0.2,
+         "overall_sentiment_label": "Neutral",
+         "ticker_sentiment": [{"ticker": "CVX", "relevance_score": "0.6"}]},
+    ]}
+    items = RS.news_items_from_alpha_vantage(raw, symbol="OXY", asof=ASOF)
+    assert len(items) == 1
+    assert items[0].quality == "ok" and items[0].value["title"] == "OXY story"
+
+
+def test_news_from_alpha_vantage_symbol_match_is_case_insensitive():
+    raw = {"feed": [
+        {"title": "story", "time_published": "t1", "overall_sentiment_score": 0.1,
+         "overall_sentiment_label": "Neutral",
+         "ticker_sentiment": [{"ticker": "oxy", "relevance_score": "0.5"}]},
+    ]}
+    items = RS.news_items_from_alpha_vantage(raw, symbol="OXY", asof=ASOF)
+    assert len(items) == 1 and items[0].quality == "ok"
+
+
+def test_news_from_alpha_vantage_missing_relevance_score_does_not_crash():
+    raw = {"feed": [
+        {"title": "story", "time_published": "t1", "overall_sentiment_score": 0.1,
+         "overall_sentiment_label": "Neutral",
+         "ticker_sentiment": [{"ticker": "OXY"}]},
+    ]}
+    items = RS.news_items_from_alpha_vantage(raw, symbol="OXY", asof=ASOF)
+    assert items[0].quality == "ok" and items[0].value["relevance_score"] is None
 
 
 def test_news_from_robinhood_parses_the_real_recorded_response():
@@ -447,6 +509,20 @@ def test_macro_item_failed_on_none():
     assert RS.macro_item("CPI", None, asof=ASOF).quality == "failed"
 
 
+def test_macro_item_handles_a_preview_envelope():
+    """5 September 2026: a macro channel requested with too wide a lookback
+    truncates to a preview envelope, which `_rows_from_series_response`
+    cannot distinguish from a genuine field-drift -- both used to raise the
+    identical ResearchShapeError. Must report degraded/truncated, not
+    'failed: neither data nor result', so the two causes stay distinguishable
+    in System health."""
+    fake_preview = {"preview": True, "total_lines": 9000, "full_data_tokens": 120000,
+                    "data_url": "https://example.test/x.json", "message": "truncated"}
+    item = RS.macro_item("TREASURY_YIELD", fake_preview, asof=ASOF)
+    assert item.quality == "degraded"
+    assert item.value["total_lines"] == 9000
+
+
 def test_every_documented_macro_channel_is_recognised():
     for channel in RS.MACRO_CHANNELS:
         item = RS.macro_item(channel, {"data": [{"date": "2026-01-01", "value": "1"}]}, asof=ASOF)
@@ -479,6 +555,18 @@ def test_commodity_items_only_for_exposed_symbols():
 def test_commodity_items_reports_failed_for_exposed_symbol_with_no_data():
     out = RS.commodity_items(["XOM"], {}, asof=ASOF)
     assert any(i.quality == "failed" for i in out)
+
+
+def test_commodity_items_handles_a_preview_envelope():
+    """Same reasoning as macro_item's preview test -- an oversized
+    commodity response must report degraded/truncated, not a generic
+    shape-error failure, so the two causes are distinguishable."""
+    fake_preview = {"preview": True, "total_lines": 9000, "full_data_tokens": 120000,
+                    "data_url": "https://example.test/x.json", "message": "truncated"}
+    out = RS.commodity_items(["XOM"], {"WTI": fake_preview}, asof=ASOF)
+    wti_item = [i for i in out if i.channel == "commodity:WTI"][0]
+    assert wti_item.quality == "degraded"
+    assert wti_item.symbol == "XOM"
 
 
 def test_commodity_items_isolates_a_shape_error_to_its_own_channel():

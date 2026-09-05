@@ -608,3 +608,32 @@ already at hand, which for a reconciliation task is positions. It is now
 `ledger.all_traded_symbols(fills)`: a symbol either account has ever traded
 enters the set the day it appears in a fill and never leaves it, closed
 position or not.
+
+## Stage 1 — `NEWS_SENTIMENT` fetched one symbol at a time, never batched
+
+Found 5 September 2026, during the same rehearsal as the wash-sale note
+above. Five `NEWS_SENTIMENT` calls, one per ticker (OXY, XOM, GLDM, AAPL,
+SGOV), were issued in a single parallel batch. Only the first (OXY) came
+back correctly filtered — fifty articles, all fifty naming OXY in their own
+`ticker_sentiment`. The other four came back real, well-formed, on-topic
+responses about a DIFFERENT ticker than the one requested: the "XOM" call
+returned 100% GLDM-tagged articles, the "GLDM" call returned AAPL articles,
+and so on. Retrying the identical four calls sequentially, one at a time,
+fixed all of them immediately.
+
+This is worse than a shape error. The source is real, the headline is real,
+every number in it traces to something — it is a fabrication path that
+reaches the five-condition gate's `two_sources` corroboration check and
+survives `verify_email` intact, because nothing about the article itself is
+false; only its attribution is. It is detectable at all only because every
+article carries its own `ticker_sentiment` array naming the tickers it is
+actually about, each with a `relevance_score` — a fact not previously used
+by this parser. `research.news_items_from_alpha_vantage` now filters on
+that field and fails loudly (one `quality="failed"` item, not a quietly
+shorter list) when most of a response's articles do not name the requested
+symbol. That filter is the second line of defence. The first, cheaper one
+is this rule: fetch `NEWS_SENTIMENT` one symbol per call, never batched —
+whatever causes the cross-wiring (almost certainly a parameter-binding or
+response-caching fault on the tool side, triggered by concurrent calls with
+different arguments) has no chance to fire if there is never more than one
+such call in flight.

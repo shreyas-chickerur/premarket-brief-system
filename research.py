@@ -366,24 +366,77 @@ def news_items_from_alpha_vantage(raw: Optional[dict], *, symbol: str,
     """`NEWS_SENTIMENT`, already fetched. Verified live, 4 September 2026,
     against a real OXY response -- `raw["feed"]`, and each entry's `title`,
     `overall_sentiment_score`, `overall_sentiment_label`, `time_published`,
-    all match exactly what this parser reads; no fix needed here. Note for
-    the caller: even a `limit=2` request has been observed to spill to a
-    file (77KB+) -- read it with `jq`, per `PROCEDURE_RATIONALE.md`."""
+    all match exactly what this parser reads. Note for the caller: even a
+    `limit=2` request has been observed to spill to a file (77KB+) -- read
+    it with `jq`, per `PROCEDURE_RATIONALE.md`.
+
+    **Filters on each article's own `ticker_sentiment`; never trusts that a
+    response fetched for `symbol` is actually about `symbol`.** Confirmed
+    live, 5 September 2026: fetching `NEWS_SENTIMENT` for several different
+    tickers in ONE PARALLEL BATCH of calls returned real, well-formed
+    responses whose content belonged to a DIFFERENT ticker than the one
+    requested -- a call for XOM came back 100% GLDM-tagged articles, a call
+    for GLDM came back AAPL articles, and so on for four of five concurrent
+    calls; only a fifth, made alone, came back correct. Nothing downstream
+    -- this parser as it stood, `verify_email`, a human reading the brief --
+    had any way to catch it: the source is real, the headline is real, and
+    any number quoted from it traces, which is exactly what makes it a
+    fabrication path that survives every guard built so far. It is
+    detectable at all only because every article carries its own
+    `ticker_sentiment` array naming the tickers it is actually about, each
+    with a `relevance_score`. An article is kept only if `symbol` appears in
+    its OWN `ticker_sentiment`, and the surviving items carry that
+    relevance score -- a name mentioned in passing alongside three others is
+    weaker corroboration than a name the article is centrally about, and the
+    five-condition gate's `corroborated()` check should be able to tell the
+    difference even though it does not weight by it yet. A response where
+    MOST articles fail this check is reported as one `quality="failed"` item
+    naming the cross-wiring, not a quietly shorter list -- indistinguishable
+    from a genuinely quiet day otherwise. See PROCEDURE_RATIONALE.md for why
+    the fix on the calling side is to fetch this endpoint sequentially, one
+    symbol per call, never batched -- this filter is the second line of
+    defence, not a replacement for that."""
     if not raw or not raw.get("feed"):
         return [ResearchItem(channel="news", symbol=symbol,
                              mechanism="no company/market news with sentiment retrieved",
                              value=None, source="Alpha Vantage NEWS_SENTIMENT",
                              asof=asof, quality="failed",
                              detail="empty or missing feed")]
+    sym = symbol.upper()
+    feed = raw["feed"]
+    kept: list[tuple[dict, Optional[float]]] = []
+    dropped = 0
+    for entry in feed:
+        match = next((t for t in entry.get("ticker_sentiment", ())
+                     if str(t.get("ticker", "")).upper() == sym), None)
+        if match is None:
+            dropped += 1
+            continue
+        try:
+            relevance = float(match.get("relevance_score"))
+        except (TypeError, ValueError):
+            relevance = None
+        kept.append((entry, relevance))
+
+    if dropped > len(feed) // 2:
+        return [ResearchItem(
+            channel="news", symbol=symbol, mechanism="",
+            value={"total": len(feed), "matching": len(kept), "dropped": dropped},
+            source="Alpha Vantage NEWS_SENTIMENT", asof=asof, quality="failed",
+            detail=(f"{dropped} of {len(feed)} articles returned for a {sym} request do not "
+                   f"name {sym} in their own ticker_sentiment -- this response is cross-wired "
+                   f"to a different ticker, not a quiet news day; do not use it"))]
+
     out = []
-    for entry in raw["feed"]:
+    for entry, relevance in kept:
         title = entry.get("title", "")
         sentiment = entry.get("overall_sentiment_score")
         out.append(ResearchItem(
             channel="news", symbol=symbol,
             mechanism=f"news item scored for sentiment toward {symbol}",
             value={"title": title, "sentiment_score": sentiment,
-                  "sentiment_label": entry.get("overall_sentiment_label")},
+                  "sentiment_label": entry.get("overall_sentiment_label"),
+                  "relevance_score": relevance},
             source="Alpha Vantage NEWS_SENTIMENT", asof=asof, quality="ok",
             detail=str(entry.get("time_published", ""))))
     return out
@@ -605,7 +658,17 @@ def macro_item(channel: str, raw: Optional[dict], *, asof: str) -> ResearchItem:
     `UNEMPLOYMENT` -- which also has a real malformed `"."` row --
     `NONFARM_PAYROLL`, `RETAIL_SALES`, `REAL_GDP`, `DURABLES`) on
     `datatype=json` (`{"data": [{"date":, "value":}]}`, see
-    `_rows_from_series_response`)."""
+    `_rows_from_series_response`).
+
+    **Checks for a preview envelope first.** Confirmed 5 September 2026: a
+    macro channel requested with a lookback wide enough to trigger the
+    harness's own oversized-response truncation comes back as a preview
+    envelope (`{"preview": true, ...}`, no `"data"`/`"result"` key), which
+    `_rows_from_series_response` cannot tell apart from a genuine field-name
+    drift — both raised the identical `ResearchShapeError`. `CONGRESS_TRADES`
+    and `INSIDER_TRANSACTIONS` already had this branch; macro and
+    commodities did not, so a caller who asked for too much history read a
+    truncation as a parser bug."""
     if channel not in MACRO_CHANNELS:
         raise ValueError(f"unrecognised macro channel: {channel!r}")
     if not raw:
@@ -613,6 +676,8 @@ def macro_item(channel: str, raw: Optional[dict], *, asof: str) -> ResearchItem:
                             mechanism=f"{channel} unavailable this run",
                             value=None, source=f"Alpha Vantage {channel}",
                             asof=asof, quality="failed")
+    if _is_preview_envelope(raw):
+        return _preview_item(f"macro:{channel}", None, f"Alpha Vantage {channel}", raw, asof)
     rows = _rows_from_series_response(raw, channel)
     if not rows:
         return ResearchItem(channel=f"macro:{channel}", symbol=None,
@@ -669,7 +734,13 @@ def commodity_items(symbols: Sequence[str], raw_by_channel: dict[str, Optional[d
     `SUGAR`, `COTTON`, `ALL_COMMODITIES`) were verified live 4 September
     2026 to share `WTI`'s `datatype=json` response family (see
     `_rows_from_series_response`). `GOLD_SILVER_SPOT` is not a series and
-    is parsed separately -- see `_gold_silver_spot_row`."""
+    is parsed separately -- see `_gold_silver_spot_row`.
+
+    **Checks for a preview envelope before parsing.** Same reasoning as
+    `macro_item`: an oversized commodity response truncates to a preview
+    envelope that `_rows_from_series_response` cannot distinguish from a
+    genuine shape drift, and the `ResearchShapeError` catch below would
+    otherwise report the correct symptom (failed) with the wrong cause."""
     out = []
     for sym in symbols:
         for channel in COMMODITY_EXPOSURE.get(sym.upper(), ()):
@@ -682,6 +753,10 @@ def commodity_items(symbols: Sequence[str], raw_by_channel: dict[str, Optional[d
                     mechanism=f"{sym} has {channel} exposure but the feed was unavailable",
                     value=None, source=f"Alpha Vantage {channel}",
                     asof=asof, quality="failed"))
+                continue
+            if _is_preview_envelope(raw):
+                out.append(_preview_item(f"commodity:{channel}", sym,
+                                         f"Alpha Vantage {channel}", raw, asof))
                 continue
             try:
                 if channel == "GOLD_SILVER_SPOT":
