@@ -131,6 +131,31 @@ def fills_from_orders(orders: Iterable[dict]) -> list[Fill]:
     return out
 
 
+def all_traded_symbols(fills: Sequence[Fill]) -> list[str]:
+    """Every unique symbol either account has EVER traded, current positions
+    or not -- the `all_symbols` `DAILY_PROCEDURE.md` Stage 0 step 7 names for
+    `symbols_needing_split_check`, built here in code instead of assembled by
+    whoever is running that morning.
+
+    A symbol sold down to zero drops out of `get_equity_positions` forever,
+    but its loss sale is exactly what the wash-sale registry still has to
+    reason about, and `cost_basis`/`loss_sales`/`to_washsale_trades` need its
+    fills split-adjusted just as much as a currently-held name's do -- the
+    registry does not stop caring about a position the day it closes.
+    Deriving this list from held positions instead of fills would silently
+    exclude every closed-out symbol from the split check. Confirmed 5
+    September 2026: a manual reconciliation built its split-check list from
+    held positions and missed MRVL, CRM, and TSLA (all fully sold, none held
+    that day) as a result -- see PROCEDURE_RATIONALE.md for the investigation
+    and for why the live production runs' own reported "68 symbols" figure
+    (close to `len(all_traded_symbols(...))`'s ~70, nowhere near the ~24 held
+    positions) is evidence, though not proof, that the daily runs themselves
+    had been deriving this correctly from fills all along. Either way,
+    nothing had ever pinned that derivation in code before this function.
+    """
+    return sorted({f.symbol.upper() for f in fills})
+
+
 # --------------------------------------------------------------------------
 # split adjustment
 # --------------------------------------------------------------------------

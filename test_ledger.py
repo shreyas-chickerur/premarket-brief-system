@@ -92,6 +92,32 @@ def test_fills_are_ordered_oldest_first(fills):
     assert [f.on for f in fills] == sorted(f.on for f in fills)
 
 
+def test_all_traded_symbols_includes_a_fully_closed_position(fills):
+    """The Stage 0 step 7 split-check list -- and, by the same reasoning, the
+    wash-sale registry's input -- must not be built from held positions.
+    XLE nets to zero here (see the test above) and would be silently
+    excluded by a positions-derived list, even though its own loss or gain
+    sale still needs its split history and still belongs to the registry.
+    Confirmed 5 September 2026: a positions-derived split-check list missed
+    MRVL, CRM, and TSLA -- all fully sold that day -- for exactly this
+    reason (see PROCEDURE_RATIONALE.md)."""
+    assert L.all_traded_symbols(fills) == ["GLDM", "SGOV", "VGSH", "XLE"]
+    assert "XLE" not in L.positions_from_fills(fills)  # closed, but still traded
+
+
+def test_all_traded_symbols_is_upper_cased_and_deduplicated():
+    mixed = [
+        L.Fill("nflx", "buy", 1.0, 100.0, date(2026, 1, 1), "a"),
+        L.Fill("NFLX", "sell", 1.0, 110.0, date(2026, 1, 5), "b"),
+        L.Fill("VTI", "buy", 1.0, 300.0, date(2026, 1, 2), "c"),
+    ]
+    assert L.all_traded_symbols(mixed) == ["NFLX", "VTI"]
+
+
+def test_all_traded_symbols_of_no_fills_is_empty():
+    assert L.all_traded_symbols([]) == []
+
+
 # ---------------------------------------------------------------- basis
 
 def test_cost_basis_tracks_fifo_lots(fills):

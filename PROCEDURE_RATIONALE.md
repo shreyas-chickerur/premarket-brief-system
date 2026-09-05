@@ -581,3 +581,30 @@ recorded `clears_on` date has actually passed — treating any other
 disappearance as the genuine, blocking regression it would be if it ever
 really happened. This mirrors `ledger.run_entry`'s existing fix for the
 identical shape of problem in run-history reporting.
+
+## Stage 0 step 7 — `all_symbols` is derived from fills, in code, not assembled
+
+Found while investigating the wash-sale note above, 5 September 2026. The
+manual reconciliation that surfaced the note's missing five symbols had
+itself built its split-check list from currently HELD positions (24
+symbols) rather than from the combined fill history (70 symbols) — and
+three of the five missing wash-sale symbols, MRVL, CRM, and TSLA, are
+exactly the ones that difference excludes: all fully sold, none held that
+day, all still needing their own split history for `cost_basis`,
+`loss_sales`, and the registry regardless.
+
+Whether the live daily runs themselves ever made the same mistake could not
+be settled directly — each morning's run is a fresh session with no
+persisted trace of how it built the list, only the final "SPLITS x68" call
+count. That count sits far closer to `all_traded_symbols`'s ~70 than to the
+~24 held positions across both accounts, which is real evidence the daily
+runs had been deriving it from fills correctly all along — but evidence
+from a call count is not the same guarantee as a function whose contract IS
+the correct set. `DAILY_PROCEDURE.md` step 7 previously described
+`all_symbols` only in prose ("every unique symbol across both accounts'
+combined fills") with no function that actually built it — an instruction
+a careful reader follows and a rushed one quietly narrows to whatever is
+already at hand, which for a reconciliation task is positions. It is now
+`ledger.all_traded_symbols(fills)`: a symbol either account has ever traded
+enters the set the day it appears in a fill and never leaves it, closed
+position or not.

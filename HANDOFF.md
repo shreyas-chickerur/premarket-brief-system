@@ -1698,6 +1698,16 @@ the check.
   it is a deliberate manual/occasional operation (not part of the daily
   routine), it may not be for some time — see section 11's 4 September
   entry.
+- **`runlog.washsale_registry_stable` has no teeth until the SECOND run
+  after it exists.** Same shape as the fills-cache entry above: no
+  `washsale_report` journal entry has ever been written to the real Drive
+  folder yet, so the first real run to build `registry.report(today)` folds
+  `journal.latest_washsale_report` and gets `None` — the check passes
+  trivially because there is nothing yet to compare against, by design (see
+  `washsale.Registry.report` and PROCEDURE_RATIONALE.md, 5 September 2026).
+  It starts actually protecting anything the run after that, once a real
+  `washsale_report` entry exists to fold. The mechanism exists; it has not
+  yet done the thing it exists to do.
 
 ## 13. Standing honesty rules
 
