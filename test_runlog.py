@@ -620,6 +620,90 @@ def test_closest_calls_ties_broken_by_input_order():
     assert [c["symbol"] for c in out] == ["FIRST", "SECOND"]
 
 
+# ---------------------------------------------------------------- gate_funnel
+
+def test_gate_funnel_counts_distinct_symbols_that_reached_a_named_condition():
+    decisions = [
+        _rejection("AAA", "catalyst"),
+        _rejection("BBB", "no_blocking_conflict"),
+        _rejection("CCC", "invalidation_level"),
+    ]
+    out = R.gate_funnel(decisions, ideas_opened=0)
+    assert out == {"reached_gate": 3, "cleared_gate": 0}
+
+
+def test_gate_funnel_excludes_the_star_catchall_row():
+    decisions = [_rejection("AAA", "catalyst"),
+                {"symbol": "*", "action": "none", "gate_failed": "no candidate cleared the gate"}]
+    out = R.gate_funnel(decisions, ideas_opened=0)
+    assert out["reached_gate"] == 1
+
+
+def test_gate_funnel_excludes_housekeeping_decisions_never_actually_gated():
+    """A hold on an existing position and a cap-breach trim suggestion both
+    carry a gate_failed that is not one of the five canonical strings
+    (None, or free text like 'wash sale / fractional') precisely because
+    neither went through the gate -- counting them as 'reached' would
+    conflate portfolio housekeeping with a real new-idea evaluation."""
+    decisions = [
+        {"symbol": "VTI", "action": "trim", "gate_failed": None},
+        {"symbol": "SGOV", "action": "hold", "gate_failed": "wash sale / fractional"},
+    ]
+    out = R.gate_funnel(decisions, ideas_opened=0)
+    assert out["reached_gate"] == 0
+
+
+def test_gate_funnel_cleared_gate_comes_from_ideas_opened_not_gate_failed_none():
+    """A cap-breach trim's gate_failed is also None despite never being
+    gated -- cleared_gate must not be re-derived from that field, or a
+    trim suggestion would be miscounted as a cleared new idea."""
+    decisions = [{"symbol": "VTI", "action": "trim", "gate_failed": None}]
+    out = R.gate_funnel(decisions, ideas_opened=1)
+    assert out == {"reached_gate": 0, "cleared_gate": 1}
+
+
+def test_gate_funnel_deduplicates_the_same_symbol_across_accounts():
+    decisions = [_rejection("XOM", "no_blocking_conflict"),
+                {**_rejection("XOM", "cash floor"), "account": "individual"}]
+    # "cash floor" is not a canonical GATE_CONDITIONS string -- only the first counts
+    out = R.gate_funnel(decisions, ideas_opened=0)
+    assert out["reached_gate"] == 1
+
+
+def test_gate_funnel_empty_decisions():
+    assert R.gate_funnel([], ideas_opened=0) == {"reached_gate": 0, "cleared_gate": 0}
+
+
+# ------------------------------------------------------ brokerage_token_health
+
+def test_brokerage_token_health_passes_when_recent():
+    c = R.brokerage_token_health(1)
+    assert c.passed and c.severity == "warn"
+
+
+def test_brokerage_token_health_passes_exactly_at_the_warn_boundary():
+    c = R.brokerage_token_health(R.BROKERAGE_TOKEN_WARN_AFTER_DAYS - 1)
+    assert c.passed
+
+
+def test_brokerage_token_health_warns_approaching_the_observed_expiry():
+    c = R.brokerage_token_health(R.BROKERAGE_TOKEN_WARN_AFTER_DAYS)
+    assert not c.passed and c.severity == "warn"
+    assert "expiry" in c.detail
+
+
+def test_brokerage_token_health_none_passes_quietly():
+    """No recorded brokerage success yet -- a fresh journal has nothing to
+    forecast from, and that is not itself a warning."""
+    c = R.brokerage_token_health(None)
+    assert c.passed
+
+
+def test_brokerage_token_health_respects_a_custom_warn_after():
+    assert R.brokerage_token_health(2, warn_after_days=5).passed
+    assert not R.brokerage_token_health(5, warn_after_days=5).passed
+
+
 # ---------------------------------------------------------------- scoring
 
 def test_scoring_refuses_to_certify_a_small_sample():

@@ -174,6 +174,64 @@ def closest_calls(decisions: Sequence[dict], *, top: int = 3) -> list[dict]:
     return [d for _, d in ranked[:top]]
 
 
+BROKERAGE_TOKEN_OBSERVED_EXPIRY_DAYS = 4
+BROKERAGE_TOKEN_WARN_AFTER_DAYS = 3
+
+
+def brokerage_token_health(days_since_success: Optional[int], *,
+                           warn_after_days: int = BROKERAGE_TOKEN_WARN_AFTER_DAYS) -> Check:
+    """Warn that the brokerage token is approaching its observed expiry
+    window, before a run actually aborts at `tools_available` with no
+    warning at all (`HANDOFF.md` section 12: the token expires roughly
+    every `BROKERAGE_TOKEN_OBSERVED_EXPIRY_DAYS` days; that was, before 5
+    September 2026, just a note nobody was tracking against). `info`
+    severity, never `block` -- this never stops a run on its own; it is a
+    forecast for System health, not a gate. `days_since_success` is
+    `Journal.days_since_last_brokerage_success`'s result; `None` (no run
+    has ever recorded a brokerage success) always passes quietly, since a
+    fresh journal has nothing to forecast from yet.
+    """
+    if days_since_success is None:
+        return Check("brokerage_token_health", True, "info",
+                     "no recorded brokerage success yet to forecast from", value=None)
+    passed = days_since_success < warn_after_days
+    detail = (f"{days_since_success} day(s) since the last successful brokerage call"
+              if passed else
+              f"{days_since_success} day(s) since the last successful brokerage call -- "
+              f"approaching the observed ~{BROKERAGE_TOKEN_OBSERVED_EXPIRY_DAYS}-day expiry "
+              f"window (HANDOFF.md section 12); sign in again before it lapses mid-run")
+    return Check("brokerage_token_health", passed, "warn", detail, value=days_since_success)
+
+
+def gate_funnel(decisions: Sequence[dict], *, ideas_opened: int) -> dict:
+    """How many distinct symbols reached the five-condition gate this run,
+    and how many cleared it -- the "what happened once Stage 1's universe
+    got here" half of the funnel `research.universe_funnel` reports the
+    other half of (5 September 2026: a strict gate and an empty universe
+    both show "0 ideas cleared", and telling them apart needs both halves
+    recorded, not just the final count).
+
+    "Reached the gate" is every distinct real symbol (never the `"*"`
+    catch-all summary row) whose recorded `gate_failed` is one of the five
+    exact `GATE_CONDITIONS` strings — the only decisions this counts are
+    ones Stage 3 actually evaluated against a named condition. A `"hold"`
+    on an existing position or a cap-breach trim suggestion carries a
+    `gate_failed` that is `None` or free text (`"wash sale / fractional"`,
+    for instance) precisely because it never went through the gate at all;
+    counting those as "reached" would conflate portfolio housekeeping with
+    a genuine new-idea evaluation.
+
+    "Cleared" is `ideas_opened` directly — already the exact count
+    `ledger.run_entry` pins from the run's own `"thesis"` journal entries,
+    not re-derived here from `gate_failed is None`, which a cap-breach
+    remedy can also carry despite never being gated (see the docstring on
+    `research.candidates` for the analogous `SECTOR_MAP` gap this mirrors).
+    """
+    reached = {d.get("symbol") for d in decisions
+              if d.get("symbol") != "*" and d.get("gate_failed") in GATE_CONDITIONS}
+    return {"reached_gate": len(reached), "cleared_gate": int(ideas_opened)}
+
+
 @dataclass
 class CircuitBreakerVerdict:
     """What `circuit_breaker_usd` / `hard_stop_usd` actually do, enforced

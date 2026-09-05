@@ -101,6 +101,33 @@ _GENERIC = (
     "Read the detail below and correct the underlying condition.",
 )
 
+_TOKEN_EXPIRED_CAUSE = (
+    "The Robinhood brokerage connector's session token has expired. Only "
+    "the brokerage tools are missing -- every other connector this routine "
+    "carries (Alpha Vantage, Gmail, Drive) is present and working, which is "
+    "the signature of a lapsed token, not a misconfigured routine "
+    "(HANDOFF.md section 12: the token expires roughly every four days).",
+    "Sign in to the Robinhood connector again to refresh its session, then "
+    "run the routine again. If this recurs on a predictable cadence, "
+    "HANDOFF.md section 12 has the observed expiry window and "
+    "`runlog.brokerage_token_health` tracks days since the last success so "
+    "it can be caught before the next lapse, not just after.",
+)
+
+
+def _diagnose_tools_available(missing: Sequence[str]) -> tuple[str, str]:
+    """Two failures produce the identical symptom -- `tools_available`
+    failing -- and needed telling apart before 5 September 2026: every
+    required tool missing (the routine's own connector list is wrong) vs.
+    only the Robinhood ones missing while Alpha Vantage/Gmail/Drive are
+    present (the brokerage token has lapsed). They call for completely
+    different actions -- editing a routine's configuration does nothing
+    for a lapsed token, and waiting for a token to refresh does nothing
+    for a routine that was never given the connector at all."""
+    if missing and all("robinhood" in str(m).lower() for m in missing):
+        return _TOKEN_EXPIRED_CAUSE
+    return _CAUSES["tools_available"]
+
 
 def diagnose(manifest: dict) -> Optional[dict]:
     """Name the likely cause of a failed run, or None if nothing blocked it.
@@ -115,7 +142,10 @@ def diagnose(manifest: dict) -> Optional[dict]:
         return None
 
     first = blocking[0]
-    cause, remedy = _CAUSES.get(first.get("name", ""), _GENERIC)
+    if first.get("name") == "tools_available":
+        cause, remedy = _diagnose_tools_available(first.get("value") or [])
+    else:
+        cause, remedy = _CAUSES.get(first.get("name", ""), _GENERIC)
     return {
         "check": first.get("name", "unknown"),
         "detail": first.get("detail", ""),

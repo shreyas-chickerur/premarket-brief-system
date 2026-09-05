@@ -61,6 +61,43 @@ def test_diagnose_returns_none_on_a_clean_run():
     assert E.diagnose(healthy_manifest()) is None
 
 
+def test_diagnose_distinguishes_a_lapsed_token_from_a_missing_connector():
+    """5 September 2026: both symptoms fail the identical `tools_available`
+    check, but need completely different actions -- editing a routine's
+    connector list does nothing for a lapsed brokerage token."""
+    log = R.RunLog("r", mode="live")
+    log.check("tools_available", False, "block", "missing: [...]",
+              value=["robinhood.get_accounts", "robinhood.get_portfolio",
+                    "robinhood.place_equity_order"])
+    log.abort("required tools not visible")
+    d = E.diagnose(log.manifest())
+    assert d["check"] == "tools_available"
+    assert "expired" in d["cause"]
+    assert "sign in" in d["remedy"].lower()
+
+
+def test_diagnose_still_reports_a_misconfigured_routine_when_everything_is_missing():
+    log = R.RunLog("r", mode="live")
+    log.check("tools_available", False, "block", "missing: [...]",
+              value=["robinhood.get_accounts", "alpha_vantage.MARKET_STATUS",
+                    "google_drive.search_files"])
+    log.abort("required tools not visible")
+    d = E.diagnose(log.manifest())
+    assert "not attached" in d["cause"]
+    assert "expired" not in d["cause"]
+
+
+def test_diagnose_token_expiry_needs_a_non_empty_missing_list():
+    """An empty/no-value missing list (a check built without `value=`, or a
+    genuinely empty list) must fall back to the generic cause, not be
+    misread as an all-Robinhood, all() over an empty list is True."""
+    log = R.RunLog("r", mode="live")
+    log.check("tools_available", False, "block", "missing: unspecified")
+    log.abort("required tools not visible")
+    d = E.diagnose(log.manifest())
+    assert "not attached" in d["cause"]
+
+
 def test_unknown_check_still_gets_an_actionable_fallback():
     log = R.RunLog("r", mode="live")
     log.check("something_new", False, "block", "boom")
