@@ -729,6 +729,50 @@ def correlation_concentration(returns_by_symbol: dict[str, pd.Series], *,
     }
 
 
+def sector_exposure(weights_by_symbol: dict[str, float], sector_map: dict[str, str], *,
+                    cap: float) -> dict:
+    """Real fraction of the account in each sector, against `cap`.
+
+    `DAILY_PROCEDURE.md` Stage 4 has always said to "flag any breach of the
+    ... sector cap from config," but nothing ever computed one — confirmed 5
+    September 2026, `sector_cap_individual` sat in `state.json.config`,
+    documented in `HANDOFF.md`, read by nothing. A cap that is only checked
+    on days there is time to check it is not a cap.
+
+    Unlike `vol_percentile`/`trend_state`, which genuinely need a wide price
+    history not affordable to pull for every held position every morning,
+    this needs only a weight per symbol -- quantity times whatever live
+    quote the run already fetched for every held-or-candidate symbol
+    (`get_equity_quotes`) divided by account equity. There is no
+    expensive-data tradeoff to cache around here; the inputs are already
+    gathered every run.
+
+    `weights_by_symbol` need not sum to 1.0 (cash and unmapped names are
+    excluded from every sector's total, not distributed into an "other"
+    bucket that would understate concentration). A symbol absent from
+    `sector_map` is reported in `unmapped`, not silently dropped or guessed
+    at -- `research.SECTOR_MAP` is the map used in production, passed in
+    rather than imported here, so this stays free of that dependency and
+    testable against any mapping.
+    """
+    by_sector: dict[str, float] = {}
+    unmapped: list[str] = []
+    for sym, w in weights_by_symbol.items():
+        sector = sector_map.get(sym.upper())
+        if sector is None:
+            unmapped.append(sym.upper())
+            continue
+        by_sector[sector] = by_sector.get(sector, 0.0) + w
+    breaches = {sec: w for sec, w in by_sector.items() if w > cap}
+    return {
+        "cap": cap,
+        "by_sector": by_sector,
+        "breaches": breaches,
+        "concentrated": bool(breaches),
+        "unmapped": sorted(unmapped),
+    }
+
+
 # --------------------------------------------------------------------------
 # anomaly detection on incoming data
 # --------------------------------------------------------------------------

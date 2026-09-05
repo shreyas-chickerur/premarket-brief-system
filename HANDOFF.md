@@ -1690,7 +1690,18 @@ the check.
   exists to fold. `test_fills_cache_round_trip_matches_a_direct_fetch`
   proves the reconstruction logic against the real 31 August order fixture,
   but nothing has proven the actual dated-file read/write cycle against a
-  live Drive folder yet.
+  live Drive folder yet. **A 5 September 2026 rehearsal did not change this
+  status, and should not be read as though it did:** it re-ran the round
+  trip against both accounts' real, live fill histories and got a
+  byte-for-byte match, but every fill in both accounts was already older
+  than `FILLS_CACHE_HORIZON_DAYS` (7 days) as of that day, so the
+  "fresh, watermark-forward fetch" half of the mechanism was exercised
+  against zero fills, not a real one. It proves the reconstruction logic
+  again, on real (not fixture) data — it does not prove the cache against a
+  genuinely fresh fill, and no `fills-cache-*.json` file was written by it.
+  The first real cache file still gets written the next live run after this
+  change ships; the incremental path is still first genuinely exercised the
+  run after that.
 - **Monthly journal compaction has never been run, live or otherwise, by a
   human or by any procedure.** The logic is tested to exact equivalence
   against synthetic multi-file journals, but no `journal-monthly-*.json`

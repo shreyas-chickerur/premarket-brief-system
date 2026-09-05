@@ -637,3 +637,36 @@ whatever causes the cross-wiring (almost certainly a parameter-binding or
 response-caching fault on the tool side, triggered by concurrent calls with
 different arguments) has no chance to fire if there is never more than one
 such call in flight.
+
+## Stage 4 — the sector cap is computed, not just documented
+
+Found 5 September 2026, same rehearsal. `sector_cap_individual` has been in
+`state.json.config` and documented in `HANDOFF.md` since early on;
+`DAILY_PROCEDURE.md` Stage 4 said to "flag any breach of the ... sector cap
+from config" in the same sentence as the single-name cap and cash floor,
+both of which real code actually checks. Nothing computed a sector
+breakdown at all — no function existed to call, so the instruction could
+only ever be followed by judgment, which is exactly the class of gap that
+produced the wash-sale note and the `all_symbols` list above.
+
+Unlike `vol_percentile`/`trend_state`, deliberately left unfixed because
+they need a 252/200-day price history genuinely too expensive to pull for
+every held-or-candidate symbol every morning, a sector breakdown needs
+nothing beyond a weight per symbol — quantity times the live quote
+`get_equity_quotes` already returns for every held-or-candidate name each
+run, divided by account equity. There is no cost tradeoff to make here and
+therefore no cache to build; `quantcore.sector_exposure` is computed fresh
+every run from data the run already has.
+
+## `STAGE_TIMING_BUDGETS_MS["preflight"]` — 180s, not 15s
+
+The original 15-second budget was never measured against what Stage 0
+actually does; it tripped `stage_budget_overruns` on every real run that
+ever logged a preflight duration, which made an overrun mean nothing.
+Observed real durations: 95s (4 September 2026) and 139s (1 September
+2026), pulling roughly 1,500 orders combined across both accounts and
+checking splits for every symbol either has ever traded (~68-70 names, see
+`ledger.all_traded_symbols` above) before a single price is looked at.
+180s gives headroom over both without being picked merely to stop the
+check from firing — the point of a budget is that crossing it means
+something, and 15s never let it.

@@ -455,6 +455,16 @@ def test_every_stage_timing_budget_key_has_a_positive_value():
         assert ms > 0, f"{name} budget must be positive"
 
 
+def test_preflight_budget_reflects_what_the_stage_actually_costs():
+    """5 September 2026: the original 15s budget was never measured against
+    real Stage 0 -- observed real durations were 95s and 139s (pulling
+    ~1,500 orders across two accounts plus split checks for ~68-70 symbols).
+    An overrun against a budget nobody set honestly means nothing; this pins
+    the budget above both observed real runs so a future overrun is a real
+    signal again, not routine noise."""
+    assert R.STAGE_TIMING_BUDGETS_MS["preflight"] >= 140_000
+
+
 # ---------------------------------------------------------------- optimizations
 
 def test_optimizer_is_silent_without_enough_history():

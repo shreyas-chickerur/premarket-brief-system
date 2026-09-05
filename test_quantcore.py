@@ -558,6 +558,54 @@ def test_a_tighter_bets_floor_ratio_from_config_flags_a_book_the_default_would_n
     assert tightened["concentrated"] is True
 
 
+# ------------------------------------------------------------ sector exposure
+
+def test_sector_exposure_sums_weights_within_a_sector():
+    weights = {"AAPL": 0.06, "MSFT": 0.05, "GOOGL": 0.04, "WMT": 0.15}
+    sector_map = {"AAPL": "technology", "MSFT": "technology", "GOOGL": "technology",
+                  "WMT": "consumer_staples"}
+    out = q.sector_exposure(weights, sector_map, cap=0.35)
+    assert out["by_sector"]["technology"] == pytest.approx(0.15)
+    assert out["by_sector"]["consumer_staples"] == pytest.approx(0.15)
+    assert out["breaches"] == {}
+    assert out["concentrated"] is False
+
+
+def test_sector_exposure_flags_a_real_breach():
+    """The gap this closes: DAILY_PROCEDURE.md has always said to flag a
+    sector-cap breach, but nothing computed one before 5 September 2026."""
+    weights = {"AAPL": 0.20, "MSFT": 0.10, "GOOGL": 0.08}
+    sector_map = {"AAPL": "technology", "MSFT": "technology", "GOOGL": "technology"}
+    out = q.sector_exposure(weights, sector_map, cap=0.35)
+    assert out["by_sector"]["technology"] == pytest.approx(0.38)
+    assert out["breaches"] == {"technology": pytest.approx(0.38)}
+    assert out["concentrated"] is True
+
+
+def test_sector_exposure_reports_unmapped_symbols_rather_than_dropping_them():
+    weights = {"AAPL": 0.10, "ZZZZ": 0.05}
+    sector_map = {"AAPL": "technology"}
+    out = q.sector_exposure(weights, sector_map, cap=0.35)
+    assert out["unmapped"] == ["ZZZZ"]
+    assert "ZZZZ" not in out["by_sector"].values()
+    assert out["by_sector"] == {"technology": pytest.approx(0.10)}
+
+
+def test_sector_exposure_of_no_positions_is_clean():
+    out = q.sector_exposure({}, {"AAPL": "technology"}, cap=0.35)
+    assert out["by_sector"] == {} and out["breaches"] == {} and not out["concentrated"]
+
+
+def test_sector_exposure_uses_research_sector_map_end_to_end():
+    """The production wiring: `research.SECTOR_MAP` really does cover the
+    real energy-sector breach a rehearsal would need to catch."""
+    import research
+    weights = {"XOM": 0.20, "OXY": 0.20}
+    out = q.sector_exposure(weights, research.SECTOR_MAP, cap=0.35)
+    assert out["by_sector"]["energy"] == pytest.approx(0.40)
+    assert out["concentrated"] is True
+
+
 # ------------------------------------------------------ cash-limited sizing
 
 def _plan(entry=100.0, stop_fraction=0.08):

@@ -682,7 +682,16 @@ def _regressions(history: Sequence[dict]) -> list[Check]:
 # own Stage 0 through Stage 6 numbering -- a name used there that is not a
 # key here is not budgeted (see `stage_budget_overruns`), not an error.
 STAGE_TIMING_BUDGETS_MS = {
-    "preflight": 15_000,          # Stage 0
+    # 15s was never what this stage actually costs -- it was never measured
+    # against it. Real Stage 0 pulls the full order history for both
+    # accounts (roughly 1,500 orders combined), checks splits for every
+    # symbol either account has ever traded (`ledger.all_traded_symbols`,
+    # ~68-70 names), folds the journal, and rebuilds the wash-sale registry,
+    # all before a single price is looked at. Observed real durations: 95s
+    # (4 September) and 139s (1 September). 180s is a budget with headroom
+    # over both, not a number picked to stop tripping the check -- see
+    # PROCEDURE_RATIONALE.md, 5 September 2026.
+    "preflight": 180_000,          # Stage 0
     "evidence_review": 10_000,    # Stage 0.5
     "prior_day_review": 5_000,    # Stage 0.6
     "gather": 120_000,            # Stage 1 -- the most external calls by far
