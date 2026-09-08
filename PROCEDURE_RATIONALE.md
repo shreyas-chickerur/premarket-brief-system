@@ -1008,3 +1008,39 @@ everything else in this email. Nothing about `verify_email`'s contract
 changes -- `_decisions` reads `manifest["decisions"]` directly and was
 never part of the structured-ideas path that function checks; this is a
 pure presentation change over the same fields the table already showed.
+
+## Stage 6 — a cache-file write needs a check that it actually happened
+
+Found 8 September 2026, root-causing why preflight was still slow the
+morning after the watchdog retry had, by its own account, everything it
+needed to fix that. The retry's own manifest logged `fills_ready_to_cache:
+870` -- every one of the 870 derived fills was old enough to cache -- and
+wrote `splits-cache-2026-09-08.json` in the same run. There is no
+`create_file(fills-cache-2026-09-08.json)` call anywhere in that run's own
+`calls` log. The write was computed and never made, and nothing on the
+manifest said so; it surfaced only because a human, reading a slow run the
+next morning, diffed the prior run's call log by hand.
+
+This is the identical failure shape as the wash-sale note-drift bug
+(Stage 0 step 8, above) and `ledger.run_entry`'s schema-pinning fix: an
+instruction that produces a specific artifact, with nothing that checks
+the artifact actually got produced. Both of those were fixed the same way
+-- not by trying to make the underlying step more reliable (an agent
+following a long, multi-stage procedure by hand will occasionally drop
+one line of it; that is not a bug in the instruction so much as a fact
+about the execution model), but by adding a check that catches the
+OUTCOME being wrong, cheaply, the same day. `DAILY_PROCEDURE.md` Stage 6
+now asks for one `log.check(f"{cache}_cache_written", ...)` per cache
+file, `warn` severity, passing trivially when there was nothing to write
+(matching `fills_cache_present`'s own "None passes quietly" convention)
+and failing only when something was ready to cache and the matching
+`create_file` call is missing from this run's own `calls` log -- a fact
+the agent running the procedure already has direct visibility into,
+without a second Drive round-trip to confirm. A single miss is a `warn`;
+a recurring one becomes visible for free through `no_chronic_failures`,
+which tallies any check name failing across the last ten runs with no
+hardcoded list of which ones to watch.
+
+No code changes underlie this entry -- `ledger.fills_ready_to_cache` and
+`fold_fills_cache` computed correctly; the gap was entirely in the
+procedure text having no way to notice its own instruction went unfollowed.

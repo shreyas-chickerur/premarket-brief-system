@@ -1717,27 +1717,27 @@ the check.
   for the live values) implies roughly 900 closed trades to settle at the
   observed trade rate. That is measured in years — see section 8's "Path to
   live trading" for why that is not, on its own, a reason to delay going live.
-- **The fills/split-events cache (section 5, section 11's 4 September entry)
-  has never run against a real Drive folder.** No `fills-cache-*.json` or
-  `splits-cache-*.json` file exists yet, so the first real run after this
-  change takes the cold-start path (`watermark=None`, full history fetched
-  exactly as before) and should behave identically to today — the caching
-  benefit only shows up starting the SECOND real run, once a cache file
-  exists to fold. `test_fills_cache_round_trip_matches_a_direct_fetch`
-  proves the reconstruction logic against the real 31 August order fixture,
-  but nothing has proven the actual dated-file read/write cycle against a
-  live Drive folder yet. **A 5 September 2026 rehearsal did not change this
-  status, and should not be read as though it did:** it re-ran the round
-  trip against both accounts' real, live fill histories and got a
-  byte-for-byte match, but every fill in both accounts was already older
-  than `FILLS_CACHE_HORIZON_DAYS` (7 days) as of that day, so the
-  "fresh, watermark-forward fetch" half of the mechanism was exercised
-  against zero fills, not a real one. It proves the reconstruction logic
-  again, on real (not fixture) data — it does not prove the cache against a
-  genuinely fresh fill, and no `fills-cache-*.json` file was written by it.
-  The first real cache file still gets written the next live run after this
-  change ships; the incremental path is still first genuinely exercised the
-  run after that.
+- **The fills cache has still never actually been written, as of 8
+  September 2026, despite three real chances to.** `test_fills_cache_round_trip_matches_a_direct_fetch`
+  proves the reconstruction logic against the real 31 August order fixture;
+  a 5 September 2026 rehearsal re-ran the round trip against both accounts'
+  real fill histories and got a byte-for-byte match — but every fill that
+  day was already older than `FILLS_CACHE_HORIZON_DAYS` (7 days), and no
+  `fills-cache-*.json` file was written by a rehearsal in the first place.
+  The real gap: the 8 September watchdog-retry run's own manifest logged
+  `fills_ready_to_cache: 870` (every derived fill was cache-eligible) and
+  wrote `splits-cache-2026-09-08.json` in the same run — but there is no
+  `create_file(fills-cache-2026-09-08.json)` call anywhere in that run's
+  `calls` log. The instruction was computed correctly and never carried
+  out, and nothing on the manifest recorded the miss; a human found it by
+  diffing the call log by hand the next morning. Root cause is procedural,
+  not a code defect — `ledger.fills_ready_to_cache`/`fold_fills_cache` are
+  correct and tested; `DAILY_PROCEDURE.md` Stage 6 now asks for a
+  `log.check(f"{cache}_cache_written", ...)` per cache file (8 September
+  2026) so a future miss is a same-day, visible `warn` rather than
+  another silent one — see `PROCEDURE_RATIONALE.md`.
+  Every run since 31 August has therefore paid the full ~880-order Stage 0
+  fetch; the caching benefit has not yet been observed even once.
 - **Monthly journal compaction has never been run, live or otherwise, by a
   human or by any procedure.** The logic is tested to exact equivalence
   against synthetic multi-file journals, but no `journal-monthly-*.json`
