@@ -265,9 +265,63 @@ def test_warnings_are_itemised_on_a_completed_run():
     assert "Warnings" in html and "off by 41 min" in html
 
 
+def test_warnings_group_warn_and_block_as_needs_attention():
+    """5 September 2026: a real 41-check run buried the portfolio-state
+    facts a reader actually needs under system-note clutter -- warn/block
+    now render first, under their own heading, separate from info."""
+    log = R.RunLog("r", mode="live")
+    log.check("single_name_cap_individual", False, "warn", "VTI 17.75% against a 15% cap")
+    log.check("screener_scan_id_configured", False, "info", "recovered by title match")
+    _, html = E.render_email(log.manifest())
+    assert "Needs attention" in html and "System notes" in html
+    assert html.index("Needs attention") < html.index("VTI 17.75%")
+    assert html.index("VTI 17.75%") < html.index("System notes")
+    assert html.index("System notes") < html.index("recovered by title match")
+
+
+def test_warnings_omit_a_group_heading_with_nothing_in_it():
+    log = R.RunLog("r", mode="live")
+    log.check("single_name_cap_individual", False, "warn", "VTI over cap")
+    _, html = E.render_email(log.manifest())
+    assert "Needs attention" in html
+    assert "System notes" not in html
+
+
+def test_warnings_show_the_check_name_as_a_trailing_tag_not_a_prefix():
+    """The raw snake_case check name is still fully present (nothing here
+    is ever hidden) but moves after the human-written detail, matching the
+    '— source' tag idea_card already uses, instead of a colon-prefixed
+    identifier with no explanation of its own."""
+    log = R.RunLog("r", mode="live")
+    log.check("fills_cache_present", False, "warn", "no fills-cache exists yet")
+    _, html = E.render_email(log.manifest())
+    assert "fills_cache_present" in html
+    assert html.index("no fills-cache exists yet") < html.index("fills_cache_present")
+    assert "fills_cache_present: no fills-cache exists yet" not in html
+
+
 def test_rejected_ideas_show_the_gate_that_failed():
     _, html = E.render_email(healthy_manifest())
     assert "catalyst" in html and "no dated catalyst" in html
+
+
+def test_decisions_render_as_cards_not_a_nowrap_table():
+    """5 September 2026: the old 4-column table forced `nowrap` on
+    symbol/action/placed-or-not, squeezing the reason paragraph into
+    whatever width was left -- no good answer for a phone screen. Cards
+    (the same layout the two account sections already use) replace it;
+    every field still renders, just not inside a <table> row."""
+    _, html = E.render_email(healthy_manifest())
+    assert "white-space:nowrap" not in html
+    assert "NFLX" in html and "reject" in html
+
+
+def test_decisions_humanise_the_gate_failed_prefix():
+    """gate_failed used to render as a raw snake_case token in <em> tags
+    (e.g. 'no_blocking_conflict'); it now reads as plain words ahead of the
+    reason, on one line, like the rest of this email's prose."""
+    _, html = E.render_email(healthy_manifest())
+    assert "catalyst: no dated catalyst" in html
 
 
 def test_disclaimer_present_by_default():

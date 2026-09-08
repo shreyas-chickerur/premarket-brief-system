@@ -969,3 +969,42 @@ smaller, more specific version of the same risk `no_run` already carried
 before any of this existed; it is not new, and it is not eliminated by a
 heartbeat that can only observe silence, never confirm death. Recorded
 here plainly rather than implied to be solved.
+
+## Stage 6 — Warnings grouped by severity; Decisions rendered as cards
+
+Found 8 September 2026, reading the actual watchdog-retry brief the new
+wall-clock deadline had just produced for real: a 41-check run failed 16
+of them, and `_health_line` rendered all 16 as one flat, colon-prefixed
+list -- `fills_cache_present: No fills-cache-*.json exists...` next to
+`single_name_cap_individual: VTI 17.75% against a 15% cap` next to
+`vol_percentile_available: FAILED on GLDM...`, in whatever order
+`manifest["checks"]` happened to carry them. A reader has no way to tell
+"this is a portfolio fact you need to act on" from "this is a cache-miss
+note that fixed itself this run" without parsing every snake_case check
+name by hand -- exactly the same complaint `idea_card`'s own docstring
+already records about the old prose-paragraph account sections.
+
+Every `Check` already carries a `severity` (`info`/`warn`/`block`); nothing
+had ever used it to order the Warnings list. `_health_line` now splits
+failed checks into "Needs attention" (`warn`/`block`, rendered first) and
+"System notes" (`info`, rendered after, and omitted entirely with no
+empty heading when there are none) -- a group with nothing in it renders
+nothing, never a bare label. The raw check name is not hidden (this
+system's whole point is that nothing is), it moves from a colon prefix
+BEFORE the detail to a small muted tag AFTER it, matching the "-- source"
+attribution `idea_card` already uses for every bullet elsewhere in the
+same email -- one visual convention for "here is where this claim comes
+from," not two.
+
+`_decisions` had the same problem in a different shape: a four-column
+table with `white-space:nowrap` forced on symbol/action/placed-or-not,
+which has no good answer on a phone screen -- the reason column simply
+gets whatever width the other three don't claim. Rebuilt to call the
+existing `idea_card` per decision instead of building a table row by
+hand; `gate_failed`, previously a raw snake_case token in an `<em>` tag
+(`no_blocking_conflict`), now reads as plain words ahead of the reason
+(`no blocking conflict: ...`) in one line, the same prose register as
+everything else in this email. Nothing about `verify_email`'s contract
+changes -- `_decisions` reads `manifest["decisions"]` directly and was
+never part of the structured-ideas path that function checks; this is a
+pure presentation change over the same fields the table already showed.

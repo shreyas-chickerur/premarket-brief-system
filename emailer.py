@@ -698,6 +698,21 @@ def _what_still_worked(manifest: dict) -> str:
 
 
 def _health_line(manifest: dict) -> str:
+    """The one-line check tally, plus the itemised list of everything that
+    didn't pass.
+
+    Split into two groups by `severity` (5 September 2026, after a reader
+    complaint about readability): "Needs attention" (`warn`/`block` — a
+    real portfolio-state fact or system deviation) first, "System notes"
+    (`info` — a nudge like a missing config key, never blocking) after, so
+    the seventeen-item list a slow Stage 0 can produce doesn't bury a VTI
+    cap breach under a cache-miss note. Each item leads with its `detail`
+    prose (already written to be read, e.g. "No fills-cache-*.json exists
+    in the Drive folder, so..."); the raw check `name` moves to a small
+    trailing tag, matching the "— source" attribution style `idea_card`
+    already uses elsewhere in this email, instead of a colon-prefixed
+    snake_case identifier a reader has no way to parse on its own.
+    """
     checks = manifest.get("checks", [])
     failed = [c for c in checks if not c.get("passed")]
     dur = manifest.get("duration_ms", 0)
@@ -711,46 +726,61 @@ def _health_line(manifest: dict) -> str:
     if not failed:
         return line
 
-    warn = "".join(
-        f'<li style="margin:0 0 4px;">{escape(str(c.get("name")))}: '
-        f'{escape(str(c.get("detail", "")))}</li>' for c in failed)
+    def _item(c: dict) -> str:
+        return (f'<li style="margin:0 0 6px;">{escape(str(c.get("detail", "")))} '
+                f'<span style="color:{MUTED};font-size:11px;font-family:{MONO};">'
+                f'&mdash; {escape(str(c.get("name")))}</span></li>')
+
+    def _group(title: str, items: list[dict], *, bottom: int) -> str:
+        if not items:
+            return ""
+        return (f'<div style="font:600 11px/1.5 {FONT};color:{MUTED};'
+                f'letter-spacing:.06em;text-transform:uppercase;margin:0 0 6px;">'
+                f'{escape(title)}</div>'
+                f'<ul style="margin:0 0 {bottom}px;padding-left:18px;font:400 13px/1.55 '
+                f'{FONT};color:{INK};">{"".join(_item(c) for c in items)}</ul>')
+
+    actionable = [c for c in failed if str(c.get("severity", "warn")) in ("warn", "block")]
+    notes = [c for c in failed if str(c.get("severity", "warn")) not in ("warn", "block")]
+
     return line + _well(
         f'<div style="font:600 12px/1.5 {FONT};color:{MUTED};'
-        f'letter-spacing:.06em;text-transform:uppercase;">Warnings</div>'
-        f'<ul style="margin:8px 0 0;padding-left:18px;font:400 13px/1.55 '
-        f'{FONT};color:{INK};">{warn}</ul>')
+        f'letter-spacing:.06em;text-transform:uppercase;margin:0 0 10px;">Warnings</div>'
+        + _group("Needs attention", actionable, bottom=14)
+        + _group("System notes", notes, bottom=0))
 
 
 def _decisions(manifest: dict) -> str:
+    """Every decision this run recorded, one card per decision.
+
+    Rebuilt 5 September 2026 from a four-column table (`nowrap` on symbol/
+    action/placed-or-not, a long reason paragraph squeezed into whatever
+    width that left) into the same card layout `idea_card` already uses for
+    the two account sections above it — for the identical reason that
+    layout exists at all: a name and an action are slower to find buried in
+    a cramped row, and a `nowrap` table has no good answer for a phone-width
+    screen. This is a pure rendering change; every field the table showed
+    (symbol, action, placed/not placed, gate_failed, reason) still shows,
+    nothing here is subject to `verify_email` either way (raw `manifest`
+    decisions, not the structured ideas that function checks).
+    """
     dec = manifest.get("decisions", [])
     out = [_h("Decisions")]
     if not dec:
         out.append(_p("No decisions recorded.", color=MUTED))
         return "".join(out)
 
-    rows = []
+    cards = []
     for x in dec:
+        symbol = str(x.get("symbol") or "—")
+        action = str(x.get("action", ""))
         mark = "placed" if x.get("executed") else "not placed"
         gate = x.get("gate_failed")
-        reason = escape(str(x.get("reason", "")))
-        if gate:
-            reason = f'<em>{escape(str(gate))}</em> — {reason}'
-        rows.append(
-            f'<tr><td style="padding:7px 8px 7px 0;border-top:1px solid {RULE};'
-            f'font:600 13px/1.5 {MONO};color:{INK};white-space:nowrap;">'
-            f'{escape(str(x.get("symbol", "")))}</td>'
-            f'<td style="padding:7px 8px;border-top:1px solid {RULE};'
-            f'font:400 13px/1.5 {FONT};color:{INK};white-space:nowrap;">'
-            f'{escape(str(x.get("action", "")))}</td>'
-            f'<td style="padding:7px 8px;border-top:1px solid {RULE};'
-            f'font:400 12px/1.5 {FONT};color:{MUTED};white-space:nowrap;">'
-            f'{mark}</td>'
-            f'<td style="padding:7px 0 7px 8px;border-top:1px solid {RULE};'
-            f'font:400 13px/1.5 {FONT};color:{INK};">{reason}</td></tr>')
+        reason = str(x.get("reason", ""))
+        bullet = f'{str(gate).replace("_", " ")}: {reason}' if gate else reason
+        cards.append(idea_card(symbol, action, detail=mark, bullets=[(bullet, "")]))
 
-    out.append(f'<table role="presentation" cellpadding="0" cellspacing="0" '
-               f'border="0" width="100%" style="border-collapse:collapse;">'
-               f'{"".join(rows)}</table>')
+    out.append("".join(cards))
     return "".join(out)
 
 
