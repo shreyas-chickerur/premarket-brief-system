@@ -932,9 +932,9 @@ def _cache_file(name, rows):
     return {"title": name, "content": json.dumps(rows)}
 
 
-def _fill_row(symbol, side, qty, price, on, order_id=""):
+def _fill_row(symbol, side, qty, price, on, order_id="", account="IND1"):
     return {"symbol": symbol, "side": side, "quantity": qty, "price": price,
-            "on": on, "order_id": order_id}
+            "on": on, "order_id": order_id, "account": account}
 
 
 def test_fills_cache_filename_matches_journal_convention():
@@ -1011,6 +1011,102 @@ def test_fold_fills_cache_records_a_malformed_row_rather_than_crashing():
 def test_fold_fills_cache_empty_input():
     fills, bad = L.fold_fills_cache([])
     assert fills == [] and bad == []
+
+
+# --- the account round-trip, 9 September 2026 -----------------------------
+# The 9 September scheduled run aborted in Stage 0 step 7 having refused to
+# write its fills cache: `Fill` carried no account, so a cache folded from
+# both accounts' rows could not say which account any fill belonged to, and
+# per-account reconciliation would have compared a merged total against a
+# single account's broker snapshot. These pin the round trip end to end.
+
+def test_fills_from_orders_stamps_the_account_it_was_given():
+    orders = [{"symbol": "SGOV", "side": "buy", "cumulative_quantity": "4.421802",
+               "average_price": "100.0", "last_transaction_at": "2026-08-01T14:00:00Z",
+               "id": "o1"}]
+    assert L.fills_from_orders(orders, "AGENTIC1")[0].account == "AGENTIC1"
+    assert L.fills_from_orders(orders)[0].account == ""
+
+
+def test_fold_fills_cache_round_trips_the_account_through_the_cache():
+    """The defect itself: fills for two accounts share one cache file, and
+    each must come back out attributed to the account that executed it."""
+    fills, bad = L.fold_fills_cache([
+        _cache_file("fills-cache-2026-08-20.json", [
+            _fill_row("SGOV", "buy", 29.805637, 100.0, "2026-08-18", "o1",
+                      account="IND1"),
+            _fill_row("SGOV", "buy", 4.421802, 100.0, "2026-08-18", "o2",
+                      account="AGENTIC1"),
+        ]),
+    ])
+    assert bad == []
+    assert {f.order_id: f.account for f in fills} == {"o1": "IND1", "o2": "AGENTIC1"}
+
+
+def test_fills_for_account_splits_a_merged_cache_back_apart():
+    """The live 9 September numbers: a merged, account-less SGOV total of
+    34.227439 reconciles against neither account's broker snapshot."""
+    fills, _ = L.fold_fills_cache([
+        _cache_file("fills-cache-2026-08-20.json", [
+            _fill_row("SGOV", "buy", 29.805637, 100.0, "2026-08-18", "o1",
+                      account="IND1"),
+            _fill_row("SGOV", "buy", 4.421802, 100.0, "2026-08-18", "o2",
+                      account="AGENTIC1"),
+        ]),
+    ])
+    assert L.positions_from_fills(fills)["SGOV"] == pytest.approx(34.227439)
+    ind = L.positions_from_fills(L.fills_for_account(fills, "IND1"))
+    agentic = L.positions_from_fills(L.fills_for_account(fills, "AGENTIC1"))
+    assert ind["SGOV"] == pytest.approx(29.805637)
+    assert agentic["SGOV"] == pytest.approx(4.421802)
+
+
+def test_fold_fills_cache_rejects_a_row_with_no_account():
+    """Strict on purpose: an unattributable fill must stop the run loudly via
+    `bad` -> preflight, never fold into a total that belongs to neither
+    account."""
+    row = _fill_row("XOM", "buy", 10, 100.0, "2026-08-18", "o1")
+    row.pop("account")
+    blank = _fill_row("OXY", "buy", 1, 50.0, "2026-08-18", "o2", account="")
+    fills, bad = L.fold_fills_cache([
+        _cache_file("fills-cache-2026-08-20.json", [
+            row, blank,
+            _fill_row("VTI", "buy", 1, 300.0, "2026-08-18", "o3", account="IND1"),
+        ]),
+    ])
+    assert [f.order_id for f in fills] == ["o3"]
+    assert len(bad) == 2
+
+
+def test_fold_fills_cache_dedup_key_does_not_collapse_across_accounts():
+    """Two accounts could each carry a fill with no order id and otherwise
+    identical fields; the composite fallback key must keep both."""
+    fills, bad = L.fold_fills_cache([
+        _cache_file("fills-cache-2026-08-20.json", [
+            _fill_row("XOM", "buy", 10, 100.0, "2026-08-18", account="IND1"),
+            _fill_row("XOM", "buy", 10, 100.0, "2026-08-18", account="AGENTIC1"),
+        ]),
+    ])
+    assert bad == []
+    assert len(fills) == 2
+
+
+def test_apply_splits_preserves_the_account():
+    """Split adjustment rebuilds every Fill it touches; dropping the account
+    there would lose the attribution one step after the fold recovered it."""
+    fills = [L.Fill("NVDA", "buy", 12.0, 900.0, date(2023, 9, 12), "o1", "IND1")]
+    adjusted = L.apply_splits(fills, {
+        "NVDA": [L.SplitEvent("NVDA", date(2024, 6, 10), 10.0)]})
+    assert adjusted[0].account == "IND1"
+    assert adjusted[0].quantity == pytest.approx(120.0)
+
+
+def test_fills_ready_to_cache_preserves_the_account():
+    """The cache write path itself: what goes out must still carry what the
+    fold will require on the way back in."""
+    old = L.Fill("XOM", "buy", 1.0, 100.0, date(2026, 8, 1), "o1", "AGENTIC1")
+    kept = L.fills_ready_to_cache([old], today=date(2026, 9, 9))
+    assert [f.account for f in kept] == ["AGENTIC1"]
 
 
 def test_fills_cache_watermark_none_when_nothing_cached():

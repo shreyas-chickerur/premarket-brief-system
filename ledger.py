@@ -39,6 +39,7 @@ __all__ = [
     "compact_journal_month",
     "FILLS_CACHE_HORIZON_DAYS", "fills_cache_filename", "FILLS_CACHE_RE",
     "fold_fills_cache", "fills_cache_watermark", "fills_ready_to_cache",
+    "fills_for_account",
     "SPLITS_CACHE_HORIZON_DAYS", "splits_cache_filename", "SPLITS_CACHE_RE",
     "SplitsCacheEntry", "fold_splits_cache", "symbols_needing_split_check",
     "SECTOR_CACHE_HORIZON_DAYS", "sector_cache_filename", "SECTOR_CACHE_RE",
@@ -61,13 +62,32 @@ QTY_TOL = 1e-4
 
 @dataclass(frozen=True)
 class Fill:
-    """One executed trade, as the broker reports it."""
+    """One executed trade, as the broker reports it.
+
+    `account` is which brokerage account executed it. It exists because
+    everything downstream of a fill is PER ACCOUNT -- `DAILY_PROCEDURE.md`
+    Stage 0 step 7 reconciles each account against its own
+    `get_equity_positions` snapshot, and step 8 calls
+    `to_washsale_trades(fills, account)` once per account -- while
+    `fold_fills_cache` returns one flat list folded from files that mix both.
+    Without the field, a cached fill's account is unrecoverable and the merge
+    is silently wrong: demonstrated against live broker data on 9 September
+    2026, where SGOV is held in both accounts (29.805637 derived for one,
+    4.421802 for the other) and an account-less merged cache yields 34.227439,
+    which reconciles against neither. That run refused to write its cache
+    at all rather than corrupt the next run's reconciliation, and aborted in
+    Stage 0 step 7 having spent its wall-clock budget re-pulling 880 orders
+    it could not cache. The default is empty only so the field can sit last
+    without reordering every existing call site; `fold_fills_cache` requires
+    a real one on every cached row.
+    """
     symbol: str
     side: str                   # buy | sell
     quantity: float
     price: float
     on: date
     order_id: str = ""
+    account: str = ""
 
     @property
     def signed_quantity(self) -> float:
@@ -91,8 +111,15 @@ def _as_date(value: Any) -> Optional[date]:
     return None
 
 
-def fills_from_orders(orders: Iterable[dict]) -> list[Fill]:
+def fills_from_orders(orders: Iterable[dict], account: str = "") -> list[Fill]:
     """Extract actual executions from broker order payloads.
+
+    `account` is stamped onto every fill produced. The caller already knows
+    it -- `get_equity_orders` is called once per account number -- and it is
+    the only place that knowledge exists, since an order payload does not
+    carry the account it was placed in. Passing it here is what lets a fill
+    survive a round trip through the fills cache still knowing which
+    account's position it belongs to (see `Fill.account`).
 
     The quantity used is `cumulative_quantity`, never `quantity`. An order's
     requested size is an intention; a position is built from what actually
@@ -131,9 +158,23 @@ def fills_from_orders(orders: Iterable[dict]) -> list[Fill]:
             price=float(price),
             on=when,
             order_id=str(o.get("id", "")),
+            account=str(account),
         ))
     out.sort(key=lambda f: (f.on, f.order_id))
     return out
+
+
+def fills_for_account(fills: Sequence[Fill], account: str) -> list[Fill]:
+    """Just the fills belonging to `account`, order preserved.
+
+    `fold_fills_cache` deliberately returns one flat list across both
+    accounts -- the cache files are dated, not per-account -- but every
+    consumer that reconciles or builds wash-sale trades works on exactly one
+    account at a time. This is that split, in code, so it is not re-derived
+    by hand each morning as a comprehension that could quietly compare the
+    wrong side.
+    """
+    return [f for f in fills if f.account == account]
 
 
 def all_traded_symbols(fills: Sequence[Fill]) -> list[str]:
@@ -234,7 +275,7 @@ def apply_splits(fills: Sequence[Fill],
         for ev in sorted(events, key=lambda e: e.effective_date):
             out = [
                 Fill(f.symbol, f.side, f.quantity * ev.ratio, f.price / ev.ratio,
-                    f.on, f.order_id)
+                    f.on, f.order_id, f.account)
                 if f.symbol == symbol and f.on < ev.effective_date else f
                 for f in out
             ]
@@ -284,10 +325,24 @@ def fold_fills_cache(files: Iterable[dict]) -> tuple[list[Fill], list[str]]:
     list, plus any files/rows that would not parse.
 
     `files` are `{"title": str, "content": str}`, same shape as
-    `fold_journal`. Deduplicated on `order_id` (falling back to a
+    `fold_journal`. Deduplicated on `account` + `order_id` (falling back to a
     symbol/date/price/quantity key for the rare fill with no id) so a
     caller that accidentally re-caches an already-cached fill does not
-    double it into the position count.
+    double it into the position count. The key is account-scoped because
+    the rest of the pipeline is: two accounts' rows live in the same file,
+    and a key that ignored the account could collapse one account's fill
+    into the other's.
+
+    **A row without a non-empty `account` is recorded in `bad`, not
+    folded.** That is deliberately strict, and it is the whole point of the
+    9 September 2026 fix: an account-less row cannot be attributed to
+    either account, and folding it anyway would put a fill into a merged
+    total that reconciles against neither one -- the exact corruption the
+    9 September run refused to write its cache to avoid. A `bad` entry
+    reaches `runlog.preflight(unreadable_files=...)` and aborts the run
+    with a readable reason, which is the correct outcome: better a loud
+    stop than a position count that is quietly wrong. No fills-cache file
+    written before this change exists, so nothing legacy is being rejected.
     """
     seen: dict[str, Fill] = {}
     bad: list[str] = []
@@ -317,14 +372,17 @@ def fold_fills_cache(files: Iterable[dict]) -> tuple[list[Fill], list[str]]:
                     price=float(r["price"]),
                     on=_as_date(r["on"]),
                     order_id=str(r.get("order_id", "")),
+                    account=str(r["account"]),
                 )
                 if fill.on is None:
                     raise ValueError("unparseable date")
+                if not fill.account:
+                    raise ValueError("fill has no account")
             except (KeyError, TypeError, ValueError):
                 bad.append(f"{fills_cache_filename(date.fromisoformat(iso), seq)} fill")
                 continue
-            key = fill.order_id or f"{fill.symbol}:{fill.on}:{fill.price}:{fill.quantity}"
-            seen[key] = fill
+            ident = fill.order_id or f"{fill.symbol}:{fill.on}:{fill.price}:{fill.quantity}"
+            seen[f"{fill.account}:{ident}"] = fill
 
     out = sorted(seen.values(), key=lambda f: (f.on, f.order_id))
     return out, bad
