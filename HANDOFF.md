@@ -1717,27 +1717,37 @@ the check.
   for the live values) implies roughly 900 closed trades to settle at the
   observed trade rate. That is measured in years — see section 8's "Path to
   live trading" for why that is not, on its own, a reason to delay going live.
-- **The fills cache has still never actually been written, as of 8
-  September 2026, despite three real chances to.** `test_fills_cache_round_trip_matches_a_direct_fetch`
-  proves the reconstruction logic against the real 31 August order fixture;
-  a 5 September 2026 rehearsal re-ran the round trip against both accounts'
-  real fill histories and got a byte-for-byte match — but every fill that
-  day was already older than `FILLS_CACHE_HORIZON_DAYS` (7 days), and no
-  `fills-cache-*.json` file was written by a rehearsal in the first place.
-  The real gap: the 8 September watchdog-retry run's own manifest logged
-  `fills_ready_to_cache: 870` (every derived fill was cache-eligible) and
-  wrote `splits-cache-2026-09-08.json` in the same run — but there is no
-  `create_file(fills-cache-2026-09-08.json)` call anywhere in that run's
-  `calls` log. The instruction was computed correctly and never carried
-  out, and nothing on the manifest recorded the miss; a human found it by
-  diffing the call log by hand the next morning. Root cause is procedural,
-  not a code defect — `ledger.fills_ready_to_cache`/`fold_fills_cache` are
-  correct and tested; `DAILY_PROCEDURE.md` Stage 6 now asks for a
-  `log.check(f"{cache}_cache_written", ...)` per cache file (8 September
-  2026) so a future miss is a same-day, visible `warn` rather than
-  another silent one — see `PROCEDURE_RATIONALE.md`.
-  Every run since 31 August has therefore paid the full ~880-order Stage 0
-  fetch; the caching benefit has not yet been observed even once.
+- **RESOLVED 9 September 2026 — the fills cache has now been written for
+  real, and the deeper defect that blocked it is fixed.** The 8 September
+  `fills_cache_written` check (added after that day's cache-file write was
+  computed and silently never made) did its job the very next morning: the
+  9 September 06:20 run refused to write the cache at all and aborted in
+  Stage 0 step 7, because it found a real schema defect against live broker
+  data — `ledger.Fill` had no `account` field, so a cache folded from both
+  accounts' rows could not say which account a fill belonged to. SGOV is
+  held in both accounts (29.805637 derived for individual, 4.421802 for
+  agentic); an account-less merged cache would have yielded 34.227439,
+  reconciling against neither. The run named the exact defect, proposed the
+  fix, and correctly stopped rather than write a corrupting cache.
+  `WATCHDOG_PROCEDURE.md`'s self-heal loop then did, for the first time,
+  everything it is authorized to do against a genuinely novel failure: the
+  09:32 watchdog retry diagnosed it, added `account` to `ledger.Fill`,
+  threaded it through `fills_from_orders`/`apply_splits`/`fold_fills_cache`
+  (which now REJECTS a row with no account, aborting loudly rather than
+  merging one), added `fills_for_account` to split a folded cache back
+  apart, ran the full suite (667 passed, 7 new), and merged directly to
+  `main` as commit `85d0504` — none of the three absolute limits touched.
+  Verified live: the 34.227439 merged SGOV total that reconciled against
+  neither account now splits correctly to 29.805637/4.421802 and both
+  accounts reconcile to 0 residuals. The same retry then wrote
+  `fills-cache-2026-09-09.json` (plus `-1`/`-2`/`-3`, 870 fills, 135,695
+  bytes) — the first fills cache this system has ever actually held.
+  `SELF_HEAL_EXERCISE_PROPOSAL.md`'s three rehearsal options are now moot
+  for this class of failure: this is the genuine, unplanned exercise that
+  document was written hoping for, and it succeeded without anyone running
+  it deliberately. Stages 1 through 5 still did not run that day (the
+  budget went to the fix plus Stage 0/6) — 0 ideas, same as the day before,
+  but for a disclosed, one-time reason rather than a recurring one.
 - **Monthly journal compaction has never been run, live or otherwise, by a
   human or by any procedure.** The logic is tested to exact equivalence
   against synthetic multi-file journals, but no `journal-monthly-*.json`
