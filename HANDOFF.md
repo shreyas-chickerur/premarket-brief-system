@@ -1704,10 +1704,19 @@ the check.
   original process has actually stopped consuming resources by the time the
   retry starts (a heartbeat going stale is evidence of a stall, not proof
   the process is dead) — see PROCEDURE_RATIONALE.md for that residual risk
-  stated plainly. Separately, `runlog.DEFAULT_WALL_CLOCK_DEADLINE_SECONDS`
-  (45 minutes) now gives a run that is merely slow, not stuck, a way to stop
-  itself and still send an incomplete brief rather than run into the
-  watchdog's own 60-minute offset at all.
+  stated plainly. Separately, `state.json.config.run_wall_clock_deadline_seconds`
+  (4200 as of 10 September 2026, previously 2700 — see below) gives a run
+  that is merely slow, not stuck, a way to stop itself and still send an
+  incomplete brief rather than run into the watchdog's own fire time at all.
+- **`run_wall_clock_deadline_seconds` raised 2700 → 4200 (10 September 2026),
+  watchdog trigger moved 07:20 → 08:20 Central.** The 4th consecutive
+  weekday of growing Stage 0 read cost (one more journal file every trading
+  day, `ledger.compact_journal_month` never yet run and unable to touch the
+  still-open current month) finally broke both the 06:20 scheduled run and
+  the 07:20 watchdog retry outright — full detail in PROCEDURE_RATIONALE.md
+  Stage 7. This is a stopgap sized to what a normal complete session needs
+  today, not a fix for the underlying growth; expect to revisit once
+  September closes and its journal files become compactable (1 October).
 - **`gap_risk_haircut` (0.25) and the concentration thresholds (0.5 ratio, 0.45
   eigen-share) are judgment calls, not measurements.** They should be revisited
   once enough real trading history exists to check them against actual

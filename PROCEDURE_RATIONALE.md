@@ -1156,3 +1156,60 @@ prose in the first place. `OTHER_SECTIONS` is now `("System health",)`
 (1 entry, not 3) — with the cap at 1, the duplicate-title check that used
 to guard `other_sections` became unreachable (any 2-item list now trips
 the count cap first) and was deleted rather than left as dead code.
+
+## Stage 7 — Stage 0 outgrows its own wall-clock budget; deadline raised, watchdog pushed back
+
+10 September 2026: both the 06:20 scheduled run and the 07:20 watchdog
+retry aborted at Stage 0 without materialising enough of the Drive state
+(journal, fills-cache, splits-cache — 18-19 files) to proceed. The
+06:20 run read 4 files in 33 minutes; the watchdog read 1 file in under
+9 before giving up. Neither produced an email, a decision, or an order
+(the DRY RUN guard forbids the last regardless).
+
+This was the 4th consecutive weekday of the same degradation, not a new
+failure mode: 7 September flagged the underlying cost without aborting
+(market closed that day gave it slack), 8 September aborted at 3081s
+against the 2700s deadline, 9 September finished but close to the wire,
+10 September broke outright, twice. The cause is structural, not a bug:
+each Drive file costs one `download_file_content` round trip whose
+base64 payload must be written back to local disk before `json.loads`
+can run, and that write-back — not the download — is the dominant
+per-file cost. The number of journal files grows by one every trading
+day (13-14 as of 10 September) because `ledger.compact_journal_month`
+has never been run, and `month_is_compactable` forbids compacting the
+still-open current month — so there was, and is, no fix available for
+September itself, only for August and earlier (and August already holds
+a single file, so compacting it changes nothing).
+
+The watchdog's own retry correctly declined to merge a fix here, per
+`WATCHDOG_PROCEDURE.md` Stage 5 step 3 ("if no concrete, narrow,
+well-understood fix for the specific failing check exists, do not
+guess") — this is a capacity/config condition, not a code defect, and
+every candidate fix is either a human decision (raise the deadline,
+compact the journal once October makes it eligible) or does not exist
+yet (a cheaper way to materialise Drive state). Presented with this,
+the human decision made was: raise `run_wall_clock_deadline_seconds`
+from 2700 to 4200 (`state.json`, new file id
+`13dPO79SL0zW9094bBKvAJhhx2TmWsb0q`, old file renamed to
+`state.superseded-2026-09-10.json`) — the figure 8 September's run had
+already estimated a normal complete session needs.
+
+Raising the deadline alone would have let Stage 0 run right up against
+the watchdog's own fire time: the two triggers are exactly 60 minutes
+apart (06:20/07:20 Central), and the previous 45-minute deadline was
+already sized to that gap (`gather 30m < heartbeat 35m < deadline 45m <
+watchdog offset 60m`, `DAILY_PROCEDURE.md` Stage 6). A 70-minute Stage 0
+budget with a 60-minute watchdog offset would let the watchdog fire
+while the 06:20 routine was possibly still running — the same class of
+overlap that caused duplicate-run corruption on the sibling
+investor-mimic-bot project. So the watchdog trigger
+(`trig_01EqGKzJ6ymqcrfZMzWtR5vH`) was moved from 07:20 to 08:20 Central
+(`cron_expression` `"20 12 * * 1-5"` → `"20 13 * * 1-5"`) to preserve the
+same margin ahead of the new, longer budget.
+
+This is a stopgap, not a fix: the read cost keeps growing by one file
+every trading day regardless of the deadline, and will need compacting
+again once September closes (1 October, earliest `month_is_compactable`
+date for September). If Stage 0 is still running close to 4200s by then,
+compacting July/August/September in one pass is the next lever, not
+another deadline increase.
