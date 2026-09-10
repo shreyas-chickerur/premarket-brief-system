@@ -1070,3 +1070,37 @@ scheduled routines' own prompt text at trigger-creation time, per
 a fresher value. Both were updated to the new file id in the same pass;
 the old `state.json` was renamed to `state.superseded-2026-09-09.json`
 in Drive rather than left ambiguous alongside the new one.
+
+## Stage 6 — decisions before diagnostics, and "how much" must be a number
+
+Requested 10 September 2026: the email should lead with only what is
+needed to decide -- buy/sell/hold, how much, and why -- with everything
+else reachable but not competing for the top of the page. Two changes,
+one rendering-only and one a real new rule.
+
+**Rendering**: `render_email`'s body order previously ran banner ->
+`_health_line` (check tally and warnings) -> the two account sections ->
+`other_sections` (prior-day review, diversification, system health) ->
+`_decisions`. The account sections -- the only part of the email that is
+actually a decision -- sat third, after a warnings block that on a slow
+Stage 0 can run to fifteen or more items. They now render immediately
+after the banner; everything else moves behind a `_details_divider()`
+that says outright nothing past it is hidden, only reordered, so the
+"never hide a check" rule stays true in substance, not just in the raw
+manifest anyone can still pull from Drive. `idea_card`'s left border is
+now colored to the action (the same palette `_action_badge` already used)
+instead of the neutral rule-grey every other `_well` block gets, and the
+badge itself carries a directional glyph (▲ buy, ▼ sell/trim, ● hold) --
+a column of cards should read as a column of colors and shapes before a
+single word is read.
+
+**The real rule**: a `buy`/`sell`/`trim` card's `quantity` must contain an
+actual number. Found while reviewing a real card from 8 September that
+read `quantity: "partial trim"` -- true, but not an answer to "how much,"
+and the real figure ("about 2.97 shares, roughly 1,127 dollars") was
+sitting unused in the matching `Decision`'s own `reason` text the whole
+time. `emailer.ACTIONS_REQUIRING_QUANTITY` names the three actions that
+change a position (`hold`/`skip`/`none` are not transactions and carry no
+such requirement); `verify_email` raises before render, same as every
+other unverifiable claim it already catches -- the fix is "put the number
+that already exists into the card," never "loosen the check."

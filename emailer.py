@@ -32,7 +32,7 @@ from typing import Any, Iterable, Optional, Sequence
 
 __all__ = ["diagnose", "render_email", "subject_for", "idea_card", "idea_cards",
           "CANONICAL_SECTIONS", "MAX_SECTIONS", "ACCOUNT_SECTIONS", "OTHER_SECTIONS",
-          "verify_email", "ALLOWED_SOURCE_PREFIXES"]
+          "verify_email", "ALLOWED_SOURCE_PREFIXES", "ACTIONS_REQUIRING_QUANTITY"]
 
 # --------------------------------------------------------------------------
 # palette
@@ -232,13 +232,23 @@ _ACTION_COLORS = {
     "hold": (MUTED, WELL),
 }
 
+# A leading glyph on the action badge itself, not just its color, so the
+# call is legible even to a reader on a client that mutes background
+# colors (dark mode, print, a screen reader) or someone scanning in
+# grayscale. Up for adding exposure, down for reducing it, a plain dot for
+# doing nothing to an existing position -- deliberately not a "skip"/"none"
+# glyph, since those are not calls on a position at all.
+_ACTION_GLYPHS = {"buy": "▲", "sell": "▼", "trim": "▼", "hold": "●"}
+
 
 def _action_badge(action: str) -> str:
     fg, bg = _ACTION_COLORS.get(action.lower(), (MUTED, WELL))
-    return (f'<span style="display:inline-block;padding:2px 8px;'
+    glyph = _ACTION_GLYPHS.get(action.lower(), "")
+    label = f"{glyph} {action}" if glyph else action
+    return (f'<span style="display:inline-block;padding:3px 9px;'
             f'border-radius:3px;background:{bg};color:{fg};font:700 12px/1.5 '
             f'{FONT};letter-spacing:.04em;text-transform:uppercase;">'
-            f'{escape(action)}</span>')
+            f'{escape(label)}</span>')
 
 
 def idea_card(symbol: str, action: str, quantity: str = "", detail: str = "",
@@ -250,6 +260,13 @@ def idea_card(symbol: str, action: str, quantity: str = "", detail: str = "",
     action, and a quantity buried in a sentence are slower to scan than the
     same three things in the first line of a card.
 
+    The card's left border is colored to the action (green/red/amber/muted,
+    the same palette as the badge) rather than the neutral rule-grey every
+    other `_well` block uses (10 September 2026) -- a column of cards reads
+    as a column of colors before a single word is read, which is the whole
+    point of a "what to do" section a reader should be able to scan in
+    seconds, not study.
+
     `bullets` are `(text, source)` pairs — `source` names what the point
     came from (a data provider, a named report, a computed check, a
     specific tool call) so the reasoning trail is visible, not just
@@ -257,6 +274,7 @@ def idea_card(symbol: str, action: str, quantity: str = "", detail: str = "",
     attributable source (a synthesis of several); it still renders, just
     without an attribution tag.
     """
+    accent, _ = _ACTION_COLORS.get(action.lower(), (RULE, WELL))
     qty_html = (f'&nbsp;<strong style="font:700 14px/1.4 {FONT};color:{INK};">'
                 f'{escape(str(quantity))}</strong>' if quantity else "")
     detail_html = (f'&nbsp;<span style="font:400 13px/1.5 {FONT};'
@@ -274,7 +292,7 @@ def idea_card(symbol: str, action: str, quantity: str = "", detail: str = "",
                      f'color:{INK};">{escape(text)}{tag}</li>')
     body = (f'<ul style="margin:0;padding-left:18px;">{"".join(items)}</ul>'
             if items else "")
-    return _well(head + body)
+    return _well(head + body, accent=accent)
 
 
 def idea_cards(ideas: Sequence[dict], *, closest_calls: Sequence[dict] = ()) -> str:
@@ -328,6 +346,16 @@ ALLOWED_SOURCE_PREFIXES = (
     "Alpha Vantage ", "Robinhood ",
     "quantcore.", "runlog.", "ledger.", "evidence.", "washsale.",
 )
+
+# Actions that change a position and therefore must state how much -- a
+# reader deciding whether to act on a "trim" needs the share count and
+# dollar amount, not the word "trim" again. `hold`/`skip`/`none` (and
+# anything else) name a decision, not a transaction, and carry no such
+# requirement. Added 10 September 2026 after a real card read "quantity:
+# partial trim" while the matching manifest decision already had the real
+# number ("about 2.97 shares, roughly 1,127 dollars") sitting unused in its
+# `reason` text -- the number existed, nothing required the card to use it.
+ACTIONS_REQUIRING_QUANTITY = frozenset({"buy", "sell", "trim"})
 
 _ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _ORDINAL_RE = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)\b", re.IGNORECASE)
@@ -411,17 +439,20 @@ def verify_email(ideas_by_account: dict[str, Sequence[dict]], *,
 
     Raises on the first of:
 
-    1. **A card's `quantity` does not match the matching `Decision`'s
+    1. **A `buy`/`sell`/`trim` card (`ACTIONS_REQUIRING_QUANTITY`) whose
+       `quantity` has no parseable number at all** — "partial trim" is not
+       an answer to "how much," even when it is technically true.
+    2. **A card's `quantity` does not match the matching `Decision`'s
        `inputs.quantity`** in `manifest["decisions"]`, matched by symbol
        and account. A card naming a quantity with no matching decision at
        all is the same failure — there is nothing for it to agree with.
-    2. **A bullet with an empty source.** Every claim in these two
+    3. **A bullet with an empty source.** Every claim in these two
        sections must be attributable; `idea_card`'s own general-purpose
        leniency (an empty source renders without a tag) does not apply
        here.
-    3. **A bullet whose source is neither in `known_sources` nor matches
+    4. **A bullet whose source is neither in `known_sources` nor matches
        `ALLOWED_SOURCE_PREFIXES`.**
-    4. **A numeric token in a bullet's text, or a card's `detail`, that
+    5. **A numeric token in a bullet's text, or a card's `detail`, that
        cannot be traced** (exactly, or within `numeric_tolerance`
        relative) **to `manifest`, `evidence`, or a decision's `inputs`.**
        Dates and ordinals are exempted via `_date_like_spans` — a horizon
@@ -446,9 +477,15 @@ def verify_email(ideas_by_account: dict[str, Sequence[dict]], *,
     for account, ideas in ideas_by_account.items():
         for idea in ideas:
             symbol = str(idea.get("symbol", "")).upper()
+            action = str(idea.get("action", "")).lower()
 
             qty_text = str(idea.get("quantity", "") or "")
             qty_claims = _numeric_claims(qty_text)
+            if action in ACTIONS_REQUIRING_QUANTITY and not qty_claims:
+                raise ValueError(
+                    f'{symbol} ({account}): a {action!r} card must state how much -- '
+                    f'{qty_text!r} has no parseable number. "partial trim" or similar '
+                    f'is not an answer to "how much"; state the actual shares/dollars.')
             if qty_claims:
                 matches = decisions_by_key.get((symbol, account), [])
                 decision_qty = next(
@@ -614,16 +651,22 @@ def render_email(manifest: dict, *,
             numeric_tolerance=numeric_tolerance,
         )
 
-        full_sections = [
-            ("Agentic account — activity",
-             idea_cards(agentic_ideas, closest_calls=agentic_closest_calls)),
-            ("Individual account — suggestions",
-             idea_cards(suggestion_ideas, closest_calls=suggestion_closest_calls)),
-            *other_sections,
-        ]
+        # Decisions first, diagnostics after (10 September 2026). A reader
+        # opens this email to decide something, not to audit a run -- what
+        # to buy/sell/hold and how much is the entire reason it exists;
+        # check counts, warnings, and portfolio commentary explain and
+        # support that, they do not compete with it for the top of the
+        # page. Nothing below is removed or hidden (this system's standing
+        # rule), only reordered and visually quieted, behind one clear
+        # divider that says so.
+        body.append(_h("Agentic account — activity"))
+        body.append(idea_cards(agentic_ideas, closest_calls=agentic_closest_calls))
+        body.append(_h("Individual account — suggestions"))
+        body.append(idea_cards(suggestion_ideas, closest_calls=suggestion_closest_calls))
 
+        body.append(_details_divider())
         body.append(_health_line(manifest))
-        for title, html in full_sections:
+        for title, html in other_sections:
             body.append(_h(title))
             body.append(html)
         body.append(_decisions(manifest))
@@ -695,6 +738,25 @@ def _what_still_worked(manifest: dict) -> str:
 
     return _p("No orders were placed and no research ran. "
               + "; ".join(bits) + ".", size=13, color=MUTED, top=18)
+
+
+def _details_divider() -> str:
+    """Marks where the email stops being decisions and starts being the
+    evidence and machinery behind them. Nothing past this point is hidden
+    — the same content that used to sit between the account cards and the
+    decisions list still renders in full — it is just no longer first.
+    """
+    return (
+        f'<div style="margin:34px 0 4px;padding-top:20px;'
+        f'border-top:2px solid {RULE};">'
+        f'<div style="font:600 11px/1.5 {FONT};color:{MUTED};'
+        f'letter-spacing:.09em;text-transform:uppercase;">'
+        f'Details &amp; system health</div>'
+        f'<div style="margin-top:4px;font:400 12px/1.5 {FONT};color:{MUTED};">'
+        f'Everything below explains and supports the calls above. '
+        f'Nothing here changes them.</div>'
+        f'</div>'
+    )
 
 
 def _health_line(manifest: dict) -> str:

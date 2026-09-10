@@ -412,6 +412,33 @@ def test_idea_card_with_no_bullets_still_renders_the_head():
     assert "SGOV" in html and "HOLD" in html.upper()
 
 
+def test_idea_card_border_is_colored_to_the_action():
+    """10 September 2026: a column of cards should read as a column of
+    colors before a single word is read -- buy green, sell red, trim
+    amber, hold muted, matching the badge palette exactly."""
+    buy = E.idea_card("OXY", "buy", "2 shares")
+    sell = E.idea_card("OXY", "sell", "2 shares")
+    trim = E.idea_card("VTI", "trim", "3 shares")
+    hold = E.idea_card("SGOV", "hold")
+    assert E._ACTION_COLORS["buy"][0] in buy
+    assert E._ACTION_COLORS["sell"][0] in sell
+    assert E._ACTION_COLORS["trim"][0] in trim
+    assert E._ACTION_COLORS["hold"][0] in hold
+
+
+def test_action_badge_carries_a_directional_glyph():
+    assert "▲" in E._action_badge("buy")
+    assert "▼" in E._action_badge("sell")
+    assert "▼" in E._action_badge("trim")
+    assert "●" in E._action_badge("hold")
+
+
+def test_action_badge_unknown_action_has_no_glyph_but_still_renders():
+    html = E._action_badge("skip")
+    assert "skip" in html
+    assert "▲" not in html and "▼" not in html and "●" not in html
+
+
 def test_idea_card_escapes_everything():
     html = E.idea_card("<img src=x>", "buy", "1", "a & b",
                        bullets=[("<script>bad</script>", "a & b co")])
@@ -511,6 +538,30 @@ def test_verify_email_raises_on_quantity_mismatch():
     manifest = _manifest([_decision(quantity=2.0)])
     with pytest.raises(ValueError, match="does not match"):
         E.verify_email(ideas, manifest=manifest)
+
+
+def test_verify_email_raises_on_a_trim_with_no_parseable_quantity():
+    """10 September 2026: a real card once read quantity="partial trim"
+    while the matching decision's own reason text had the real number
+    ("about 2.97 shares") sitting unused. "How much" must be a real
+    number, not a vague phrase, for anything that changes a position."""
+    ideas = {"individual": [{"symbol": "VTI", "action": "trim", "quantity": "partial trim"}]}
+    manifest = _manifest([_decision(account="individual", symbol="VTI", quantity=2.97)])
+    with pytest.raises(ValueError, match="how much"):
+        E.verify_email(ideas, manifest=manifest)
+
+
+@pytest.mark.parametrize("action", ["buy", "sell", "trim"])
+def test_verify_email_raises_on_missing_quantity_entirely_for_transacting_actions(action):
+    ideas = {"agentic": [{"symbol": "OXY", "action": action}]}
+    with pytest.raises(ValueError, match="how much"):
+        E.verify_email(ideas, manifest=_manifest([]))
+
+
+@pytest.mark.parametrize("action", ["hold", "skip", "none"])
+def test_verify_email_does_not_require_a_quantity_for_non_transacting_actions(action):
+    ideas = {"agentic": [{"symbol": "OXY", "action": action}]}
+    E.verify_email(ideas, manifest=_manifest([]))  # must not raise
 
 
 def test_verify_email_raises_when_no_decision_matches_the_card_at_all():
@@ -677,6 +728,27 @@ def test_render_email_renders_a_verified_card_end_to_end():
                         "bullets": [("Dated catalyst", "Alpha Vantage NEWS_SENTIMENT")]}],
         other_sections=[("System health", "<p>nominal</p>")])
     assert "OXY" in html and "Dated catalyst" in html and "Agentic account" in html
+
+
+def test_render_email_puts_decisions_before_diagnostics():
+    """10 September 2026: a reader opens this to decide something, not to
+    audit a run -- the account cards must render before the health line,
+    the other_sections, and the raw decisions list, with a clear divider
+    marking where "what to do" ends and "why" begins."""
+    manifest = healthy_manifest()
+    manifest["decisions"] = [{"symbol": "OXY", "account": "agentic", "action": "buy",
+                              "executed": True, "reason": "cleared the gate",
+                              "inputs": {"quantity": 2.0}}]
+    _, html = E.render_email(
+        manifest,
+        agentic_ideas=[{"symbol": "OXY", "action": "buy", "quantity": "2 shares",
+                        "bullets": [("Dated catalyst", "Alpha Vantage NEWS_SENTIMENT")]}],
+        other_sections=[("System health", "<p>nominal</p>")])
+    i_agentic = html.index("Agentic account")
+    i_divider = html.index("Details &amp; system health")
+    i_other = html.index("System health")
+    i_decisions = html.index(">Decisions<")
+    assert i_agentic < i_divider < i_other < i_decisions
 
 
 def test_render_email_does_not_verify_on_an_aborted_run():
