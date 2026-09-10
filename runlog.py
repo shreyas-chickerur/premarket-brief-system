@@ -203,6 +203,94 @@ def brokerage_token_health(days_since_success: Optional[int], *,
     return Check("brokerage_token_health", passed, "warn", detail, value=days_since_success)
 
 
+STAGE0_CAPACITY_WARN_MARGIN_DAYS = 3
+
+
+def stage0_read_cost_metric(*, files_materialised: int, duration_ms: int) -> dict:
+    """The structured observation `stage0_capacity_forecast` reads back out
+    of history. Record this once, via `log.metric("stage0_read_cost", ...)`,
+    at the end of Stage 0 on every run that reaches that point -- aborted
+    or not. `files_materialised` is however many journal/fills-cache/
+    splits-cache files this run actually downloaded and parsed before
+    Stage 0 ended, NOT the day's full requirement -- on a complete run
+    those are the same number, but an aborted run's partial read still
+    measures the same real per-file cost and is just as valid an
+    observation; excluding it would throw away the one measurement taken
+    on exactly the days this forecast most needs to be accurate. Before
+    10 September 2026 this cost was only ever described in free-text
+    journal notes a human had to read by hand (`chronic_stage_0_abort`,
+    `preflight_read_cost`) instead of a structured metric later code
+    could act on."""
+    return {"files_materialised": files_materialised, "duration_ms": duration_ms}
+
+
+def stage0_capacity_forecast(*, journal_file_count: int, other_required_files: int,
+                             wall_clock_deadline_seconds: int,
+                             history: Sequence[dict],
+                             warn_margin_days: int = STAGE0_CAPACITY_WARN_MARGIN_DAYS) -> Check:
+    """Forecast how many more trading days Stage 0 can absorb one more
+    journal file (it gains exactly one per trading day until a month
+    becomes compactable) before its own read cost is projected to exceed
+    `wall_clock_deadline_seconds` -- a warning meant to reach a human
+    several days before a run actually aborts at `drive_state_fully_
+    materialised`, the same relationship `brokerage_token_health` already
+    has to `tools_available` failing cold.
+
+    10 September 2026: this exact failure was flagged as a `warn` on 7
+    September, three days before both the 06:20 run and the 07:20
+    watchdog retry actually aborted on the 10th -- the gap was never
+    detection, it was that the warning lived only in a run's own journal
+    note, never in the one artefact a human reads every day. This
+    function turns the same forecast into a code-computed, testable
+    `Check` so `warn_margin_days` of runway is guaranteed to reach System
+    health (`DAILY_PROCEDURE.md` Stage 6) before the deadline is blown,
+    not just noted after.
+
+    `seconds_per_file` is derived from the most recent run in `history`
+    that recorded a `stage0_read_cost` metric (see `stage0_read_cost_metric`)
+    -- self-calibrating to the live environment's actual observed cost
+    rather than a hardcoded constant that would itself go stale. Returns
+    `info`/pass with no observation yet if no run has recorded one.
+    """
+    required_files_today = journal_file_count + other_required_files
+    seconds_per_file = None
+    for h in reversed(list(history)):
+        obs = h.get("metrics", {}).get("stage0_read_cost")
+        if obs and obs.get("files_materialised"):
+            seconds_per_file = (obs["duration_ms"] / 1000) / obs["files_materialised"]
+            break
+    if seconds_per_file is None:
+        return Check("stage0_capacity_forecast", True, "info",
+                     "no prior run has recorded a stage0_read_cost observation yet",
+                     value=None)
+
+    projected_seconds_today = required_files_today * seconds_per_file
+    over_budget_now = projected_seconds_today > wall_clock_deadline_seconds
+    margin_days = 0
+    projected = projected_seconds_today
+    while not over_budget_now and projected + seconds_per_file <= wall_clock_deadline_seconds \
+            and margin_days < 3650:
+        projected += seconds_per_file
+        margin_days += 1
+
+    passed = (not over_budget_now) and margin_days >= warn_margin_days
+    if over_budget_now:
+        detail = (f"projected Stage 0 read time ({projected_seconds_today:.0f}s) already "
+                  f"exceeds the {wall_clock_deadline_seconds}s deadline at today's "
+                  f"{required_files_today} required files (~{seconds_per_file:.1f}s/file "
+                  f"observed) -- expect this to keep aborting until the file count drops "
+                  f"(journal compaction) or the deadline is raised")
+    else:
+        detail = (f"about {margin_days} trading day(s) of headroom left at the observed "
+                  f"~{seconds_per_file:.1f}s/file before Stage 0 is projected to exceed its "
+                  f"{wall_clock_deadline_seconds}s deadline ({required_files_today} files "
+                  f"required today)")
+    return Check("stage0_capacity_forecast", passed, "warn", detail,
+                value={"margin_days": margin_days, "required_files_today": required_files_today,
+                       "seconds_per_file": round(seconds_per_file, 2),
+                       "projected_seconds_today": round(projected_seconds_today, 1)})
+
+
 def gate_funnel(decisions: Sequence[dict], *, ideas_opened: int) -> dict:
     """How many distinct symbols reached the five-condition gate this run,
     and how many cleared it -- the "what happened once Stage 1's universe

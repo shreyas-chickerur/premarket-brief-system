@@ -1213,3 +1213,44 @@ again once September closes (1 October, earliest `month_is_compactable`
 date for September). If Stage 0 is still running close to 4200s by then,
 compacting July/August/September in one pass is the next lever, not
 another deadline increase.
+
+## Stage 8 — the Stage 0 read-cost forecast becomes code, not a journal note nobody escalated
+
+Asked directly, after Stage 7: the test suite runs synthetic fixtures and
+passed cleanly (672/672) on every one of the four aborted runs above --
+it was never in a position to catch this, because the actual failure was
+never a logic defect. It was "how long does it take to materialise N
+real files from the live account's Drive folder today," a number that
+changes every trading day and does not exist anywhere a unit test could
+read it from. What genuinely should have reached a human sooner was not
+a missing test: it was a warning the system had already computed,
+correctly, on 7 September -- three days before it broke -- that lived
+only as free-form prose in that day's journal note (`preflight_budget_
+vs_drive_round_trips`) and was never escalated because nothing forced it
+into the one artefact a human actually reads every day, the email.
+
+`runlog.stage0_capacity_forecast` and `runlog.stage0_read_cost_metric`
+close that specific gap, not the testing gap (there is no code fix for
+the testing gap -- see above). The forecast is deliberately built the
+same way `brokerage_token_health` already forecasts an approaching token
+expiry: `info`/`warn` severity, never blocking, self-calibrating from
+real observed history rather than a hardcoded constant that would itself
+go stale (exactly the failure mode `STAGE_TIMING_BUDGETS_MS["preflight"]`
+already fell into -- 180s, set 5 September against 95-139s observations,
+never revisited as the real cost grew into the tens of minutes; a stage
+that is silently over its advisory budget every single day teaches
+nobody anything, which is precisely why a purpose-built forecast was
+needed instead of trusting `stage_budget_overruns` to already cover
+this).
+
+The per-file cost is measured from `stage0_read_cost_metric`, recorded
+at the end of Stage 0 on every run -- aborted or not. An aborted run's
+partial read is not a wasted observation: it measures the same real
+per-file cost as a complete one, and excluding it would throw away data
+on exactly the days the forecast most needs to be right. `DAILY_
+PROCEDURE.md` step 9b calls this every run, immediately after step 9's
+journal listing, and `DAILY_PROCEDURE.md`'s System health section now
+names `stage0_capacity_forecast` explicitly as one of the checks that
+must reach the reader in plain English whenever it warns -- not left to
+the same generic "use judgment" rule that let the 7 September warning
+go unescalated for three days the first time.

@@ -784,6 +784,73 @@ def test_brokerage_token_health_respects_a_custom_warn_after():
     assert not R.brokerage_token_health(5, warn_after_days=5).passed
 
 
+# ------------------------------------------------------- stage0_capacity_forecast
+
+def _stage0_history(files_materialised: int, duration_ms: int):
+    return [{"metrics": {"stage0_read_cost":
+                        R.stage0_read_cost_metric(files_materialised=files_materialised,
+                                                  duration_ms=duration_ms)}}]
+
+
+def test_stage0_read_cost_metric_shape():
+    m = R.stage0_read_cost_metric(files_materialised=18, duration_ms=90_000)
+    assert m == {"files_materialised": 18, "duration_ms": 90_000}
+
+
+def test_stage0_capacity_forecast_no_history_passes_quietly():
+    """No run has ever recorded the observation this forecast needs --
+    that is a fresh-system state, not itself a warning."""
+    c = R.stage0_capacity_forecast(journal_file_count=13, other_required_files=6,
+                                   wall_clock_deadline_seconds=4200, history=[])
+    assert c.passed and c.severity == "info"
+
+
+def test_stage0_capacity_forecast_comfortable_margin_passes():
+    # 10s/file observed, 19 files required today -> 190s, nowhere near 4200s.
+    history = _stage0_history(files_materialised=19, duration_ms=190_000)
+    c = R.stage0_capacity_forecast(journal_file_count=13, other_required_files=6,
+                                   wall_clock_deadline_seconds=4200, history=history)
+    assert c.passed and c.severity == "warn"
+    assert c.value["margin_days"] >= R.STAGE0_CAPACITY_WARN_MARGIN_DAYS
+
+
+def test_stage0_capacity_forecast_warns_inside_the_margin_window():
+    # 10s/file observed; deadline sized so only 2 more files (2 trading days)
+    # fit before the projected read time would exceed it.
+    history = _stage0_history(files_materialised=19, duration_ms=190_000)
+    c = R.stage0_capacity_forecast(journal_file_count=13, other_required_files=6,
+                                   wall_clock_deadline_seconds=210, history=history,
+                                   warn_margin_days=3)
+    assert not c.passed and c.severity == "warn"
+    assert c.value["margin_days"] < 3
+    assert "headroom" in c.detail
+
+
+def test_stage0_capacity_forecast_already_over_budget():
+    # 10s/file observed, 19 files required -> 190s projected, deadline only 100s.
+    history = _stage0_history(files_materialised=19, duration_ms=190_000)
+    c = R.stage0_capacity_forecast(journal_file_count=13, other_required_files=6,
+                                   wall_clock_deadline_seconds=100, history=history)
+    assert not c.passed
+    assert c.value["margin_days"] == 0
+    assert "already" in c.detail and "exceeds" in c.detail
+
+
+def test_stage0_capacity_forecast_uses_the_most_recent_observation():
+    """An older, faster-looking observation must not mask a worse recent one."""
+    history = [
+        {"metrics": {"stage0_read_cost": R.stage0_read_cost_metric(
+            files_materialised=10, duration_ms=10_000)}},   # 1s/file, stale
+        {"metrics": {"stage0_read_cost": R.stage0_read_cost_metric(
+            files_materialised=19, duration_ms=190_000)}},  # 10s/file, most recent
+    ]
+    c = R.stage0_capacity_forecast(journal_file_count=13, other_required_files=6,
+                                   wall_clock_deadline_seconds=210, history=history,
+                                   warn_margin_days=3)
+    assert not c.passed
+    assert c.value["seconds_per_file"] == 10.0
+
+
 # ---------------------------------------------------------------- scoring
 
 def test_scoring_refuses_to_certify_a_small_sample():
