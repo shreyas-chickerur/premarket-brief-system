@@ -7,14 +7,20 @@ worse email than a successful one.
 
 Design rules, in priority order:
 
-1. **The verdict is the first thing, in words.** Not a wall of checks the reader
-   has to scan for a "false".
+1. **The email answers one question: what should I do, and why.** Two account
+   sections — what the agentic account did, what's suggested for the
+   individual account — lead every email, in decision-first form: action,
+   how much, then reasons. Nothing else competes with them for the top of
+   the page.
 2. **A failed run is SHORT.** What broke, the likely cause, what to do. The full
    check list and the raw manifest are noise when the answer is "nothing ran";
    the manifest is written to storage for anyone who wants it.
-3. **Only failures are itemised.** Passing checks collapse to a count. Twenty
-   green rows train the reader to skim, and skimming is how a red one gets
-   missed.
+3. **"System health" is one plain sentence plus a human-written summary, never
+   a check dump.** (10 September 2026, at the reader's own request — a raw
+   check's `detail` text is written for a developer debugging that run, not
+   for someone deciding whether to trust today's ideas.) The full manifest,
+   every check verbatim, is still written to Drive every run for anyone who
+   wants to audit it; this email is deliberately not that artefact.
 4. **`diagnose` states a cause, not just a symptom.** "9 required tools missing"
    is a symptom. "The connectors are not attached to the routine" is the thing
    the reader can act on.
@@ -529,22 +535,24 @@ def verify_email(ideas_by_account: dict[str, Sequence[dict]], *,
 # The fixed set of sections a completed run's email may contain, in the
 # order they render. Cut from an original four ("Evidence review" / "Where
 # things stand" / "What moved and why" / "Risk measurement") to three on 1
-# September 2026, then restructured to these five on 4 September 2026: the
-# original three had nowhere to put the prior-day track record
-# (`runlog.score_closed_decisions`, Stage 0.6) or the portfolio
-# concentration verdict (`quantcore.correlation_concentration`, Stage 2) —
-# both existed in the run's own data and had no section to appear in, so
-# neither ever reached the one artefact a human actually reads. This tuple
-# is enforced in `render_email` below, not just described in
-# `DAILY_PROCEDURE.md` prose: the user does not want a market-commentary
-# newsletter, and a caller that starts appending ad hoc sections again
-# (the exact drift that produced the original four) now gets a `ValueError`
-# instead of a silently growing email.
+# September 2026, expanded to five on 4 September 2026 (adding "Prior-day
+# review" and "Diversification"), then cut back to these three on 10
+# September 2026 at the reader's own request: the email is for deciding
+# something, not auditing a run, and "what happened in the agentic
+# account," "what you're being asked to decide," and "did the system work"
+# is the complete list of things worth a reader's attention every single
+# morning. Prior-day track record and portfolio concentration are still
+# computed every run (`runlog.score_closed_decisions`, Stage 0.6;
+# `quantcore.correlation_concentration`, Stage 2) and still written to the
+# journal in full — cutting them from CANONICAL_SECTIONS removes them from
+# the email, not from the record. This tuple is enforced in `render_email`
+# below, not just described in `DAILY_PROCEDURE.md` prose: a caller that
+# starts appending ad hoc sections again (the exact drift that produced
+# the original four) gets a `ValueError` instead of a silently growing
+# email.
 CANONICAL_SECTIONS = (
     "Agentic account — activity",
     "Individual account — suggestions",
-    "Prior-day review",
-    "Diversification",
     "System health",
 )
 MAX_SECTIONS = len(CANONICAL_SECTIONS)
@@ -558,9 +566,9 @@ ACCOUNT_SECTIONS = (
     "Agentic account — activity",
     "Individual account — suggestions",
 )
-# The remaining three, still capped and still title-checked, passed to
-# `render_email` as pre-rendered `(title, html)` pairs via `other_sections`
-# — they carry no per-symbol numeric claims for `verify_email` to check.
+# The one section left, still title-checked, passed to `render_email` as a
+# pre-rendered `(title, html)` pair via `other_sections` — it carries no
+# per-symbol numeric claims for `verify_email` to check.
 OTHER_SECTIONS = tuple(t for t in CANONICAL_SECTIONS if t not in ACCOUNT_SECTIONS)
 
 
@@ -593,16 +601,17 @@ def render_email(manifest: dict, *,
     through THIS function where an account section renders without it
     having passed first.
 
-    `other_sections` are `(title, html)` pairs for the three remaining
-    sections — "Prior-day review", "Diversification", "System health"
-    (`OTHER_SECTIONS`) — which carry no per-symbol numeric claims to
-    verify the way the account cards do, so they stay pre-rendered HTML.
-    Passing one of the two account titles here raises: those sections are
-    always built from the structured ideas above, never from HTML a
-    caller assembled itself. At most `len(OTHER_SECTIONS)` (3) entries,
-    every title in `OTHER_SECTIONS`, no duplicates — same enforced-in-code
-    cap as before, just scoped to what is left once the account sections
-    are no longer caller-suppliable.
+    `other_sections` are `(title, html)` pairs for the one section left —
+    "System health" (`OTHER_SECTIONS`) — which carries no per-symbol
+    numeric claims to verify the way the account cards do, so it stays
+    pre-rendered HTML written by the caller in plain language. `render_email`
+    always prints its own one-line, code-computed tally above whatever the
+    caller writes (duration and how many internal checks passed) — a fact
+    that is always true regardless of what prose accompanies it. Passing
+    one of the two account titles here raises: those sections are always
+    built from the structured ideas above, never from HTML a caller
+    assembled itself. At most `len(OTHER_SECTIONS)` (1) entry, its title
+    exactly "System health", no duplicates.
 
     `known_sources`, `evidence`, and `numeric_tolerance` pass straight
     through to `verify_email` — see its docstring for what they do.
@@ -625,13 +634,17 @@ def render_email(manifest: dict, *,
         other_sections = list(other_sections)
         titles = [t for t, _ in other_sections]
         # Ordered so the count cap is reachable on its own: with only
-        # `len(OTHER_SECTIONS)` (3) valid unique titles, a 4th entry could
-        # otherwise only ever be caught as unrecognised or duplicate,
-        # never as "too many" specifically -- checking count first keeps
-        # that message meaningful instead of dead code.
+        # `len(OTHER_SECTIONS)` (1) valid title, a 2nd entry could
+        # otherwise only ever be caught as unrecognised, never as "too
+        # many" specifically -- checking count first keeps that message
+        # meaningful. (A separate duplicate-title check existed here before
+        # 10 September 2026; with the cap at 1, two entries always trip
+        # this count check first, so that branch was dead code and was
+        # removed rather than kept unreachable.)
         if len(other_sections) > len(OTHER_SECTIONS):
+            noun = "section" if len(OTHER_SECTIONS) == 1 else "sections"
             raise ValueError(
-                f"render_email accepts at most {len(OTHER_SECTIONS)} other sections, got "
+                f"render_email accepts at most {len(OTHER_SECTIONS)} other {noun}, got "
                 f"{len(other_sections)}: {titles}")
         account_titles_present = [t for t in titles if t in ACCOUNT_SECTIONS]
         if account_titles_present:
@@ -642,8 +655,6 @@ def render_email(manifest: dict, *,
         if unknown:
             raise ValueError(
                 f"unrecognised section title(s) {unknown} — must be one of {OTHER_SECTIONS}")
-        if len(set(titles)) != len(titles):
-            raise ValueError(f"duplicate section title(s) in {titles}")
 
         verify_email(
             {"agentic": agentic_ideas, "individual": suggestion_ideas},
@@ -651,25 +662,22 @@ def render_email(manifest: dict, *,
             numeric_tolerance=numeric_tolerance,
         )
 
-        # Decisions first, diagnostics after (10 September 2026). A reader
-        # opens this email to decide something, not to audit a run -- what
-        # to buy/sell/hold and how much is the entire reason it exists;
-        # check counts, warnings, and portfolio commentary explain and
-        # support that, they do not compete with it for the top of the
-        # page. Nothing below is removed or hidden (this system's standing
-        # rule), only reordered and visually quieted, behind one clear
-        # divider that says so.
+        # Three sections, in the order a reader actually needs them (10
+        # September 2026, at the reader's own request): what the agentic
+        # account did, what you're being asked to decide, and whether the
+        # system worked. Nothing else -- prior-day track record and
+        # portfolio concentration are still computed and journaled every
+        # run, they just do not belong in the one artefact meant to be
+        # read in under a minute.
         body.append(_h("Agentic account — activity"))
         body.append(idea_cards(agentic_ideas, closest_calls=agentic_closest_calls))
         body.append(_h("Individual account — suggestions"))
         body.append(idea_cards(suggestion_ideas, closest_calls=suggestion_closest_calls))
 
-        body.append(_details_divider())
+        body.append(_h("System health"))
         body.append(_health_line(manifest))
-        for title, html in other_sections:
-            body.append(_h(title))
+        for _, html in other_sections:
             body.append(html)
-        body.append(_decisions(manifest))
 
     body.append(_footer(manifest, disclaimer))
 
@@ -740,110 +748,33 @@ def _what_still_worked(manifest: dict) -> str:
               + "; ".join(bits) + ".", size=13, color=MUTED, top=18)
 
 
-def _details_divider() -> str:
-    """Marks where the email stops being decisions and starts being the
-    evidence and machinery behind them. Nothing past this point is hidden
-    — the same content that used to sit between the account cards and the
-    decisions list still renders in full — it is just no longer first.
-    """
-    return (
-        f'<div style="margin:34px 0 4px;padding-top:20px;'
-        f'border-top:2px solid {RULE};">'
-        f'<div style="font:600 11px/1.5 {FONT};color:{MUTED};'
-        f'letter-spacing:.09em;text-transform:uppercase;">'
-        f'Details &amp; system health</div>'
-        f'<div style="margin-top:4px;font:400 12px/1.5 {FONT};color:{MUTED};">'
-        f'Everything below explains and supports the calls above. '
-        f'Nothing here changes them.</div>'
-        f'</div>'
-    )
-
-
 def _health_line(manifest: dict) -> str:
-    """The one-line check tally, plus the itemised list of everything that
-    didn't pass.
+    """One plain sentence: how long the run took and how many of its
+    internal checks passed. Nothing else.
 
-    Split into two groups by `severity` (5 September 2026, after a reader
-    complaint about readability): "Needs attention" (`warn`/`block` — a
-    real portfolio-state fact or system deviation) first, "System notes"
-    (`info` — a nudge like a missing config key, never blocking) after, so
-    the seventeen-item list a slow Stage 0 can produce doesn't bury a VTI
-    cap breach under a cache-miss note. Each item leads with its `detail`
-    prose (already written to be read, e.g. "No fills-cache-*.json exists
-    in the Drive folder, so..."); the raw check `name` moves to a small
-    trailing tag, matching the "— source" attribution style `idea_card`
-    already uses elsewhere in this email, instead of a colon-prefixed
-    snake_case identifier a reader has no way to parse on its own.
+    Rebuilt 10 September 2026, replacing a per-check dump (previously
+    split into "Needs attention"/"System notes" groups) at the reader's
+    own request: a check's `detail` text is written for a developer
+    debugging that specific run, not for someone deciding whether to trust
+    today's ideas — "No fills-cache-*.json exists in the Drive folder, so
+    fills_cache_watermark is None" is accurate and still completely
+    opaque to that second reader, and no mechanical reformatting turns it
+    into something else. The "System health" heading this sits under
+    still carries whatever plain-English summary `other_sections` supplies
+    — DAILY_PROCEDURE.md now asks the run to write that itself, in the
+    same reader-facing register as every account-card bullet, rather than
+    have this module try to translate an open-ended set of check names
+    and details it cannot anticipate. The raw manifest (every check, in
+    full, verbatim) is still written to Drive every run for anyone who
+    wants to audit it — this line is deliberately not that.
     """
     checks = manifest.get("checks", [])
-    failed = [c for c in checks if not c.get("passed")]
+    passed = sum(1 for c in checks if c.get("passed"))
     dur = manifest.get("duration_ms", 0)
-    anoms = len(manifest.get("anomalies", []))
-
-    parts = [f"{len(checks) - len(failed)}/{len(checks)} checks",
-             f"{dur / 1000:.1f}s",
-             f"{anoms} anomal{'y' if anoms == 1 else 'ies'}"]
-    line = _p(" &middot; ".join(parts), size=13, color=MUTED)
-
-    if not failed:
-        return line
-
-    def _item(c: dict) -> str:
-        return (f'<li style="margin:0 0 6px;">{escape(str(c.get("detail", "")))} '
-                f'<span style="color:{MUTED};font-size:11px;font-family:{MONO};">'
-                f'&mdash; {escape(str(c.get("name")))}</span></li>')
-
-    def _group(title: str, items: list[dict], *, bottom: int) -> str:
-        if not items:
-            return ""
-        return (f'<div style="font:600 11px/1.5 {FONT};color:{MUTED};'
-                f'letter-spacing:.06em;text-transform:uppercase;margin:0 0 6px;">'
-                f'{escape(title)}</div>'
-                f'<ul style="margin:0 0 {bottom}px;padding-left:18px;font:400 13px/1.55 '
-                f'{FONT};color:{INK};">{"".join(_item(c) for c in items)}</ul>')
-
-    actionable = [c for c in failed if str(c.get("severity", "warn")) in ("warn", "block")]
-    notes = [c for c in failed if str(c.get("severity", "warn")) not in ("warn", "block")]
-
-    return line + _well(
-        f'<div style="font:600 12px/1.5 {FONT};color:{MUTED};'
-        f'letter-spacing:.06em;text-transform:uppercase;margin:0 0 10px;">Warnings</div>'
-        + _group("Needs attention", actionable, bottom=14)
-        + _group("System notes", notes, bottom=0))
-
-
-def _decisions(manifest: dict) -> str:
-    """Every decision this run recorded, one card per decision.
-
-    Rebuilt 5 September 2026 from a four-column table (`nowrap` on symbol/
-    action/placed-or-not, a long reason paragraph squeezed into whatever
-    width that left) into the same card layout `idea_card` already uses for
-    the two account sections above it — for the identical reason that
-    layout exists at all: a name and an action are slower to find buried in
-    a cramped row, and a `nowrap` table has no good answer for a phone-width
-    screen. This is a pure rendering change; every field the table showed
-    (symbol, action, placed/not placed, gate_failed, reason) still shows,
-    nothing here is subject to `verify_email` either way (raw `manifest`
-    decisions, not the structured ideas that function checks).
-    """
-    dec = manifest.get("decisions", [])
-    out = [_h("Decisions")]
-    if not dec:
-        out.append(_p("No decisions recorded.", color=MUTED))
-        return "".join(out)
-
-    cards = []
-    for x in dec:
-        symbol = str(x.get("symbol") or "—")
-        action = str(x.get("action", ""))
-        mark = "placed" if x.get("executed") else "not placed"
-        gate = x.get("gate_failed")
-        reason = str(x.get("reason", ""))
-        bullet = f'{str(gate).replace("_", " ")}: {reason}' if gate else reason
-        cards.append(idea_card(symbol, action, detail=mark, bullets=[(bullet, "")]))
-
-    out.append("".join(cards))
-    return "".join(out)
+    minutes = dur / 60000
+    dur_text = f"{minutes:.0f} min" if minutes >= 1 else f"{dur / 1000:.0f}s"
+    return _p(f"Ran in {dur_text}. {passed} of {len(checks)} internal checks passed.",
+             size=13, color=MUTED)
 
 
 def _footer(manifest: dict, disclaimer: bool) -> str:

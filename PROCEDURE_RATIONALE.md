@@ -1104,3 +1104,55 @@ change a position (`hold`/`skip`/`none` are not transactions and carry no
 such requirement); `verify_email` raises before render, same as every
 other unverifiable claim it already catches -- the fix is "put the number
 that already exists into the card," never "loosen the check."
+
+## Stage 6 — five sections cut to three; System health stops being a check dump
+
+A second, more drastic request the same day, after seeing an actual
+rendered example: the reordering above still left every check's raw
+`detail` and its own "Needs attention"/"System notes" grouping in the
+email, and the reader could not parse most of it — "No fills-cache-*.json
+exists in the Drive folder, so fills_cache_watermark is None" is accurate
+and completely opaque to someone deciding whether to trust today's ideas,
+not a developer debugging that morning's run. Two different audiences
+need two different sentences about the same fact, and no mechanical
+reformatting of a check's `detail` text turns one into the other — that
+text is free-form prose written by whichever agent ran the procedure that
+morning, for itself.
+
+Cut `CANONICAL_SECTIONS` from five back to three: "Agentic account —
+activity," "Individual account — suggestions," "System health." "Prior-day
+review" and "Diversification" are gone from the email — not from the
+system. Stage 0.5's `evidence.assess` verdict, Stage 0.6's
+`score_closed_decisions`, and Stage 2's `correlation_concentration` are
+all still computed and recorded on the run log and journal in full, every
+run, exactly as before; they simply no longer have a section to render
+into. If a concentration fact is worth a specific reader action (trim
+this position because of X), it belongs as a bullet on that symbol's own
+card in the account sections, which already existed and already carries
+exactly that kind of claim through `verify_email` -- a fourth home for
+"real portfolio facts that matter" was never needed, one already existed.
+
+`_health_line` no longer itemises anything. It is one code-computed
+sentence — duration, checks passed — that is always true regardless of
+what else is said, the same role `emailer._what_still_worked` already
+plays on an aborted run. `_decisions()`, the raw per-decision card list
+rebuilt 5 September 2026 from a `nowrap` table, is deleted outright rather
+than demoted: everything genuinely actionable it carried is already in
+the account-section cards; the rejected/aggregate rows it added on top
+(a `"*"` row for "cash floor blocks every purchase," a rejected idea's
+gate reason) are either covered by `agentic_closest_calls`/
+`suggestion_closest_calls` already, or are exactly the kind of "why
+nothing happened" detail that belongs in a human-written System health
+sentence now, not a second, unverified decisions table.
+
+"System health" itself changes from a data dump to prose: `DAILY_PROCEDURE.md`
+now asks for 2-4 sentences, written for a reader who does not know what a
+"fills cache" or a "wall-clock budget" is — did the run work, what it
+means in practice when it did not, and (only on a watchdog retry) what
+was found and fixed, in one plain sentence with no commit hash or function
+name. This mirrors the bar `idea_card` bullets already had to clear;
+System health simply never had to clear it before, because it was never
+prose in the first place. `OTHER_SECTIONS` is now `("System health",)`
+(1 entry, not 3) — with the cap at 1, the duplicate-title check that used
+to guard `other_sections` became unreachable (any 2-item list now trips
+the count cap first) and was deleted rather than left as dead code.

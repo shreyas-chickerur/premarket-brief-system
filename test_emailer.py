@@ -168,53 +168,54 @@ def test_healthy_run_keeps_its_research_sections():
 
 # -------------------------------------------------- capped, canonical sections
 
-def test_canonical_sections_is_exactly_five():
-    """4 September 2026: restructured from three to five -- the original
-    three had nowhere to put the prior-day track record
-    (runlog.score_closed_decisions, Stage 0.6) or the diversification
-    verdict (quantcore.correlation_concentration, Stage 2)."""
-    assert E.MAX_SECTIONS == 5
-    assert len(E.CANONICAL_SECTIONS) == 5
-    assert "Prior-day review" in E.CANONICAL_SECTIONS
-    assert "Diversification" in E.CANONICAL_SECTIONS
+def test_canonical_sections_is_exactly_three():
+    """10 September 2026: cut back from five to three at the reader's own
+    request -- what the agentic account did, what's suggested, and
+    whether the system worked is the complete list of things worth a
+    reader's attention every morning. Prior-day review and Diversification
+    are gone from the email (still computed and journaled every run, just
+    no longer rendered here)."""
+    assert E.MAX_SECTIONS == 3
+    assert len(E.CANONICAL_SECTIONS) == 3
+    assert "Prior-day review" not in E.CANONICAL_SECTIONS
+    assert "Diversification" not in E.CANONICAL_SECTIONS
     assert len(E.ACCOUNT_SECTIONS) == 2
-    assert len(E.OTHER_SECTIONS) == 3
+    assert len(E.OTHER_SECTIONS) == 1
+    assert E.OTHER_SECTIONS == ("System health",)
 
 
-def test_all_five_canonical_sections_render_together():
+def test_all_three_canonical_sections_render_together():
     """The two account sections are always built internally from
-    structured ideas; the remaining three arrive as other_sections."""
+    structured ideas; System health arrives as the one other_section."""
     _, html = E.render_email(
         healthy_manifest(),
         agentic_ideas=[{"symbol": "OXY", "action": "hold"}],
         suggestion_ideas=[{"symbol": "VTI", "action": "hold"}],
-        other_sections=[(title, f"<p>{title} body</p>") for title in E.OTHER_SECTIONS])
+        other_sections=[("System health", "<p>System health body</p>")])
     for title in E.CANONICAL_SECTIONS:
         assert title in html
-    for title in E.OTHER_SECTIONS:
-        assert f"{title} body" in html
+    assert "System health body" in html
     assert "OXY" in html and "VTI" in html
 
 
-def test_fewer_than_five_sections_is_fine():
-    """A day with nothing to say for one of the other sections omits it --
-    only an unlisted or duplicated title is an error, not an incomplete
-    one. The two account sections still always render."""
-    _, html = E.render_email(healthy_manifest(),
-                             other_sections=[("System health", "<p>ok</p>")])
+def test_system_health_section_is_fine_with_no_extra_prose():
+    """A day with nothing extra to say for System health omits the extra
+    prose -- the two account sections and the code-computed tally line
+    still always render."""
+    _, html = E.render_email(healthy_manifest())
     assert "System health" in html
     for title in E.ACCOUNT_SECTIONS:
         assert title in html
 
 
-def test_more_than_three_other_sections_raises():
+def test_more_than_one_other_section_raises():
     """The exact drift this cap exists to stop -- a caller quietly
-    appending a section beyond the three that are actually left once the
+    appending a section beyond the one that is actually left once the
     account sections are no longer caller-suppliable."""
-    four = list(E.OTHER_SECTIONS) + ["Extra commentary"]
-    with pytest.raises(ValueError, match="at most 3 other sections"):
+    with pytest.raises(ValueError, match="at most 1 other section"):
         E.render_email(healthy_manifest(),
-                       other_sections=[(t, "<p>x</p>") for t in four])
+                       other_sections=[("System health", "<p>a</p>"),
+                                       ("Extra commentary", "<p>b</p>")])
 
 
 def test_an_account_title_in_other_sections_raises():
@@ -232,14 +233,6 @@ def test_an_unrecognised_section_title_raises():
                        other_sections=[("What moved and why", "<p>x</p>")])
 
 
-def test_a_duplicated_section_title_raises():
-    with pytest.raises(ValueError, match="duplicate section title"):
-        E.render_email(healthy_manifest(), other_sections=[
-            ("System health", "<p>a</p>"),
-            ("System health", "<p>b</p>"),
-        ])
-
-
 def test_section_cap_is_not_enforced_on_an_aborted_run():
     """Sections are dropped entirely on an aborted run (no research ran),
     so an invalid title there must not raise -- it is simply never
@@ -250,78 +243,46 @@ def test_section_cap_is_not_enforced_on_an_aborted_run():
     assert "not a real section" not in html
 
 
-def test_passing_checks_are_counted_not_itemised():
-    """Twenty green rows train the reader to skim past a red one."""
-    _, html = E.render_email(healthy_manifest())
-    assert "3/3 checks" in html
-    assert "all 10 present" not in html
-
-
-def test_warnings_are_itemised_on_a_completed_run():
+def test_system_health_is_one_plain_sentence_not_a_check_dump():
+    """10 September 2026, at the reader's own request: no per-check
+    itemisation, no snake_case identifiers, no "Needs attention"/"System
+    notes" grouping -- one sentence with a duration and a pass count."""
     log = R.RunLog("r", mode="live")
     log.check("tools_available", True, "block", "ok")
     log.check("fired_on_schedule", False, "warn", "off by 41 min")
     _, html = E.render_email(log.manifest())
-    assert "Warnings" in html and "off by 41 min" in html
+    assert "1 of 2 internal checks passed" in html
+    assert "off by 41 min" not in html
+    assert "fired_on_schedule" not in html
+    assert "Needs attention" not in html and "System notes" not in html
 
 
-def test_warnings_group_warn_and_block_as_needs_attention():
-    """5 September 2026: a real 41-check run buried the portfolio-state
-    facts a reader actually needs under system-note clutter -- warn/block
-    now render first, under their own heading, separate from info."""
+def test_system_health_line_reports_duration_in_minutes_when_long():
     log = R.RunLog("r", mode="live")
-    log.check("single_name_cap_individual", False, "warn", "VTI 17.75% against a 15% cap")
-    log.check("screener_scan_id_configured", False, "info", "recovered by title match")
-    _, html = E.render_email(log.manifest())
-    assert "Needs attention" in html and "System notes" in html
-    assert html.index("Needs attention") < html.index("VTI 17.75%")
-    assert html.index("VTI 17.75%") < html.index("System notes")
-    assert html.index("System notes") < html.index("recovered by title match")
+    log.check("tools_available", True, "block", "ok")
+    m = log.manifest()
+    m["duration_ms"] = 17 * 60_000
+    _, html = E.render_email(m)
+    assert "Ran in 17 min" in html
 
 
-def test_warnings_omit_a_group_heading_with_nothing_in_it():
+def test_system_health_line_reports_duration_in_seconds_when_short():
     log = R.RunLog("r", mode="live")
-    log.check("single_name_cap_individual", False, "warn", "VTI over cap")
-    _, html = E.render_email(log.manifest())
-    assert "Needs attention" in html
-    assert "System notes" not in html
+    log.check("tools_available", True, "block", "ok")
+    m = log.manifest()
+    m["duration_ms"] = 45_000
+    _, html = E.render_email(m)
+    assert "Ran in 45s" in html
 
 
-def test_warnings_show_the_check_name_as_a_trailing_tag_not_a_prefix():
-    """The raw snake_case check name is still fully present (nothing here
-    is ever hidden) but moves after the human-written detail, matching the
-    '— source' tag idea_card already uses, instead of a colon-prefixed
-    identifier with no explanation of its own."""
-    log = R.RunLog("r", mode="live")
-    log.check("fills_cache_present", False, "warn", "no fills-cache exists yet")
-    _, html = E.render_email(log.manifest())
-    assert "fills_cache_present" in html
-    assert html.index("no fills-cache exists yet") < html.index("fills_cache_present")
-    assert "fills_cache_present: no fills-cache exists yet" not in html
-
-
-def test_rejected_ideas_show_the_gate_that_failed():
-    _, html = E.render_email(healthy_manifest())
-    assert "catalyst" in html and "no dated catalyst" in html
-
-
-def test_decisions_render_as_cards_not_a_nowrap_table():
-    """5 September 2026: the old 4-column table forced `nowrap` on
-    symbol/action/placed-or-not, squeezing the reason paragraph into
-    whatever width was left -- no good answer for a phone screen. Cards
-    (the same layout the two account sections already use) replace it;
-    every field still renders, just not inside a <table> row."""
-    _, html = E.render_email(healthy_manifest())
-    assert "white-space:nowrap" not in html
-    assert "NFLX" in html and "reject" in html
-
-
-def test_decisions_humanise_the_gate_failed_prefix():
-    """gate_failed used to render as a raw snake_case token in <em> tags
-    (e.g. 'no_blocking_conflict'); it now reads as plain words ahead of the
-    reason, on one line, like the rest of this email's prose."""
-    _, html = E.render_email(healthy_manifest())
-    assert "catalyst: no dated catalyst" in html
+def test_system_health_still_carries_a_caller_written_plain_english_summary():
+    """The heading and code-computed tally are always there; a caller can
+    still add its own already-plain-English summary underneath, same
+    mechanism as before, just the only section left."""
+    _, html = E.render_email(
+        healthy_manifest(),
+        other_sections=[("System health", "<p>Everything ran normally today.</p>")])
+    assert "Everything ran normally today." in html
 
 
 def test_disclaimer_present_by_default():
@@ -361,15 +322,6 @@ def test_model_written_text_cannot_inject_markup(payload):
     _, html = E.render_email(log.manifest())
     assert payload not in html
     assert "<script>" not in html
-
-
-def test_symbol_and_reason_are_escaped_in_the_decisions_table():
-    log = R.RunLog("r", mode="live")
-    log.check("tools_available", True, "block", "ok")
-    log.decide(R.Decision("<img src=x>", "buy", "agentic", True, "a & b"))
-    _, html = E.render_email(log.manifest())
-    assert "<img src=x>" not in html
-    assert "&amp;" in html
 
 
 def test_render_is_deterministic_for_the_same_manifest():
@@ -730,11 +682,9 @@ def test_render_email_renders_a_verified_card_end_to_end():
     assert "OXY" in html and "Dated catalyst" in html and "Agentic account" in html
 
 
-def test_render_email_puts_decisions_before_diagnostics():
-    """10 September 2026: a reader opens this to decide something, not to
-    audit a run -- the account cards must render before the health line,
-    the other_sections, and the raw decisions list, with a clear divider
-    marking where "what to do" ends and "why" begins."""
+def test_render_email_puts_both_account_sections_before_system_health():
+    """10 September 2026: a reader opens this to decide something -- both
+    account sections must render before System health, every time."""
     manifest = healthy_manifest()
     manifest["decisions"] = [{"symbol": "OXY", "account": "agentic", "action": "buy",
                               "executed": True, "reason": "cleared the gate",
@@ -743,12 +693,12 @@ def test_render_email_puts_decisions_before_diagnostics():
         manifest,
         agentic_ideas=[{"symbol": "OXY", "action": "buy", "quantity": "2 shares",
                         "bullets": [("Dated catalyst", "Alpha Vantage NEWS_SENTIMENT")]}],
+        suggestion_ideas=[{"symbol": "VTI", "action": "hold"}],
         other_sections=[("System health", "<p>nominal</p>")])
     i_agentic = html.index("Agentic account")
-    i_divider = html.index("Details &amp; system health")
-    i_other = html.index("System health")
-    i_decisions = html.index(">Decisions<")
-    assert i_agentic < i_divider < i_other < i_decisions
+    i_individual = html.index("Individual account")
+    i_health = html.index("System health")
+    assert i_agentic < i_individual < i_health
 
 
 def test_render_email_does_not_verify_on_an_aborted_run():
