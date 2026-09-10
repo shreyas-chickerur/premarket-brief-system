@@ -1044,3 +1044,29 @@ hardcoded list of which ones to watch.
 No code changes underlie this entry -- `ledger.fills_ready_to_cache` and
 `fold_fills_cache` computed correctly; the gap was entirely in the
 procedure text having no way to notice its own instruction went unfollowed.
+
+## Stage 0 step 1 / step 0 — two standing config warnings closed, 9 September 2026
+
+`config_screener_scan_id_configured` and `config_run_wall_clock_deadline_seconds_present`
+had been failing every run since 7 September, both `warn` severity and
+both recovering silently via a documented fallback (`get_scans` + title
+match for the scan id; `runlog.DEFAULT_WALL_CLOCK_DEADLINE_SECONDS` for
+the deadline) -- correct behavior, but a human was meant to set both
+deliberately rather than let a fallback stand in indefinitely. `state.json`
+(schema 3, updated this date, superseding the 31 August version) now sets
+`screener_scan_id` to the real, already-created `PBS Core Universe v1`
+scan id and `run_wall_clock_deadline_seconds` to 2700 -- the same value
+the fallback was already applying, made explicit rather than changed. Not
+touched: whether 2700 is still the RIGHT number. That question was live
+only because recent runs were taking 42-51 minutes with no fills cache to
+work from; the 9 September fix (above) removes the ~880-order re-pull
+that was the actual driver of that duration, so there is not yet evidence
+the number itself needs to move, in either direction.
+
+Updating this required editing the live trigger prompts (`RemoteTrigger`),
+not just this repository -- `{{STATE_FILE_ID}}` is substituted into two
+scheduled routines' own prompt text at trigger-creation time, per
+`HANDOFF.private.md` section 8, and neither prompt re-reads this repo for
+a fresher value. Both were updated to the new file id in the same pass;
+the old `state.json` was renamed to `state.superseded-2026-09-09.json`
+in Drive rather than left ambiguous alongside the new one.
