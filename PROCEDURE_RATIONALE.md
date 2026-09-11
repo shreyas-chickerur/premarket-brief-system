@@ -1254,3 +1254,110 @@ names `stage0_capacity_forecast` explicitly as one of the checks that
 must reach the reader in plain English whenever it warns -- not left to
 the same generic "use judgment" rule that let the 7 September warning
 go unescalated for three days the first time.
+
+## Stage 9 -- the store where every read cost a minute gets collapsed to one file
+
+11 September 2026, the fifth consecutive open-market day blocked at Stage
+0, and the second in a row where BOTH the scheduled run and the watchdog
+retry aborted. Two independent same-day measurements clocked the
+connector at 23.0 and 39.3 bytes/second -- not bandwidth, the per-file
+cost of materialising `download_file_content`'s base64 payload locally
+before `json.loads` can read it, confirmed a third time this run by
+testing directly whether an oversized payload would auto-save to a file
+the way an oversized `get_equity_orders` page does (it does not: a 35 KB
+file returned inline, so there was no cheaper path already sitting
+unused). The 4200s deadline raised the day before was already
+outgrown -- measured need had roughly doubled in twenty-four hours, not
+drifted over it marginally. Every fix available to raising the number
+again had already been exhausted: `run_wall_clock_deadline_seconds` was
+raised once (10 September) and immediately outgrown; `ledger.
+compact_journal_month` cannot touch September until 1 October and
+August already holds a single file, so it removes nothing right now;
+raising the deadline further collides with the watchdog's own offset,
+the exact overlap class that caused duplicate-run corruption on the
+sibling investor-mimic-bot project.
+
+The actual defect, once named plainly: a store where every read costs a
+minute, and a design that answered each new requirement -- a fills
+cache, a splits cache, a sector cache, a congress-discovery cache, a
+heartbeat per stage, a structured journal entry per run -- by adding
+another file to it. Each was reasonable alone (the fills-cache schema
+fix on 9 September, the sector/congress caches on 5 September, the
+heartbeat mechanism on 5 September to solve a real stuck-run blind
+spot). Together they turned Stage 0 preflight into the whole wall-clock
+budget. The heartbeat is the sharpest irony: built to tell a slow run
+apart from a stuck one, it is now itself one of the things making runs
+slow, and its own 11 September journal note says so directly -- "the
+heartbeat I asked for to detect a stalled run is now one of the things
+making runs stall."
+
+Also confirmed directly against that day's own manifest, not assumed:
+the four `fills-cache-2026-09-09*.json` files were never a retry-loop
+bug. They are one run's single `create_file(fills-cache x4)` call,
+split deliberately on date boundaries (`ledger.Fill` had no complete
+history to write as one contiguous file that day) so no fill on a
+boundary date could be lost. Worth knowing, since a design built to
+"fix" a retry-loop that was never happening would have solved nothing.
+
+**The fix: `ledger.build_state_bundle`/`unpack_state_bundle`.** One
+`state-bundle-YYYY-MM-DD.json`, written once at Stage 6 and read once at
+Stage 0 step 6c, holding the folded journal plus the fills, splits,
+sector, and congress-discovery caches -- one Drive round trip replacing
+the roughly twenty that blocked five of the last six trading days. The
+dated files (`journal-*.json`, `fills-cache-*.json`, etc.) are NOT
+replaced or deprecated: they remain exactly what they always were, the
+append-only audit trail, written every run unchanged. The bundle is a
+cache OF that trail, not a second source of truth -- `unpack_state_bundle`
+round-trips a bundle's stored rows back through the SAME `fold_journal`/
+`fold_fills_cache`/`fold_splits_cache`/`fold_sector_cache`/
+`fold_congress_discovery_cache` functions the dated files use, by
+handing each its stored rows as one synthetic same-shaped file. Building
+a bundle from a fold and unpacking it back therefore produce identical
+results BY CONSTRUCTION, pinned by `test_unpacking_a_bundle_matches_
+folding_the_dated_files_it_replaces` in `test_ledger.py` -- there is no
+second parser to drift out of sync with the first, and a bundle is
+exactly as trustworthy as the fold it stands in for.
+
+A bootstrap covers the one case this doesn't solve on its own: if no
+bundle exists yet (the very first run after this change, or a bundle
+that somehow never got written), Stage 0 falls back to the full
+per-file read this replaces, says so plainly in System health, and
+writes the first bundle at Stage 6 so the fallback is a one-time cost.
+`stage0_capacity_forecast` (10 September) is not removed -- its meaning
+changes from "will today's normal read fit the deadline" to "would the
+bootstrap fallback still fit, if a bundle were ever missing" -- a rarer,
+still-real risk worth watching, not the daily one it used to track.
+
+Two things this does NOT solve, deliberately left alone rather than
+bundled into the same fix: journal compaction is now far less urgent
+(the bundle collapses Stage 0's round-trip count regardless of how many
+dated files exist, since those files are no longer read at all in the
+steady state) but still worth doing eventually to bound total Drive
+storage and listing size -- `month_is_compactable`'s mid-month
+semantics were not touched, since loosening them carries real
+reconciliation risk (a compacted month silently excludes any daily file
+written after compaction, including one from later the same month) that
+deserved its own review, not a rushed change riding alongside this one.
+Cleaning the folder (six `STALE-DO-NOT-USE` `.py` files from 28 August,
+three of four superseded `state.json` copies -- the fourth blocked by
+the same permission classifier that blocked yesterday's watchdog
+schedule edit, left in place rather than fought) reduces listing
+clutter but was never on Stage 0's actual read path (`search_files`
+lists metadata only; Stage 0 only ever downloaded files matching its
+specific glob patterns), so it does nothing for the underlying cost --
+worth doing anyway, for a human reading the folder directly.
+
+## Stage 10 -- the disclaimer that was never actually removable
+
+Also fixed the same day, found while investigating the above: today's
+email carried "Not investment advice. Suggestions are research output;
+the decision is yours." at the bottom despite two prior requests to
+remove it. The cause was not path-specific -- `render_email`'s
+`disclaimer: bool = True` parameter meant it printed on literally every
+path, because `DAILY_PROCEDURE.md`'s one call site (the only place an
+email is ever sent) never passed `disclaimer=` at all, so the default
+always won. No trace of a prior removal attempt exists in git history or
+either procedure doc. Fixed by deleting the parameter and the footer
+branch entirely rather than flipping the default -- a default can be
+silently reintroduced by the next person who adds a new call site and
+doesn't know to pass `False`; a parameter that does not exist cannot.

@@ -47,6 +47,8 @@ __all__ = [
     "CONGRESS_DISCOVERY_HORIZON_DAYS", "congress_discovery_cache_filename",
     "CONGRESS_DISCOVERY_CACHE_RE", "fold_congress_discovery_cache",
     "bioguides_needing_discovery_check",
+    "STATE_BUNDLE_SCHEMA_VERSION", "STATE_BUNDLE_RE", "state_bundle_filename",
+    "build_state_bundle", "unpack_state_bundle",
 ]
 
 # Quantities are compared with a tolerance because broker payloads carry six
@@ -1264,3 +1266,149 @@ def bioguides_needing_discovery_check(bioguide_ids: Sequence[str],
         if entry is None or entry["checked_through"] < boundary:
             out.add(bid)
     return sorted(out)
+
+
+# --------------------------------------------------------------------------
+# state bundle -- collapses Stage 0's ~20-file read path into one file
+# --------------------------------------------------------------------------
+#
+# 7-11 September 2026: Stage 0 grew a separate append-only Drive file per
+# concern -- journal, fills cache, splits cache, sector cache, congress-
+# discovery cache -- each reasonable alone. Together they became a store
+# where every read costs a real, measured tens-of-seconds-per-file
+# write-back cost (`download_file_content`'s base64 payload has to be
+# materialised locally before `json.loads` can read it, not the download
+# itself -- see PROCEDURE_RATIONALE.md), and the file count grows by at
+# least one every trading day with no bound reachable before 1 October
+# (`month_is_compactable` forbids the current month). By 11 September the
+# required set was 21 files and ~299 KB, and two independent same-day
+# measurements clocked the connector at 23-39 bytes/second -- not
+# bandwidth, per-file latency, paid once per file before any work starts.
+#
+# `build_state_bundle`/`unpack_state_bundle` collapse that into ONE file,
+# written once at Stage 6 and read once at Stage 0: one Drive round trip
+# replacing twenty-one. The dated files are NOT replaced or superseded --
+# they remain exactly what they always were, the append-only audit trail.
+# The bundle is a CACHE of that trail, not a second source of truth:
+# `unpack_state_bundle` round-trips a bundle's stored rows back through the
+# SAME `fold_journal`/`fold_fills_cache`/`fold_splits_cache`/
+# `fold_sector_cache`/`fold_congress_discovery_cache` functions the dated
+# files use, by handing each its stored rows as one synthetic same-shaped
+# file. Building a bundle and folding the dated files it summarises
+# therefore produce identical results BY CONSTRUCTION -- there is no second
+# parser to keep in sync with the first, and a bundle is exactly as
+# trustworthy as the fold it stands in for.
+
+STATE_BUNDLE_SCHEMA_VERSION = 1
+STATE_BUNDLE_RE = re.compile(r"^state-bundle-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.json$")
+
+
+def state_bundle_filename(run_date: date, seq: int = 0) -> str:
+    """Same create-only convention as the fills/splits/sector/
+    congress-discovery caches -- `create_file`, never `update_file`."""
+    stem = f"state-bundle-{run_date.isoformat()}"
+    return f"{stem}.json" if seq == 0 else f"{stem}-{seq}.json"
+
+
+def build_state_bundle(*, journal_entries: Sequence[JournalEntry],
+                       fills: Sequence[Fill],
+                       splits_by_symbol: dict[str, SplitsCacheEntry],
+                       sector_by_symbol: dict[str, dict],
+                       congress_discovery: dict[str, dict],
+                       as_of: date) -> dict:
+    """Package everything Stage 0 needs into one JSON-serialisable object,
+    to be written as `state-bundle-{as_of}.json` at Stage 6.
+
+    `journal_entries` should be the FULL history -- the previously unpacked
+    bundle's `journal.entries` plus every entry this run added -- not just
+    this run's own; same for `fills`/`splits_by_symbol`/`sector_by_symbol`/
+    `congress_discovery`, each the complete current cache, not a delta.
+    Row shapes are IDENTICAL to the existing dated-cache file formats on
+    purpose (see the module note above), which is what lets
+    `unpack_state_bundle` reuse the existing fold functions unchanged.
+    """
+    return {
+        "schema": STATE_BUNDLE_SCHEMA_VERSION,
+        "as_of": as_of.isoformat(),
+        "journal_entries": [e.to_dict() for e in journal_entries],
+        "fills": [
+            {"symbol": f.symbol, "side": f.side, "quantity": f.quantity,
+             "price": f.price, "on": f.on.isoformat(), "order_id": f.order_id,
+             "account": f.account}
+            for f in fills
+        ],
+        "splits_by_symbol": [
+            {"symbol": e.symbol, "checked_through": e.checked_through.isoformat(),
+             "splits": [{"effective_date": s.effective_date.isoformat(), "ratio": s.ratio}
+                        for s in e.splits]}
+            for e in splits_by_symbol.values()
+        ],
+        "sector_by_symbol": [
+            {"symbol": sym, "sector": v["sector"],
+             "checked_through": v["checked_through"].isoformat()}
+            for sym, v in sector_by_symbol.items()
+        ],
+        "congress_discovery": [
+            {"bioguide_id": bid, "symbols": v["symbols"],
+             "checked_through": v["checked_through"].isoformat()}
+            for bid, v in congress_discovery.items()
+        ],
+    }
+
+
+def unpack_state_bundle(bundle: dict) -> dict:
+    """Reverse of `build_state_bundle`: reconstruct the `Journal` and the
+    four fold results by feeding the bundle's stored rows back through the
+    exact fold functions the dated files use, each as one synthetic
+    same-shaped file dated `bundle["as_of"]`.
+
+    Returns `{"journal": Journal, "fills": list[Fill],
+    "splits_by_symbol": dict[str, SplitsCacheEntry],
+    "sector_by_symbol": dict[str, dict], "congress_discovery": dict[str, dict],
+    "bad": list[str]}`. `bad` collects anything any of the five folds could
+    not parse, prefixed `bundle:` -- feed it straight into
+    `runlog.preflight(unreadable_files=...)` exactly like the dated-file
+    reading path did, so a corrupt bundle aborts loudly instead of silently
+    dropping state.
+    """
+    as_of = bundle.get("as_of") or date.today().isoformat()
+    bad: list[str] = []
+
+    journal = fold_journal([{
+        "title": journal_filename(date.fromisoformat(as_of)),
+        "content": json.dumps({"entries": bundle.get("journal_entries", [])}),
+    }])
+    bad.extend(f"bundle:{x}" for x in journal.unreadable)
+
+    fills, fills_bad = fold_fills_cache([{
+        "title": fills_cache_filename(date.fromisoformat(as_of)),
+        "content": json.dumps(bundle.get("fills", [])),
+    }])
+    bad.extend(f"bundle:{x}" for x in fills_bad)
+
+    splits_by_symbol, splits_bad = fold_splits_cache([{
+        "title": splits_cache_filename(date.fromisoformat(as_of)),
+        "content": json.dumps(bundle.get("splits_by_symbol", [])),
+    }])
+    bad.extend(f"bundle:{x}" for x in splits_bad)
+
+    sector_by_symbol, sector_bad = fold_sector_cache([{
+        "title": sector_cache_filename(date.fromisoformat(as_of)),
+        "content": json.dumps(bundle.get("sector_by_symbol", [])),
+    }])
+    bad.extend(f"bundle:{x}" for x in sector_bad)
+
+    congress_discovery, congress_bad = fold_congress_discovery_cache([{
+        "title": congress_discovery_cache_filename(date.fromisoformat(as_of)),
+        "content": json.dumps(bundle.get("congress_discovery", [])),
+    }])
+    bad.extend(f"bundle:{x}" for x in congress_bad)
+
+    return {
+        "journal": journal,
+        "fills": fills,
+        "splits_by_symbol": splits_by_symbol,
+        "sector_by_symbol": sector_by_symbol,
+        "congress_discovery": congress_discovery,
+        "bad": bad,
+    }

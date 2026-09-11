@@ -285,9 +285,14 @@ def test_system_health_still_carries_a_caller_written_plain_english_summary():
     assert "Everything ran normally today." in html
 
 
-def test_disclaimer_present_by_default():
-    _, html = E.render_email(healthy_manifest())
-    assert "Not investment advice" in html
+def test_disclaimer_is_gone_on_every_path():
+    """10-11 September 2026: `disclaimer: bool = True` meant the line always
+    printed, on every path, because nothing ever passed False -- removed
+    entirely rather than re-defaulted, so there is no flag left to regress."""
+    _, healthy = E.render_email(healthy_manifest())
+    _, aborted = E.render_email(aborted_manifest())
+    assert "Not investment advice" not in healthy
+    assert "Not investment advice" not in aborted
 
 
 # ------------------------------------------------------------- format

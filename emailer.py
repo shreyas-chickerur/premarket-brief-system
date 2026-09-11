@@ -581,8 +581,7 @@ def render_email(manifest: dict, *,
                  evidence: Sequence[Any] = (),
                  numeric_tolerance: float = 0.01,
                  other_sections: Sequence[tuple[str, str]] = (),
-                 prefix: str = "",
-                 disclaimer: bool = True) -> tuple[str, str]:
+                 prefix: str = "") -> tuple[str, str]:
     """Return `(subject, html)`.
 
     This is the ONLY path that renders the two account sections, and there
@@ -679,7 +678,7 @@ def render_email(manifest: dict, *,
         for _, html in other_sections:
             body.append(html)
 
-    body.append(_footer(manifest, disclaimer))
+    body.append(_footer(manifest))
 
     html = (
         f'<div style="margin:0;padding:24px 12px;background:{WELL};">'
@@ -777,15 +776,17 @@ def _health_line(manifest: dict) -> str:
              size=13, color=MUTED)
 
 
-def _footer(manifest: dict, disclaimer: bool) -> str:
+def _footer(manifest: dict) -> str:
+    """9/11 September 2026: a `disclaimer: bool = True` parameter here meant
+    every path -- including every abort/watchdog path, since DAILY_PROCEDURE.md's
+    one call site never passed it -- always printed "Not investment advice..."
+    despite two prior requests to remove it. There is no flag left to default
+    wrong: the line is gone from the function entirely, on every path, for good."""
     meta = " &middot; ".join(escape(str(x)) for x in [
         manifest.get("run_id", ""),
         manifest.get("mode", ""),
         manifest.get("started_at", ""),
     ] if x)
-    tail = (f'<div style="margin-top:6px;">Not investment advice. Suggestions '
-            f'are research output; the decision is yours.</div>'
-            if disclaimer else "")
     return (f'<div style="margin-top:26px;padding-top:14px;'
             f'border-top:1px solid {RULE};font:400 11px/1.6 {FONT};'
-            f'color:{MUTED};">{meta}{tail}</div>')
+            f'color:{MUTED};">{meta}</div>')

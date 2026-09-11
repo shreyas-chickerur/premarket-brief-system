@@ -1366,3 +1366,143 @@ def test_bioguides_needing_discovery_check_rechecks_after_a_week():
     cache = {"C001123": {"symbols": ["OXY"], "checked_through": date(2026, 8, 20)}}
     out = L.bioguides_needing_discovery_check(["C001123"], cache, today=date(2026, 9, 5))
     assert out == ["C001123"]
+
+
+# ---------------------------------------------------------------- state bundle
+# 11 September 2026: collapses the ~20-file Stage 0 read path into one file.
+# The central promise under test is that `unpack_state_bundle` reconstructs
+# EXACTLY what folding the dated files it replaces would have produced --
+# there is no second parser to drift out of sync with the first.
+
+def test_state_bundle_filename_matches_convention():
+    assert L.state_bundle_filename(date(2026, 9, 11)) == "state-bundle-2026-09-11.json"
+    assert L.state_bundle_filename(date(2026, 9, 11), 1) == "state-bundle-2026-09-11-1.json"
+
+
+def _bundle_fixture():
+    journal_entries = [
+        L.JournalEntry(run_id="r1", on="2026-09-01", kind="run", payload={"i": 1}),
+        L.JournalEntry(run_id="r2", on="2026-09-02", kind="thesis",
+                       payload={"thesis_id": "t1", "opened": "2026-09-02", "horizon_days": 21}),
+    ]
+    fills = [
+        L.Fill("XOM", "buy", 10, 100.0, date(2026, 8, 18), "o1", "IND1"),
+        L.Fill("SGOV", "buy", 4.421802, 100.47, date(2026, 8, 24), "o2", "AGENTIC1"),
+    ]
+    splits_by_symbol = {
+        "XOM": L.SplitsCacheEntry("XOM", date(2026, 9, 8),
+                                  [L.SplitEvent("XOM", date(2020, 8, 10), 4.0)]),
+    }
+    sector_by_symbol = {
+        "XOM": {"sector": "energy", "checked_through": date(2026, 9, 1)},
+        "SGOV": {"sector": None, "checked_through": date(2026, 9, 1)},
+    }
+    congress_discovery = {
+        "C001123": {"symbols": ["OXY", "XOM"], "checked_through": date(2026, 9, 5)},
+    }
+    return journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery
+
+
+def test_build_state_bundle_is_json_serialisable():
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=date(2026, 9, 11))
+    reloaded = json.loads(json.dumps(bundle))
+    assert reloaded["schema"] == L.STATE_BUNDLE_SCHEMA_VERSION
+    assert reloaded["as_of"] == "2026-09-11"
+
+
+def test_unpack_state_bundle_round_trips_journal_entries():
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=date(2026, 9, 11))
+    out = L.unpack_state_bundle(bundle)
+    assert out["bad"] == []
+    assert [e.run_id for e in out["journal"].entries] == ["r1", "r2"]
+    assert out["journal"].open_theses(date(2026, 9, 10)) != []
+
+
+def test_unpack_state_bundle_round_trips_fills_with_account():
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=date(2026, 9, 11))
+    out = L.unpack_state_bundle(bundle)
+    by_account = {f.order_id: f.account for f in out["fills"]}
+    assert by_account == {"o1": "IND1", "o2": "AGENTIC1"}
+
+
+def test_unpack_state_bundle_round_trips_splits_and_sector_and_congress():
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=date(2026, 9, 11))
+    out = L.unpack_state_bundle(bundle)
+    assert out["splits_by_symbol"]["XOM"].checked_through == date(2026, 9, 8)
+    assert out["splits_by_symbol"]["XOM"].splits[0].ratio == 4.0
+    assert out["sector_by_symbol"]["XOM"]["sector"] == "energy"
+    assert out["sector_by_symbol"]["SGOV"]["sector"] is None
+    assert out["congress_discovery"]["C001123"]["symbols"] == ["OXY", "XOM"]
+
+
+def test_unpacking_a_bundle_matches_folding_the_dated_files_it_replaces():
+    """The central promise: building a bundle from a fold's results and then
+    unpacking it must reproduce that exact fold, since Stage 0 will read
+    ONLY the bundle from here on -- if this ever drifted, a bundle-reading
+    run would silently see different state than a dated-file-reading one
+    did."""
+    fills_direct, fills_bad = L.fold_fills_cache([
+        _cache_file("fills-cache-2026-08-20.json",
+                    [_fill_row("XOM", "buy", 10, 100.0, "2026-08-18", "o1", "IND1")]),
+    ])
+    splits_direct, splits_bad = L.fold_splits_cache([
+        _cache_file("splits-cache-2026-09-08.json",
+                    [_splits_row("XOM", "2026-09-08", [{"effective_date": "2020-08-10", "ratio": 4.0}])]),
+    ])
+    sector_direct, sector_bad = L.fold_sector_cache([
+        _cache_file("sector-cache-2026-09-01.json", [_sector_row("XOM", "2026-09-01", "energy")]),
+    ])
+    congress_direct, congress_bad = L.fold_congress_discovery_cache([
+        _cache_file("congress-discovery-cache-2026-09-05.json",
+                    [_congress_row("C001123", "2026-09-05", ["OXY", "XOM"])]),
+    ])
+    journal_direct = L.fold_journal([
+        _file("journal-2026-09-01.json", [{"run_id": "a", "kind": "run", "payload": {"i": 1}}]),
+    ])
+    assert fills_bad == splits_bad == sector_bad == congress_bad == journal_direct.unreadable == []
+
+    bundle = L.build_state_bundle(
+        journal_entries=journal_direct.entries, fills=fills_direct,
+        splits_by_symbol=splits_direct, sector_by_symbol=sector_direct,
+        congress_discovery=congress_direct, as_of=date(2026, 9, 11))
+    out = L.unpack_state_bundle(bundle)
+
+    assert out["bad"] == []
+    assert [f.order_id for f in out["fills"]] == [f.order_id for f in fills_direct]
+    assert out["splits_by_symbol"].keys() == splits_direct.keys()
+    assert out["sector_by_symbol"] == sector_direct
+    assert out["congress_discovery"] == congress_direct
+    assert [e.run_id for e in out["journal"].entries] == [e.run_id for e in journal_direct.entries]
+
+
+def test_unpack_state_bundle_reports_bad_rows_prefixed_bundle():
+    bundle = {"schema": 1, "as_of": "2026-09-11",
+              "journal_entries": [], "fills": [{"symbol": "OXY"}],  # missing required fields
+              "splits_by_symbol": [], "sector_by_symbol": [], "congress_discovery": []}
+    out = L.unpack_state_bundle(bundle)
+    assert out["fills"] == []
+    assert len(out["bad"]) == 1
+    assert out["bad"][0].startswith("bundle:")
+
+
+def test_unpack_state_bundle_defaults_as_of_to_today_when_missing():
+    out = L.unpack_state_bundle({})
+    assert out["bad"] == []
+    assert out["fills"] == []
+    assert out["journal"].entries == []
