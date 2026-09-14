@@ -49,6 +49,7 @@ __all__ = [
     "bioguides_needing_discovery_check",
     "STATE_BUNDLE_SCHEMA_VERSION", "STATE_BUNDLE_RE", "state_bundle_filename",
     "build_state_bundle", "unpack_state_bundle",
+    "fills_cache_matches_fresh",
 ]
 
 # Quantities are compared with a tolerance because broker payloads carry six
@@ -1412,3 +1413,52 @@ def unpack_state_bundle(bundle: dict) -> dict:
         "congress_discovery": congress_discovery,
         "bad": bad,
     }
+
+
+# --------------------------------------------------------------------------
+# cache-vs-broker cross-check -- catching a cache that holds ADJUSTED fills
+# --------------------------------------------------------------------------
+#
+# 14 September 2026: a prior run cached `fills_ready_to_cache`'s output built
+# from the SPLIT-ADJUSTED `fills` variable instead of the raw `fresh_fills`
+# one `DAILY_PROCEDURE.md` step 7 actually names -- an execution mistake, not
+# a defect in this file. `apply_splits` is deliberately NOT idempotent (see
+# its own docstring: a fill dated before a split's effective date is always
+# multiplied by the ratio, with no memory of whether that already happened),
+# so every run since re-adjusted the corrupted rows a second time. It went
+# undetected for five sessions because every affected symbol (NVDA, GOOGL,
+# CMG, CRWD, NFLX, VUG) was already fully closed out: a net-zero position
+# scaled by any constant still reconciles to zero against the broker, so
+# `ledger_reconciled` had nothing to catch. Only cost basis, loss-sale
+# amounts, and the wash-sale registry for those closed symbols were wrong,
+# silently, every day.
+
+def fills_cache_matches_fresh(cached_fills: Sequence[Fill],
+                              fresh_fills: Sequence[Fill]) -> list[str]:
+    """Cross-check cached fills against a fresh, authoritative re-fetch of
+    the same orders for disagreement -- direct evidence the cache holds
+    altered (most likely split-adjusted) quantities instead of the broker's
+    raw, as-executed ones.
+
+    `fresh_fills` should be `ledger.fills_from_orders`'s UNADJUSTED output,
+    the same object `DAILY_PROCEDURE.md` step 7 caches via
+    `fills_ready_to_cache` -- never the `apply_splits` result. The
+    watermark-forward re-fetch (`fills_cache_watermark`) always re-covers the
+    last `FILLS_CACHE_HORIZON_DAYS`, so cached and fresh rows for that window
+    overlap by construction; a real disagreement there is not a race
+    condition, it is corruption. Returns the mismatched `order_id`s, sorted,
+    empty if everything agrees (within `QTY_TOL`).
+
+    An empty result does NOT prove the whole cache is clean -- it can only
+    see the horizon-window overlap. A fill older than that already left the
+    re-fetch window and is invisible here regardless of its condition; only
+    a full rebuild (`fills_cache_watermark` returning `None`, i.e. the cache
+    was reset) re-verifies fills older than the horizon.
+    """
+    fresh_by_id = {f.order_id: f for f in fresh_fills if f.order_id}
+    mismatched = []
+    for c in cached_fills:
+        f = fresh_by_id.get(c.order_id)
+        if f is not None and abs(f.quantity - c.quantity) > QTY_TOL:
+            mismatched.append(c.order_id)
+    return sorted(mismatched)

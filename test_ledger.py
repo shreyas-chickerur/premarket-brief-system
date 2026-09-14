@@ -1506,3 +1506,44 @@ def test_unpack_state_bundle_defaults_as_of_to_today_when_missing():
     assert out["bad"] == []
     assert out["fills"] == []
     assert out["journal"].entries == []
+
+
+# --------------------------------------------------- fills_cache_matches_fresh
+# 14 September 2026: apply_splits is deliberately not idempotent, so caching
+# its OUTPUT instead of its input compounds every run. These pin the
+# cross-check that catches it for anything still inside the re-fetch window.
+
+def test_fills_cache_matches_fresh_agrees_when_quantities_match():
+    cached = [L.Fill("XOM", "buy", 10, 100.0, date(2026, 8, 18), "o1", "IND1")]
+    fresh = [L.Fill("XOM", "buy", 10, 100.0, date(2026, 8, 18), "o1", "IND1")]
+    assert L.fills_cache_matches_fresh(cached, fresh) == []
+
+
+def test_fills_cache_matches_fresh_flags_a_split_adjusted_cache_entry():
+    """The actual 14 September shape: the cache holds NVDA post-split (a
+    10:1 split applied), but a fresh re-fetch of the same order returns the
+    broker's raw, as-executed (pre-split) quantity."""
+    cached = [L.Fill("NVDA", "buy", 100, 12.0, date(2024, 6, 1), "o1", "IND1")]
+    fresh = [L.Fill("NVDA", "buy", 10, 120.0, date(2024, 6, 1), "o1", "IND1")]
+    assert L.fills_cache_matches_fresh(cached, fresh) == ["o1"]
+
+
+def test_fills_cache_matches_fresh_ignores_fills_outside_the_overlap():
+    """A cached fill with no matching fresh order_id (outside the
+    watermark-forward re-fetch window) cannot be cross-checked -- absence of
+    evidence, not evidence of correctness."""
+    cached = [L.Fill("XOM", "buy", 10, 100.0, date(2022, 1, 1), "old1", "IND1")]
+    fresh = [L.Fill("SGOV", "buy", 5, 100.0, date(2026, 9, 1), "new1", "IND1")]
+    assert L.fills_cache_matches_fresh(cached, fresh) == []
+
+
+def test_fills_cache_matches_fresh_respects_qty_tolerance():
+    cached = [L.Fill("XOM", "buy", 10.0000001, 100.0, date(2026, 8, 18), "o1", "IND1")]
+    fresh = [L.Fill("XOM", "buy", 10.0, 100.0, date(2026, 8, 18), "o1", "IND1")]
+    assert L.fills_cache_matches_fresh(cached, fresh) == []
+
+
+def test_fills_cache_matches_fresh_ignores_fills_with_no_order_id():
+    cached = [L.Fill("XOM", "buy", 10, 100.0, date(2026, 8, 18), "", "IND1")]
+    fresh = [L.Fill("XOM", "buy", 999, 100.0, date(2026, 8, 18), "", "IND1")]
+    assert L.fills_cache_matches_fresh(cached, fresh) == []

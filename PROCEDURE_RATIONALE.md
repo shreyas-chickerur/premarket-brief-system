@@ -1411,3 +1411,49 @@ This is transport and nothing else. The folds, the reconciliation, and every
 block-severity check run afterwards on exactly the `{"title", "content"}`
 shape the per-file path produced, and stay exactly as strict. Nothing here
 makes a check easier to pass; it only lets the checks be reached.
+
+## Stage 12 -- the fills cache held apply_splits's OUTPUT, and apply_splits never forgives that
+
+Flagged by the 14 September watchdog run and fixed the same day, after
+investigation: a prior run's Stage 0 step 7 cached the split-ADJUSTED
+`fills` variable instead of the raw `fresh_fills` one `DAILY_PROCEDURE.md`
+has always named. `apply_splits` was built on 31 August specifically to
+convert broker-raw, as-executed quantities into current, post-split terms,
+and its own docstring says plainly what that means for a second call: "a
+fill dated strictly before a split's effective date" is multiplied by the
+ratio -- every time, with no record of whether that already happened once.
+Cache its output, and the next run's `apply_splits(fills, splits_by_symbol)`
+-- called on the COMBINED cached-plus-fresh set, exactly as it should be for
+the fresh half -- multiplies the corrupted half a second time. Not a
+one-time error: every run since silently repeated it.
+
+It went unnoticed for five sessions (9 through 14 September) for a specific
+reason worth naming: every affected symbol -- NVDA, GOOGL, CMG, CRWD, NFLX,
+VUG -- was already fully closed out. A net position of zero, scaled by any
+constant, is still zero; `ledger_reconciled` compares derived positions
+against the broker's CURRENT snapshot, and a closed position's current
+snapshot value is zero regardless of how its history got there. Nothing
+about daily reconciliation could have caught this. What it silently
+corrupted instead: cost basis, loss-sale amounts, and the wash-sale
+registry's read of those six symbols -- exactly the numbers this system
+exists to get right before it is trusted with a live loss.
+
+Two things closed this, not one. `ledger.fills_cache_matches_fresh` cross-
+checks cached fills against a fresh, authoritative re-fetch of the same
+order_ids for the window `fills_cache_watermark` always re-covers -- a
+disagreement there is direct evidence of corruption, not a race, and
+`DAILY_PROCEDURE.md` step 7 now blocks on it exactly like an unreadable
+file. It can only see the horizon-window overlap, though, so it would not
+by itself have caught six-symbols'-worth of history from 2022-2024. For
+that: the four corrupted `fills-cache-2026-09-09*.json` files were removed
+outright (Google Drive trash, reversible) rather than hand-repaired --
+`fills_cache_watermark` on an empty cache returns `None`, which is the
+same "no cache exists yet" path the very first run ever took, and forces
+a full, correct re-fetch from the broker's own unaltered order history
+rather than trusting anyone's arithmetic to un-multiply six symbols by
+the right ratios by hand. The Stage 6 caching instruction itself was also
+rewritten to name the exact two variables by their exact roles at that
+point in execution, because the mistake was never a defect in `ledger.py`
+-- `apply_splits` did precisely what its docstring says it does -- it was
+an execution choosing the wrong one of two similarly-shaped objects, which
+prose clarity defends against far better than code ever can on its own.
