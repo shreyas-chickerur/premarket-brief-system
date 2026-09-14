@@ -1457,3 +1457,74 @@ point in execution, because the mistake was never a defect in `ledger.py`
 -- `apply_splits` did precisely what its docstring says it does -- it was
 an execution choosing the wrong one of two similarly-shaped objects, which
 prose clarity defends against far better than code ever can on its own.
+
+## Stage 13 -- the watchdog stops waiting for something to break
+
+15 September 2026, at the reader's own request: the watchdog's original
+design only ever acted on a broken day -- `no_run`, `hung`, or `aborted`.
+A healthy day, however much it had quietly flagged for improvement in its
+own `metrics.optimizations`, got nothing. That list was real, computed
+every run by `runlog.find_optimizations`, and completely inert: proposals
+accumulated in the journal and were never looked at again unless a human
+went and read them by hand, which section 10's own remaining-work list
+had been saying since before this document existed.
+
+The redesign keeps the watchdog's original job (Stages 1-5, the safety net
+that guarantees an email even when the scheduled run hangs before it can
+send one itself -- the 31 August incident) and adds a second one, Stage 5B,
+that runs every day regardless of whether Stage 5 was needed: read what the
+day's own run already found worth optimizing, and fix what is safe to fix
+now rather than let it sit. Two explicit choices went into how far that
+authority reaches, both made by the reader directly rather than assumed:
+
+**The safety net stays, unconditionally.** The alternative -- drop hang
+detection now that there is a broader review mandate -- was rejected. The
+two jobs are unrelated: one guarantees a signal exists at all on a broken
+day, the other improves a signal that already exists on a working one.
+Folding the second into the first would have made the review pass a
+precondition for the safety net's own guarantee, which is exactly the kind
+of coupling this system has spent effort removing elsewhere (`verify_email`
+being reachable from `render_email` with no way around it is the same
+principle in miniature).
+
+**Strategy-adjacent proposals may now be self-applied, not just
+infrastructure ones -- but only once a proposal has recurred across
+independent days, never off a single day's finding.** This was the
+harder call, and it was made deliberately wider than Stage 5's existing
+authority: Stage 5 only ever fixes the one check that broke today's run,
+never a sizing rule, cap, or threshold. Stage 5B may now also act on
+`find_optimizations`'s output even when it touches those -- concretely,
+proposals like "no sector cap on the agentic account" or "track a shadow
+buying-power figure" (both real findings from 4 September, both still
+sitting unactioned) are now within reach. The added guard -- recurrence
+across at least two separate days' manifests, checked by tallying `kind`
+across the last ten or so `run-manifest-*.json` files, not the `sample`
+field inside one day's own finding, which counts something different per
+`kind` (a rejection tally, a run count within one day's trailing window)
+and was never designed to answer "has this been proposed more than once"
+-- exists because `find_optimizations` can label a single day's
+observation `"measured"` (`no_sector_cap_on_the_agentic_account` did,
+at `sample: 1`) and confidence-of-measurement is not the same claim as
+persistence-of-pattern. One well-quantified day is still one day. This
+guard was added by the implementer, disclosed rather than assumed, and
+is the kind of thing worth revisiting if it turns out to be too
+conservative once real data accumulates against it.
+
+Both categories still answer to the exact same three absolute limits
+Stage 5 has always had -- no `place_equity_order` code, no weakened
+Stage 0 safety or reconciliation check, no touching the `THIS IS A DRY
+RUN` guard -- restated verbatim in Stage 5B rather than only
+cross-referenced, because the whole reason those three sentences are
+pinned character-for-character by `test_procedure_docs.py` is that
+"obviously implied by context" has never been the bar for something
+that must never move.
+
+One email a day stays the rule. A fix Stage 5B merges takes effect
+starting the next scheduled run, not the one that already sent today's
+brief -- there is no second email channel, and inventing one to report a
+same-day optimization would be exactly the kind of scope creep the three-
+section email redesign spent two rounds cutting back down from. What
+changes today, changes quietly in the code and loudly in the journal
+(`topic: "review_pass"`, naming what was found, what was and was not
+acted on, and why) -- exactly the standard this system already holds
+every other self-heal action to.
