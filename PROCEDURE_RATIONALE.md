@@ -1361,3 +1361,53 @@ either procedure doc. Fixed by deleting the parameter and the footer
 branch entirely rather than flipping the default -- a default can be
 silently reintroduced by the next person who adds a new call site and
 doesn't know to pass `False`; a parameter that does not exist cannot.
+
+## Stage 11 -- the bootstrap read stops paying per byte, 14 September 2026
+
+Stage 9 collapsed Stage 0 to one Drive read, and it was the right shape, but
+it shipped with a bootstrap paradox nobody priced: the consolidated
+`state-bundle-*.json` can only be written by a run that first completes the
+very read it replaces. No run completed that read after 9 September. Five
+consecutive sessions -- 10 September 06:20 and its watchdog retry, 11
+September 06:20 and its watchdog retry, and 14 September 06:20 -- each
+re-attempted the full bootstrap, ran out of wall clock inside it, correctly
+refused to write a bundle from a partial fold, and handed the identical
+problem to the next run. That is a deadlock, not a slow day, and raising the
+budget from 2,700s to 4,200s on 10 September could not touch it.
+
+The reason it could not is worth stating plainly, because it is the whole
+finding. `download_file_content` returns a file's payload INLINE to the
+caller. The only way to get that payload onto local disk, where
+`ledger.fold_*` can read it, is to pass its full base64 back out again. So
+the cost is not one round trip per file -- it is one round trip plus a
+write-back proportional to the file's SIZE, and the total therefore scales
+with the bytes of stored state. By 14 September that was ~299 KB across 23
+files, growing every trading day. The 06:20 run measured itself at 22.8 B/s
+and projected 11,767s against 2,658s of budget remaining. No deadline large
+enough to fit that is a deadline worth having.
+
+`search_files` with `snippetVerbosity="MAX_ALLOWED"` sidesteps it entirely.
+One call returns every matching file's full text, the response is far too
+large for the inline tool-output limit, and the harness auto-saves it to a
+file on local disk -- the same mechanism an oversized `get_equity_orders`
+page has used since 8 September. The bytes reach disk without passing
+through the caller at all. Two calls (`title contains 'journal'`, `title
+contains 'cache'`) replaced 23 downloads and materialised all 307 KB, and
+the fold that had not completed in five sessions completed: 18 journal
+files, 76 entries, 870 fills, 68 split-checked symbols, zero unreadable.
+
+The one hazard is that snippet text arrives markdown-escaped, and a careless
+reversal is a silent corruption rather than a loud one -- a journal that
+still parses but means something else is precisely what
+`journal_fully_readable` cannot catch. `drive_snippets.unescape_snippet`
+therefore strips a backslash only when what follows it is NOT a legal JSON
+escape character, so `\_` and `\[` come back but `\"` and `\\` are left
+alone; a `reason` string containing a quotation mark survives intact. It was
+checked against a file fetched verbatim through the old path (JSON-identical),
+and the folded fills independently matched the 870 the 8 September journal
+recorded.
+
+This is transport and nothing else. The folds, the reconciliation, and every
+block-severity check run afterwards on exactly the `{"title", "content"}`
+shape the per-file path produced, and stay exactly as strict. Nothing here
+makes a check easier to pass; it only lets the checks be reached.
