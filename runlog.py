@@ -18,6 +18,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, date, timezone
 from typing import Any, Optional, Sequence
 
+import washsale
+
 SCHEMA_VERSION = 3
 
 Severity = str  # info | warn | block
@@ -746,10 +748,36 @@ def washsale_registry_stable(current: dict, previous: Optional[dict], *,
     No previous report -- the first run ever to produce one, or a gap from
     before this schema existed -- always passes; there is nothing to compare
     against yet.
+
+    A previous report that does not conform to the pinned schema
+    (`washsale.report_schema_problems`) is the same epistemic situation --
+    there is no usable prior report -- and is reported as exactly that,
+    never as agreement. Before 15 September 2026 this function reached for
+    `.items()` on whatever `previous["blocked"]` held and raised
+    `AttributeError` when the 14 September journal entry turned out to
+    record `blocked` as a list; a blocking Stage 0 check that dies inside
+    its own comparison sends no email at all. It deliberately does NOT fail
+    the run: a malformed entry is already in the journal, an aborted run
+    records no report of its own to supersede it, and failing here would
+    make the next run compare against that same bad entry and abort
+    identically -- the self-perpetuating Stage 0 deadlock of 10-14
+    September, reached from a new direction. That the comparison was
+    impossible is surfaced in the detail and in `value["compared"]`, so it
+    reaches the manifest and the brief instead of hiding behind "agrees".
     """
     if not previous:
         return Check("washsale_registry_stable", True, "block",
                      "no prior washsale_report entry to compare against", value=None)
+
+    schema_problems = washsale.report_schema_problems(previous)
+    if schema_problems:
+        prior_asof = previous.get("asof") if isinstance(previous, dict) else None
+        return Check("washsale_registry_stable", True, "block",
+                     f"the prior washsale_report (asof {prior_asof}) does not conform "
+                     f"to the pinned schema, so no comparison was possible: "
+                     f"{'; '.join(schema_problems)}",
+                     value={"unexplained": [], "compared": False,
+                            "prior_report_schema_problems": schema_problems})
 
     prev_blocked = previous.get("blocked", {})
     cur_blocked = current.get("blocked", {})
@@ -773,7 +801,7 @@ def washsale_registry_stable(current: dict, previous: Optional[dict], *,
               f"their clears_on) and are missing from today's registry, rebuilt from "
               f"the same fills -- investigate before trusting any buy this run clears")
     return Check("washsale_registry_stable", passed, "block", detail,
-                value={"unexplained": unexplained})
+                value={"unexplained": unexplained, "compared": True})
 
 
 def _regressions(history: Sequence[dict]) -> list[Check]:

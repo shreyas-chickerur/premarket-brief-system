@@ -220,6 +220,57 @@ class Registry:
         }
 
 
+def report_schema_problems(payload: object) -> list[str]:
+    """What is wrong with `payload` as a journal `washsale_report` entry, or
+    `[]` if it conforms to `Registry.report`'s pinned schema.
+
+    `report` pinned the schema; nothing checked that what a run actually
+    WROTE matched it. On 14 September 2026 a run recorded
+    `{"asof": ..., "blocked": []}` -- `blocked` as a list, not the
+    symbol-keyed dict the schema specifies -- and the next day's
+    `runlog.washsale_registry_stable` raised `AttributeError` reaching for
+    `.items()` on it. That is a blocking Stage 0 check dying inside a
+    comparison it was supposed to report on, which is the 31 August failure
+    shape: a run that crashes mid-Stage-0 writes no manifest and sends no
+    email.
+
+    Deliberately shallow. It answers one question -- can this payload be
+    compared against another report? -- and does not re-validate the
+    wash-sale arithmetic, which is `Registry`'s own job. A `clears_on` of
+    `None` is valid: `report` emits exactly that for a block with no
+    computed expiry.
+    """
+    if not isinstance(payload, dict):
+        return [f"report is {type(payload).__name__}, not a dict"]
+
+    problems: list[str] = []
+    if not isinstance(payload.get("asof"), str):
+        problems.append(
+            f"'asof' is {type(payload.get('asof')).__name__}, not an ISO date string")
+
+    blocked = payload.get("blocked")
+    if not isinstance(blocked, dict):
+        problems.append(
+            f"'blocked' is {type(blocked).__name__}, not the symbol-keyed dict "
+            f"Registry.report emits")
+        return problems
+
+    for sym, v in blocked.items():
+        if not isinstance(v, dict):
+            problems.append(f"blocked[{sym!r}] is {type(v).__name__}, not a dict")
+            continue
+        if v.get("severity") not in ("block", "warn"):
+            problems.append(f"blocked[{sym!r}]['severity'] is {v.get('severity')!r}, "
+                            f"not 'block' or 'warn'")
+        if not isinstance(v.get("reason"), str):
+            problems.append(f"blocked[{sym!r}]['reason'] is not a string")
+        if not (v.get("clears_on") is None or isinstance(v.get("clears_on"), str)):
+            problems.append(f"blocked[{sym!r}]['clears_on'] is "
+                            f"{type(v.get('clears_on')).__name__}, not an ISO date "
+                            f"string or None")
+    return problems
+
+
 def seed_from_positions(individual: Sequence[dict], agentic: Sequence[dict]) -> list[str]:
     """Names currently held at a loss in either account.
 

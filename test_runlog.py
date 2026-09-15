@@ -335,6 +335,69 @@ def test_a_new_block_since_last_report_is_never_flagged():
     assert c.passed
 
 
+def test_a_malformed_prior_report_is_not_reported_as_agreement():
+    """The 15 September 2026 finding. The 2026-09-14 journal entry recorded
+    `{"asof": ..., "blocked": []}` -- a list, not the pinned symbol-keyed
+    dict -- and this function raised AttributeError reaching for `.items()`
+    on it. A blocking Stage 0 check that dies inside its own comparison
+    writes no manifest and sends no email, which is the 31 August failure
+    shape.
+
+    It must not crash, and it must not claim "agrees with the last recorded
+    report" for a comparison it could not make."""
+    previous = {"asof": "2026-09-14", "blocked": []}
+    current = {"asof": "2026-09-04",
+               "blocked": {"CMG": {"severity": "block", "reason": "r",
+                                   "clears_on": "2026-09-27"}}}
+    c = R.washsale_registry_stable(current, previous, asof=ASOF)
+    assert c.severity == "block"
+    assert c.value["compared"] is False
+    assert c.value["prior_report_schema_problems"]
+    assert "no comparison was possible" in c.detail
+    assert "2026-09-14" in c.detail
+    assert "agrees" not in c.detail
+
+
+def test_a_malformed_prior_report_does_not_abort_the_run():
+    """Deliberate: failing here would deadlock. An aborted run records no
+    washsale_report of its own, so the next run would compare against the
+    same malformed entry and abort identically -- the self-perpetuating
+    Stage 0 deadlock of 10-14 September 2026, reached from a new
+    direction."""
+    for bad in ({"asof": "2026-09-14", "blocked": []},
+                {"asof": "2026-09-14", "blocked": ["CMG", "CRM"]},
+                {"blocked": {}},
+                {"asof": "2026-09-14"}):
+        c = R.washsale_registry_stable({"asof": "2026-09-04", "blocked": {}},
+                                       bad, asof=ASOF)
+        assert c.passed, bad
+        assert c.value["unexplained"] == []
+
+
+def test_a_wellformed_prior_report_still_records_that_it_compared():
+    """The honest-signal half: a real comparison says so, so a reader can
+    tell agreement from "could not check"."""
+    previous = {"asof": "2026-09-03",
+                "blocked": {"XLE": {"severity": "block", "reason": "r",
+                                    "clears_on": "2026-09-27"}}}
+    c = R.washsale_registry_stable(previous, previous, asof=ASOF)
+    assert c.passed and c.value["compared"] is True
+    assert c.detail == "agrees with the last recorded report"
+
+
+def test_the_5_september_regression_still_fires_through_the_new_guard():
+    """The guard must not have become a way past the check it protects: a
+    well-formed prior report with real unexplained shrinkage still aborts."""
+    previous = {"asof": "2026-09-03",
+                "blocked": {"MRVL": {"severity": "block", "reason": "r",
+                                     "clears_on": "2026-09-05"}}}
+    c = R.washsale_registry_stable({"asof": "2026-09-04", "blocked": {}},
+                                   previous, asof=ASOF)
+    assert not c.passed and c.severity == "block"
+    assert c.value["unexplained"] == ["MRVL"]
+    assert c.value["compared"] is True
+
+
 def test_a_dropped_proxy_warning_is_never_flagged():
     """The IRS has not ruled on substantially-identical funds either way, so
     a proxy warning appearing or disappearing is a judgment call, not

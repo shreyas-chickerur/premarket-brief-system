@@ -240,3 +240,66 @@ def test_report_matches_blocked_symbols_exactly():
 def test_report_empty_registry():
     r = W.Registry([])
     assert r.report(TODAY) == {"asof": TODAY.isoformat(), "blocked": {}}
+
+
+# ------------------------------------------------ report_schema_problems
+
+def test_report_output_always_conforms_to_its_own_schema():
+    """The round trip that makes the validator trustworthy: whatever
+    `report` emits must validate clean, for a populated and an empty
+    registry alike."""
+    populated = W.Registry([
+        loss_sale("CMG", "individual", TODAY - timedelta(days=19)),
+        loss_sale("GLDM", "agentic", TODAY - timedelta(days=19)),
+    ])
+    assert W.report_schema_problems(populated.report(TODAY)) == []
+    assert W.report_schema_problems(W.Registry([]).report(TODAY)) == []
+
+
+def test_blocked_as_a_list_is_the_14_september_journal_entry():
+    """The real defect: the 2026-09-14 journal recorded `blocked` as a list,
+    and the next day's `runlog.washsale_registry_stable` raised
+    AttributeError reaching for `.items()` on it."""
+    problems = W.report_schema_problems({"asof": "2026-09-14", "blocked": []})
+    assert len(problems) == 1
+    assert "'blocked' is list" in problems[0]
+
+    # a NON-empty list is the same schema break and must also be caught --
+    # it is the shape that would silently lose real blocked symbols
+    problems = W.report_schema_problems({"asof": "2026-09-14",
+                                         "blocked": ["CMG", "CRM"]})
+    assert any("'blocked' is list" in p for p in problems)
+
+
+def test_a_missing_or_non_dict_report_is_a_problem_not_a_crash():
+    assert "not a dict" in W.report_schema_problems(None)[0]
+    assert "not a dict" in W.report_schema_problems([])[0]
+    assert "not a dict" in W.report_schema_problems("blocked: none")[0]
+
+
+def test_a_missing_asof_is_flagged():
+    problems = W.report_schema_problems({"blocked": {}})
+    assert any("'asof'" in p for p in problems)
+
+
+def test_a_malformed_per_symbol_entry_is_flagged():
+    problems = W.report_schema_problems({
+        "asof": "2026-09-14",
+        "blocked": {"CMG": {"severity": "nope", "reason": 7, "clears_on": 20260927}},
+    })
+    assert any("severity" in p for p in problems)
+    assert any("reason" in p for p in problems)
+    assert any("clears_on" in p for p in problems)
+
+    assert W.report_schema_problems({
+        "asof": "2026-09-14", "blocked": {"CMG": "blocked"}})
+
+
+def test_clears_on_none_is_valid():
+    """`report` emits `None` for a block with no computed expiry -- that is
+    the schema, not a violation."""
+    assert W.report_schema_problems({
+        "asof": "2026-09-14",
+        "blocked": {"CMG": {"severity": "block", "reason": "r",
+                            "clears_on": None}},
+    }) == []
