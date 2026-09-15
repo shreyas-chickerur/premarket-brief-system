@@ -1357,11 +1357,26 @@ def build_state_bundle(*, journal_entries: Sequence[JournalEntry],
     }
 
 
-def unpack_state_bundle(bundle: dict) -> dict:
+def unpack_state_bundle(bundle: dict, *,
+                        extra_journal_files: Sequence[dict] = ()) -> dict:
     """Reverse of `build_state_bundle`: reconstruct the `Journal` and the
     four fold results by feeding the bundle's stored rows back through the
     exact fold functions the dated files use, each as one synthetic
     same-shaped file dated `bundle["as_of"]`.
+
+    `extra_journal_files` (15 September 2026) covers the gap a bundle
+    written mid-run leaves: once Stage 0 writes the bundle as soon as its
+    own data is ready, rather than waiting for Stage 6 when the wall-clock
+    budget is tightest, the bundle's `journal_entries` cannot yet include
+    entries THIS run adds later (theses, decisions, the run entry itself)
+    -- those still land in the ordinary `journal-YYYY-MM-DD[-N].json` file
+    Stage 6 always writes. Pass any such files dated on or after the
+    bundle's own `as_of` (same `{"title", "content"}` shape as everywhere
+    else) and they fold in alongside the bundle's own synthetic file, in
+    the same oldest-first order `fold_journal` already guarantees --
+    there is normally at most one or two of these (today's own run, and
+    a same-day watchdog retry's), never the unbounded backlog the bundle
+    exists to avoid reading.
 
     Returns `{"journal": Journal, "fills": list[Fill],
     "splits_by_symbol": dict[str, SplitsCacheEntry],
@@ -1378,7 +1393,7 @@ def unpack_state_bundle(bundle: dict) -> dict:
     journal = fold_journal([{
         "title": journal_filename(date.fromisoformat(as_of)),
         "content": json.dumps({"entries": bundle.get("journal_entries", [])}),
-    }])
+    }, *extra_journal_files])
     bad.extend(f"bundle:{x}" for x in journal.unreadable)
 
     fills, fills_bad = fold_fills_cache([{

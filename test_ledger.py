@@ -1508,6 +1508,33 @@ def test_unpack_state_bundle_defaults_as_of_to_today_when_missing():
     assert out["journal"].entries == []
 
 
+def test_unpack_state_bundle_folds_in_extra_journal_files_after_the_bundle():
+    """15 September 2026: a bundle written early (right after Stage 0, not
+    at Stage 6) cannot yet include entries THIS run adds later. Those still
+    land in the ordinary dated journal file, and must fold in on TOP of the
+    bundle's own entries, not replace or precede them."""
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=date(2026, 9, 15))
+    extra = [_file("journal-2026-09-15.json",
+                   [{"run_id": "r3", "kind": "run", "payload": {"i": 3}}])]
+    out = L.unpack_state_bundle(bundle, extra_journal_files=extra)
+    assert out["bad"] == []
+    assert [e.run_id for e in out["journal"].entries] == ["r1", "r2", "r3"]
+
+
+def test_unpack_state_bundle_extra_journal_files_default_to_none():
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=date(2026, 9, 15))
+    out = L.unpack_state_bundle(bundle)
+    assert [e.run_id for e in out["journal"].entries] == ["r1", "r2"]
+
+
 # --------------------------------------------------- fills_cache_matches_fresh
 # 14 September 2026: apply_splits is deliberately not idempotent, so caching
 # its OUTPUT instead of its input compounds every run. These pin the

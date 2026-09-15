@@ -1528,3 +1528,61 @@ changes today, changes quietly in the code and loudly in the journal
 (`topic: "review_pass"`, naming what was found, what was and was not
 acted on, and why) -- exactly the standard this system already holds
 every other self-heal action to.
+
+## Stage 14 -- the write side has the same shape of budget problem the read side did, 15 September 2026
+
+Stage 11 fixed the read side: a bootstrap that had to pull ~20 dated
+files inline, one `download_file_content` at a time, was burning the
+whole wall-clock budget before it ever finished reading, which meant
+the first state bundle could never be written, which meant every run
+repeated the same expensive bootstrap. Once that was fixed, a mirror
+problem showed up on the write side: a full research day (Stages 1
+through 5 genuinely doing their jobs -- gathering, measuring, gating,
+trading two accounts) can burn nearly the entire budget before Stage 6
+is even reached, leaving too little left to write the 135KB
+fills-cache and 340KB state bundle. Unlike the read side, there is no
+"auto-save oversized output to disk" trick available here --
+`create_file` takes its content as an inline argument, not an upload
+from a local path, so the write cost is genuinely close to
+bytes-proportional and chunking would not help; the only lever left is
+timing, not mechanism.
+
+So the fix is timing: write a safety-net copy of the fills cache,
+splits cache, and state bundle immediately after Stage 0 step 7's
+reconciliation succeeds (new step 7b), instead of waiting for Stage 6.
+Reconciliation having just succeeded means what exists at that moment
+is already real, correct, persistable state -- nothing later in the run
+can retroactively invalidate a fill or a split ratio already folded in.
+Stage 0 always has its full budget available, being the first thing
+that runs, so this write is the one most likely to actually happen on
+a day that later runs out of room.
+
+The catch: at step 7b, Stage 1 has not run yet, so `sector_by_symbol`
+and `congress_discovery` are still whatever step 6c's earlier read
+cached, not this run's fresh checks, and no entry this run itself will
+add to the journal (theses, closes, outcomes, the washsale report, the
+run entry) exists yet either. Writing the bundle this early therefore
+means writing a bundle that is honest but incomplete as of THIS
+moment. Two things keep that from being a real loss. First, Stage 6
+still writes its own, later, fresher copy of all three files exactly as
+before, at a higher `-N` suffix -- step 7b's write is a floor, not a
+replacement, and step 6c's existing "latest same-day file wins"
+selection already picks the fresher one whenever it exists. Second, for
+the case where Stage 6 never gets there at all, `ledger.unpack_state_bundle`
+grew an `extra_journal_files` parameter: step 6c now also lists any
+`journal-*.json` files dated on or after the early bundle's `as_of` and
+folds them in on top of it. In practice that is at most one file --
+today's own, written at Stage 6 whenever Stage 6 does run far enough to
+write it -- so the gap the early bundle leaves (this run's own journal
+entries) gets closed the same way the fills/splits cache watermark
+already closes the analogous gap on the read side: not by making the
+early snapshot complete, but by making tomorrow's read cheaply able to
+finish the job.
+
+This is deliberately not a full duplication of Stage 6's write section.
+Sector-cache and congress-discovery-cache stay Stage-6-only, unmoved --
+their checks do not exist until Stage 1 runs, there is nothing earlier
+to write, and their cadence (180-day, weekly) makes one day's staleness
+in the worst case immaterial next to the risk of getting fills or
+splits wrong. Only the two byte-heavy, reconciliation-complete-by-Stage-0
+pieces moved earlier.
