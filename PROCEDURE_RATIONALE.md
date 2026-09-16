@@ -1586,3 +1586,49 @@ to write, and their cadence (180-day, weekly) makes one day's staleness
 in the worst case immaterial next to the risk of getting fills or
 splits wrong. Only the two byte-heavy, reconciliation-complete-by-Stage-0
 pieces moved earlier.
+
+## Stage 15 -- moving the write earlier did not make it fit, 16 September 2026
+
+Stage 14 moved the fills-cache, splits-cache and state-bundle writes from
+Stage 6 to Stage 0 step 7b, on the reading that they were failing because a
+long research day left no wall-clock budget by the time Stage 6 arrived.
+That reading was half right. The splits cache has landed every day since.
+The fills cache has not: 8, 15 and 16 September each computed a real
+870-row, ~136 KB `fills_ready_to_cache` list and then wrote no file at all,
+the third of those from a run with the whole budget still ahead of it.
+
+So it was never only about when the write happened. `create_file` takes its
+content INLINE (`textContent`/`base64Content`; `update_file` is
+metadata-only), so the file's entire payload has to pass back out through
+the caller inside one tool call, and a full fill history no longer fits in
+one. This is the same bytes-scaling wall `drive_snippets` broke on the read
+side on 14 September, still standing on the write side -- and the same
+deadlock shape, too: no cache written means the next run re-fetches the
+full history, which means the next run's payload is just as large, which
+means it fails the same way. Three days in, that is a loop, not a bad day.
+
+`ledger.fills_cache_chunks` breaks it with what the dated-file convention
+already had. `FILLS_CACHE_RE` has always accepted a `-N` sequence suffix,
+and `fold_fills_cache` has always folded every file for a date together,
+sorted and deduplicated on `account` + `order_id`. N small files for one
+day therefore fold to exactly what one large file would have -- not
+approximately, and not via a second parser to keep in sync, which is the
+same argument `build_state_bundle` already rests on. The helper returns
+`(title, content)` pairs, one `create_file` each; 60,000 bytes per chunk
+puts a 136 KB history in two or three files, and once one full write lands
+the steady state is a few aged-out rows a day in a single chunk.
+
+Two things this deliberately does not do. It does not touch
+`fills_ready_to_cache`'s horizon rule -- what is safe to cache is a
+correctness question and unchanged. And it does not chunk the state bundle:
+`unpack_state_bundle` reads exactly one file and picks the latest, so
+splitting it is a design change rather than a transport one, and the bundle
+has a fallback the fills cache does not (the dated files it summarises).
+The bundle write is still the open half of this problem, recorded here
+rather than half-fixed alongside.
+
+One smaller thing came with it. The fills row shape was written out twice,
+in `build_state_bundle` and in `DAILY_PROCEDURE.md`'s Stage 6 bullet;
+`_fill_cache_row` is now the single definition both the bundle and the
+chunk writer use, so the "identical by construction" claim above is
+enforced by the code rather than by two places agreeing.

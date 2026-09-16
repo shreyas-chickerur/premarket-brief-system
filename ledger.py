@@ -39,7 +39,7 @@ __all__ = [
     "compact_journal_month",
     "FILLS_CACHE_HORIZON_DAYS", "fills_cache_filename", "FILLS_CACHE_RE",
     "fold_fills_cache", "fills_cache_watermark", "fills_ready_to_cache",
-    "fills_for_account",
+    "fills_for_account", "CACHE_FILE_MAX_INLINE_BYTES", "fills_cache_chunks",
     "SPLITS_CACHE_HORIZON_DAYS", "splits_cache_filename", "SPLITS_CACHE_RE",
     "SplitsCacheEntry", "fold_splits_cache", "symbols_needing_split_check",
     "SECTOR_CACHE_HORIZON_DAYS", "sector_cache_filename", "SECTOR_CACHE_RE",
@@ -420,6 +420,88 @@ def fills_ready_to_cache(fresh_fills: Sequence[Fill], *,
     today = today or date.today()
     boundary = today - timedelta(days=horizon_days)
     return [f for f in fresh_fills if f.on < boundary]
+
+
+def _fill_cache_row(f: Fill) -> dict:
+    """The one row shape every fills-cache file and the state bundle's own
+    `fills` list use. Defined once so the two cannot drift apart --
+    `fold_fills_cache` is the only reader of either."""
+    return {"symbol": f.symbol, "side": f.side, "quantity": f.quantity,
+            "price": f.price, "on": f.on.isoformat(), "order_id": f.order_id,
+            "account": f.account}
+
+
+# The Drive connector takes file content INLINE only (`create_file`'s
+# `textContent`/`base64Content`; `update_file` is metadata-only), so a cache
+# file's ENTIRE payload has to pass back out through the caller inside a
+# single tool call. That caps one write at roughly the harness's inline
+# argument budget -- and the fills cache outgrew it. 8, 15 and 16 September
+# 2026 each computed a real 870-row, ~136 KB `fills_ready_to_cache` list and
+# then wrote no file at all, so the next run found no cache, re-fetched the
+# full history, and arrived at the same wall the next day: the same
+# bytes-scaling deadlock `drive_snippets` broke on the READ side, still open
+# on the write side.
+#
+# The dated-file convention already carries the fix. `FILLS_CACHE_RE` accepts
+# a `-N` sequence suffix and `fold_fills_cache` folds every matching file for
+# a date together, sorted and deduplicated, so N small files for one day fold
+# to exactly what one large file would have -- see
+# `fills_cache_chunks`. 60,000 bytes leaves real headroom under the limit
+# without making the daily file count grow faster than it needs to; the
+# steady state after one full write lands is a handful of rows a day, well
+# inside a single chunk.
+CACHE_FILE_MAX_INLINE_BYTES = 60_000
+
+
+def fills_cache_chunks(fills: Sequence[Fill], run_date: date, *,
+                       max_bytes: int = CACHE_FILE_MAX_INLINE_BYTES,
+                       start_seq: int = 0) -> list[tuple[str, str]]:
+    """Split one run's cache-ready fills into `(title, content)` pairs small
+    enough to each be written by a single `create_file` call.
+
+    Returns `[]` for an empty `fills` -- the existing "skip this file
+    entirely when the list is empty" rule, unchanged: an empty cache file is
+    still a file the next run has to read and fold for nothing.
+
+    Titles run `fills-cache-{run_date}.json`, `-1.json`, `-2.json`, ...
+    from `start_seq` (pass the next free sequence number if an earlier run
+    today already wrote some). Each `content` is a JSON list of
+    `_fill_cache_row` objects -- byte-for-byte the shape
+    `fold_fills_cache` already reads, so folding the chunks is folding the
+    file they replace.
+
+    A single row larger than `max_bytes` on its own still gets its own
+    chunk rather than being dropped: an oversized write that fails loudly
+    is recoverable, a silently discarded fill is the corruption this
+    module exists to prevent.
+    """
+    if not fills:
+        return []
+
+    encoded = [json.dumps(_fill_cache_row(f), separators=(",", ":")) for f in fills]
+    out: list[tuple[str, str]] = []
+    seq = start_seq
+    batch: list[str] = []
+    size = 2  # the enclosing "[" and "]"
+
+    def flush() -> None:
+        nonlocal batch, size, seq
+        if not batch:
+            return
+        out.append((fills_cache_filename(run_date, seq), "[" + ",".join(batch) + "]"))
+        seq += 1
+        batch = []
+        size = 2
+
+    for row in encoded:
+        cost = len(row.encode("utf-8")) + (1 if batch else 0)
+        if batch and size + cost > max_bytes:
+            flush()
+            cost = len(row.encode("utf-8"))
+        batch.append(row)
+        size += cost
+    flush()
+    return out
 
 
 SPLITS_CACHE_HORIZON_DAYS = 7
@@ -1332,12 +1414,7 @@ def build_state_bundle(*, journal_entries: Sequence[JournalEntry],
         "schema": STATE_BUNDLE_SCHEMA_VERSION,
         "as_of": as_of.isoformat(),
         "journal_entries": [e.to_dict() for e in journal_entries],
-        "fills": [
-            {"symbol": f.symbol, "side": f.side, "quantity": f.quantity,
-             "price": f.price, "on": f.on.isoformat(), "order_id": f.order_id,
-             "account": f.account}
-            for f in fills
-        ],
+        "fills": [_fill_cache_row(f) for f in fills],
         "splits_by_symbol": [
             {"symbol": e.symbol, "checked_through": e.checked_through.isoformat(),
              "splits": [{"effective_date": s.effective_date.isoformat(), "ratio": s.ratio}

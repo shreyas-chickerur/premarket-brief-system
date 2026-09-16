@@ -1574,3 +1574,95 @@ def test_fills_cache_matches_fresh_ignores_fills_with_no_order_id():
     cached = [L.Fill("XOM", "buy", 10, 100.0, date(2026, 8, 18), "", "IND1")]
     fresh = [L.Fill("XOM", "buy", 999, 100.0, date(2026, 8, 18), "", "IND1")]
     assert L.fills_cache_matches_fresh(cached, fresh) == []
+
+
+# --- chunked fills-cache writes (16 September 2026) ---------------------------
+#
+# The failure these reproduce: `fills_ready_to_cache` returned 870 real rows
+# (~136 KB) on 8, 15 and 16 September 2026 and no `fills-cache-*.json` was
+# written on any of them, because the Drive connector takes content inline
+# only and the whole payload could not pass through one `create_file` call.
+
+
+def _many_fills(n: int) -> list[L.Fill]:
+    return [L.Fill(f"SYM{i % 97:04d}", "buy" if i % 2 else "sell",
+                   1.0 + i / 1000.0, 100.0 + i / 100.0,
+                   date(2026, 1, 1) + timedelta(days=i % 200),
+                   f"order-id-{i:08d}", "AGENTIC1" if i % 3 else "INDIVIDUAL1")
+            for i in range(n)]
+
+
+def test_a_full_fills_history_does_not_fit_one_inline_write():
+    """The premise. 870 rows is what 8/15/16 September actually computed."""
+    fills = _many_fills(870)
+    one_file = json.dumps([L._fill_cache_row(f) for f in fills], separators=(",", ":"))
+    assert len(one_file.encode("utf-8")) > L.CACHE_FILE_MAX_INLINE_BYTES
+
+
+def test_fills_cache_chunks_each_fit_the_inline_write_budget():
+    chunks = L.fills_cache_chunks(_many_fills(870), date(2026, 9, 16))
+    assert len(chunks) > 1, "a payload this size should need more than one file"
+    for title, content in chunks:
+        assert len(content.encode("utf-8")) <= L.CACHE_FILE_MAX_INLINE_BYTES, title
+
+
+def test_fills_cache_chunks_fold_back_to_exactly_the_single_file_result():
+    """The whole safety argument: N chunks and the one file they replace are
+    the same fills, because `fold_fills_cache` already sorts and dedupes
+    across every `-N` file for a date."""
+    fills = _many_fills(870)
+    run_date = date(2026, 9, 16)
+
+    chunked, chunk_bad = L.fold_fills_cache(
+        [{"title": t, "content": c} for t, c in L.fills_cache_chunks(fills, run_date)])
+    single, single_bad = L.fold_fills_cache([{
+        "title": L.fills_cache_filename(run_date),
+        "content": json.dumps([L._fill_cache_row(f) for f in fills]),
+    }])
+
+    assert chunk_bad == [] and single_bad == []
+    assert chunked == single
+    assert len(chunked) == len({(f.account, f.order_id) for f in fills})
+
+
+def test_fills_cache_chunks_titles_follow_the_dated_sequence_convention():
+    chunks = L.fills_cache_chunks(_many_fills(870), date(2026, 9, 16))
+    titles = [t for t, _ in chunks]
+    assert titles[0] == "fills-cache-2026-09-16.json"
+    assert titles[1] == "fills-cache-2026-09-16-1.json"
+    assert all(L.FILLS_CACHE_RE.match(t) for t in titles)
+    assert len(set(titles)) == len(titles)
+
+
+def test_fills_cache_chunks_can_start_after_an_earlier_run_today():
+    """A watchdog retry writing after the 06:20 routine already wrote -0
+    must not collide with it."""
+    chunks = L.fills_cache_chunks(_many_fills(50), date(2026, 9, 16), start_seq=3)
+    assert [t for t, _ in chunks] == ["fills-cache-2026-09-16-3.json"]
+
+
+def test_fills_cache_chunks_is_empty_when_there_is_nothing_to_cache():
+    """Unchanged rule: never write an empty cache file."""
+    assert L.fills_cache_chunks([], date(2026, 9, 16)) == []
+
+
+def test_fills_cache_chunks_never_drops_a_row_too_big_for_its_own_file():
+    """Better an oversized write that fails loudly than a fill silently
+    discarded to fit a budget."""
+    fills = _many_fills(3)
+    chunks = L.fills_cache_chunks(fills, date(2026, 9, 16), max_bytes=1)
+    assert len(chunks) == 3
+    folded, bad = L.fold_fills_cache(
+        [{"title": t, "content": c} for t, c in chunks])
+    assert bad == [] and len(folded) == 3
+
+
+def test_state_bundle_fills_rows_match_the_dated_cache_rows():
+    """The bundle and the dated files share one row shape by construction."""
+    fills = _many_fills(5)
+    bundle = L.build_state_bundle(journal_entries=[], fills=fills,
+                                  splits_by_symbol={}, sector_by_symbol={},
+                                  congress_discovery={}, as_of=date(2026, 9, 16))
+    chunk_rows = [r for _, c in L.fills_cache_chunks(fills, date(2026, 9, 16))
+                  for r in json.loads(c)]
+    assert bundle["fills"] == chunk_rows
