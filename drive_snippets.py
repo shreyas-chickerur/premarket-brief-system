@@ -22,14 +22,23 @@ file on local disk, which is the existing, documented convention for oversized
 `get_equity_orders` pages. The bytes reach disk without passing through the
 caller at all, so the cost stops scaling with the size of the stored state.
 
-The one wrinkle is that snippets arrive markdown-escaped -- a backslash is
-inserted before punctuation such as `_`, `[` and `]`, and each original
-newline is rendered as two spaces, a newline, and a space. `unescape_snippet`
-reverses exactly that, and only that: a backslash introducing a genuine JSON
-escape (`\\"`, `\\\\`, `\\n`, `\\uXXXX`, ...) is left alone, because stripping it
-would corrupt any string value that legitimately contains a quote or a
-backslash. Whitespace is left as-is: JSON ignores it outside string literals,
-and pretty-printed JSON never breaks a line inside one.
+The one wrinkle is that snippets arrive markdown-escaped. The escaper does
+two things, and BOTH have to be reversed: it inserts a backslash before
+punctuation such as `_`, `[` and `]`, and it DOUBLES every backslash that
+was already in the file. Each original newline is rendered as two spaces, a
+newline, and a space.
+
+That doubling is what makes the inverse unambiguous, and it is the whole of
+`unescape_snippet`: scanning left to right, `\\\\` is one literal backslash
+from the original file and `\\X` for any other X is markdown punctuation
+escaping, so the backslash comes off. A genuine JSON escape therefore
+survives by arriving doubled -- the file's `\\"` reaches us as `\\\\"` and goes
+back out as `\\"` -- rather than by being recognised from the character that
+follows it. Recognising it that way was the 18 September 2026 defect: `\\\\"`
+was read as an escaped backslash followed by a bare quote, left untouched,
+and closed the enclosing JSON string two characters early. Whitespace is
+left as-is: JSON ignores it outside string literals, and pretty-printed JSON
+never breaks a line inside one.
 
 This module does not decide anything. It is transport only -- every fold,
 every reconciliation, and every block-severity Stage 0 check runs afterwards
@@ -43,14 +52,13 @@ import json
 import re
 from typing import Any, Iterable
 
-__all__ = ["JSON_ESCAPES", "unescape_snippet", "files_from_listing",
-           "titles_matching"]
+__all__ = ["unescape_snippet", "files_from_listing", "titles_matching"]
 
-# The characters that may legitimately follow a backslash inside JSON. A
-# backslash before anything else in a snippet was added by the markdown
-# escaper and has to come back out.
-JSON_ESCAPES = '"\\/bfnrtu'
-
+# Left to right, non-overlapping: `\\\\` is a literal backslash the file itself
+# contained (the escaper doubled it), anything else after a backslash is
+# markdown punctuation escaping and the backslash comes off. Nothing here
+# looks at WHICH character follows -- see the module docstring for why that
+# is the only inverse that survives a JSON escape.
 _ESCAPED = re.compile(r"\\(.)", re.DOTALL)
 
 
@@ -58,11 +66,12 @@ def unescape_snippet(text: str) -> str:
     """Reverse Drive's markdown escaping of a file's content snippet.
 
     Strips the backslash from `\\_`, `\\[`, `\\-`, `\\$` and friends, and
-    leaves genuine JSON escapes untouched so a string value containing a
-    quote or a backslash survives the round trip intact.
+    collapses each doubled `\\\\` back to the single literal backslash the file
+    contained -- so a genuine JSON escape (`\\"`, `\\\\`, `\\n`, `\\uXXXX`, ...),
+    which reaches us doubled, survives the round trip intact.
     """
     return _ESCAPED.sub(
-        lambda m: m.group(0) if m.group(1) in JSON_ESCAPES else m.group(1),
+        lambda m: "\\" if m.group(1) == "\\" else m.group(1),
         text,
     )
 
