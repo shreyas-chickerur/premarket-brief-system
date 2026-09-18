@@ -845,6 +845,52 @@ def test_no_opening_balance_entries_gives_an_empty_map_not_an_error():
     assert j.opening_balances == {}
 
 
+# --------------------------------- journal.opening_balances_for_account
+# 18 September 2026: opening_balances merges across BOTH accounts with no
+# scoping at all -- passing that into the wrong account's reconcile_positions
+# invents a phantom residual. These pin that the account-scoped accessor
+# only ever returns entries actually tagged for that account.
+
+def test_opening_balances_for_account_only_returns_entries_tagged_for_it():
+    j = L.fold_journal([_file("journal-2026-09-01.json", [
+        {"run_id": "a", "kind": "opening_balance",
+         "payload": {"symbol": "MBGL", "quantity": 4.316287, "account": "792805129"}},
+        {"run_id": "a", "kind": "opening_balance",
+         "payload": {"symbol": "XLE", "quantity": 1.0, "account": "688021013"}},
+    ])])
+    assert j.opening_balances_for_account("792805129") == {"MBGL": 4.316287}
+    assert j.opening_balances_for_account("688021013") == {"XLE": 1.0}
+    assert j.opening_balances_for_account("000000000") == {}
+
+
+def test_opening_balances_for_account_ignores_entries_with_no_account_at_all():
+    """The two original MBGL/MSFT entries (1 September 2026) predate the
+    `account` field entirely -- neither account's reconciliation should
+    silently inherit them; they must be re-recorded with an account to be
+    seen again."""
+    j = L.fold_journal([_file("journal-2026-09-01.json", [
+        {"run_id": "a", "kind": "opening_balance",
+         "payload": {"symbol": "MBGL", "quantity": 4.316287}},
+    ])])
+    assert j.opening_balances_for_account("792805129") == {}
+    assert j.opening_balances_for_account("688021013") == {}
+    assert j.opening_balances == {"MBGL": 4.316287}  # unscoped accessor unaffected
+
+
+def test_opening_balances_for_account_later_entry_corrects_earlier_for_same_account():
+    j = L.fold_journal([
+        _file("journal-2026-09-01.json", [
+            {"run_id": "a", "kind": "opening_balance",
+             "payload": {"symbol": "MBGL", "quantity": 4.0, "account": "792805129"}},
+        ]),
+        _file("journal-2026-09-18.json", [
+            {"run_id": "b", "kind": "opening_balance",
+             "payload": {"symbol": "MBGL", "quantity": 4.316287, "account": "792805129"}},
+        ]),
+    ])
+    assert j.opening_balances_for_account("792805129") == {"MBGL": 4.316287}
+
+
 # ---------------------------------------------------- standing circuit breaker
 
 def test_no_circuit_breaker_entries_means_clear():
@@ -1374,9 +1420,24 @@ def test_bioguides_needing_discovery_check_rechecks_after_a_week():
 # EXACTLY what folding the dated files it replaces would have produced --
 # there is no second parser to drift out of sync with the first.
 
-def test_state_bundle_filename_matches_convention():
-    assert L.state_bundle_filename(date(2026, 9, 11)) == "state-bundle-2026-09-11.json"
-    assert L.state_bundle_filename(date(2026, 9, 11), 1) == "state-bundle-2026-09-11-1.json"
+def test_state_bundle_chunk_filename_matches_convention():
+    assert (L.state_bundle_chunk_filename(date(2026, 9, 18), 0, 0, 3)
+            == "state-bundle-2026-09-18-0-0-of-3.json")
+    assert (L.state_bundle_chunk_filename(date(2026, 9, 18), 1, 2, 3)
+            == "state-bundle-2026-09-18-1-2-of-3.json")
+
+
+def test_next_state_bundle_run_seq_skips_existing_dates_for_other_dates():
+    titles = ["state-bundle-2026-09-17-0-0-of-2.json",
+              "state-bundle-2026-09-17-0-1-of-2.json"]
+    assert L.next_state_bundle_run_seq(titles, date(2026, 9, 18)) == 0
+
+
+def test_next_state_bundle_run_seq_continues_after_the_highest_seen_today():
+    titles = ["state-bundle-2026-09-18-0-0-of-2.json",
+              "state-bundle-2026-09-18-0-1-of-2.json",
+              "state-bundle-2026-09-18-1-0-of-1.json"]
+    assert L.next_state_bundle_run_seq(titles, date(2026, 9, 18)) == 2
 
 
 def _bundle_fixture():
@@ -1533,6 +1594,135 @@ def test_unpack_state_bundle_extra_journal_files_default_to_none():
         as_of=date(2026, 9, 15))
     out = L.unpack_state_bundle(bundle)
     assert [e.run_id for e in out["journal"].entries] == ["r1", "r2"]
+
+
+# ------------------------------------------------------- state bundle chunking
+# 18 September 2026: `create_file` takes content inline only, and a real
+# bundle (361,643 bytes observed) is 5-6x CACHE_FILE_MAX_INLINE_BYTES -- it
+# has never been written as a single file since the bundle existed. These
+# pin that chunking + regrouping a bundle reproduces exactly what one big
+# file would have, and that an aborted, partial write is never mistaken for
+# a complete one.
+
+def test_state_bundle_chunks_reassemble_to_the_original_bundle():
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=date(2026, 9, 18))
+    chunks = L.state_bundle_chunks(bundle, date(2026, 9, 18), max_bytes=10_000)
+    files = [{"title": title, "content": content} for title, content in chunks]
+    merged, bad = L.merge_state_bundle_chunks(files)
+    assert bad == []
+    assert merged["schema"] == bundle["schema"]
+    assert merged["as_of"] == bundle["as_of"]
+    for field in ("journal_entries", "fills", "splits_by_symbol",
+                  "sector_by_symbol", "congress_discovery"):
+        assert merged[field] == bundle[field]
+
+
+def test_state_bundle_chunks_always_returns_at_least_one_chunk():
+    bundle = L.build_state_bundle(journal_entries=[], fills=[], splits_by_symbol={},
+                                  sector_by_symbol={}, congress_discovery={},
+                                  as_of=date(2026, 9, 18))
+    chunks = L.state_bundle_chunks(bundle, date(2026, 9, 18))
+    assert len(chunks) == 1
+    assert chunks[0][0] == "state-bundle-2026-09-18-0-0-of-1.json"
+
+
+def test_state_bundle_chunks_splits_across_multiple_files_when_oversized():
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=date(2026, 9, 18))
+    chunks = L.state_bundle_chunks(bundle, date(2026, 9, 18), max_bytes=200)
+    assert len(chunks) > 1
+    titles = [title for title, _ in chunks]
+    assert titles == [f"state-bundle-2026-09-18-0-{i}-of-{len(chunks)}.json"
+                      for i in range(len(chunks))]
+
+
+def test_state_bundle_chunks_respects_run_seq():
+    bundle = L.build_state_bundle(journal_entries=[], fills=[], splits_by_symbol={},
+                                  sector_by_symbol={}, congress_discovery={},
+                                  as_of=date(2026, 9, 18))
+    chunks = L.state_bundle_chunks(bundle, date(2026, 9, 18), run_seq=3)
+    assert chunks[0][0] == "state-bundle-2026-09-18-3-0-of-1.json"
+
+
+def test_group_state_bundle_titles_picks_the_latest_complete_group():
+    titles = [
+        "state-bundle-2026-09-17-0-0-of-2.json",
+        "state-bundle-2026-09-17-0-1-of-2.json",
+        "state-bundle-2026-09-18-0-0-of-3.json",
+        "state-bundle-2026-09-18-0-1-of-3.json",
+        "state-bundle-2026-09-18-0-2-of-3.json",
+    ]
+    as_of, run_seq, ordered = L.group_state_bundle_titles(titles)
+    assert as_of == "2026-09-18"
+    assert run_seq == 0
+    assert ordered == [
+        "state-bundle-2026-09-18-0-0-of-3.json",
+        "state-bundle-2026-09-18-0-1-of-3.json",
+        "state-bundle-2026-09-18-0-2-of-3.json",
+    ]
+
+
+def test_group_state_bundle_titles_skips_an_incomplete_fresher_write():
+    """A watchdog retry (run_seq 1) that aborted partway through writing its
+    own fresher bundle must not shadow the earlier, complete one -- reading
+    a truncated group as truth would be worse than falling back further."""
+    titles = [
+        "state-bundle-2026-09-18-0-0-of-2.json",
+        "state-bundle-2026-09-18-0-1-of-2.json",
+        "state-bundle-2026-09-18-1-0-of-3.json",  # only 1 of 3 chunks present
+    ]
+    as_of, run_seq, ordered = L.group_state_bundle_titles(titles)
+    assert (as_of, run_seq) == ("2026-09-18", 0)
+    assert len(ordered) == 2
+
+
+def test_group_state_bundle_titles_returns_none_when_nothing_is_complete():
+    titles = ["state-bundle-2026-09-18-0-0-of-2.json"]  # 1 of 2, incomplete
+    assert L.group_state_bundle_titles(titles) is None
+
+
+def test_group_state_bundle_titles_returns_none_on_empty_listing():
+    assert L.group_state_bundle_titles([]) is None
+
+
+def test_merge_state_bundle_chunks_reports_unparseable_chunks_as_bad():
+    files = [{"title": "state-bundle-2026-09-18-0-0-of-1.json", "content": "not json"}]
+    merged, bad = L.merge_state_bundle_chunks(files)
+    assert merged is None
+    assert bad == ["state-bundle-2026-09-18-0-0-of-1.json"]
+
+
+def test_merge_state_bundle_chunks_flags_an_as_of_mismatch_without_merging_it():
+    good = json.dumps({"schema": 1, "as_of": "2026-09-18", "part": 0, "of": 2,
+                       "journal_entries": [{"a": 1}], "fills": [], "splits_by_symbol": [],
+                       "sector_by_symbol": [], "congress_discovery": []})
+    mismatched = json.dumps({"schema": 1, "as_of": "2026-09-17", "part": 1, "of": 2,
+                             "journal_entries": [{"a": 2}], "fills": [], "splits_by_symbol": [],
+                             "sector_by_symbol": [], "congress_discovery": []})
+    files = [{"title": "part0", "content": good}, {"title": "part1", "content": mismatched}]
+    merged, bad = L.merge_state_bundle_chunks(files)
+    assert merged["journal_entries"] == [{"a": 1}]
+    assert bad == ["as_of mismatch in part 1"]
+
+
+def test_merge_state_bundle_chunks_reorders_by_declared_part():
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=date(2026, 9, 18))
+    chunks = L.state_bundle_chunks(bundle, date(2026, 9, 18), max_bytes=200)
+    files = [{"title": title, "content": content} for title, content in chunks]
+    merged_in_order, _ = L.merge_state_bundle_chunks(files)
+    merged_reversed, _ = L.merge_state_bundle_chunks(list(reversed(files)))
+    assert merged_in_order == merged_reversed
 
 
 # --------------------------------------------------- fills_cache_matches_fresh

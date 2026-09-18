@@ -47,7 +47,10 @@ __all__ = [
     "CONGRESS_DISCOVERY_HORIZON_DAYS", "congress_discovery_cache_filename",
     "CONGRESS_DISCOVERY_CACHE_RE", "fold_congress_discovery_cache",
     "bioguides_needing_discovery_check",
-    "STATE_BUNDLE_SCHEMA_VERSION", "STATE_BUNDLE_RE", "state_bundle_filename",
+    "STATE_BUNDLE_SCHEMA_VERSION", "STATE_BUNDLE_RE",
+    "state_bundle_chunk_filename", "state_bundle_chunks",
+    "next_state_bundle_run_seq", "group_state_bundle_titles",
+    "merge_state_bundle_chunks",
     "build_state_bundle", "unpack_state_bundle",
     "fills_cache_matches_fresh",
 ]
@@ -939,9 +942,55 @@ class Journal:
         `ledger.positions_from_fills`). Folded oldest-first, so a later entry
         for the same symbol corrects an earlier one rather than doubling it —
         this is meant to be recorded once per symbol and rarely revised, not
-        accumulated."""
+        accumulated.
+
+        **Account-UNAWARE — merges every recorded entry regardless of which
+        account it is actually about.** Kept only for backward compatibility;
+        `DAILY_PROCEDURE.md` step 7 calls `opening_balances_for_account`
+        instead (18 September 2026) precisely because passing this merged
+        map into the wrong account's `reconcile_positions` invents a phantom
+        residual. See that method's docstring.
+        """
         out: dict[str, float] = {}
         for e in self.of_kind("opening_balance"):
+            sym = e.payload.get("symbol")
+            qty = e.payload.get("quantity")
+            if sym is not None and qty is not None:
+                out[str(sym).upper()] = float(qty)
+        return out
+
+    def opening_balances_for_account(self, account: str) -> dict[str, float]:
+        """Symbol -> quantity for opening balances recorded AGAINST THIS
+        ACCOUNT specifically — the account-scoped counterpart of
+        `opening_balances`, and the one `DAILY_PROCEDURE.md` step 7 actually
+        calls, once per account, before that account's own
+        `reconcile_positions`. `account` is the same raw account-number
+        string `Fill.account`/`fills_for_account` use throughout this
+        module, e.g. `"792805129"` — not a role name like `"individual"`.
+
+        18 September 2026: the opening-balance payload schema had no
+        `account` field at all when MBGL and MSFT were first recorded
+        (1 September 2026), so `opening_balances` could only ever merge
+        every entry across both accounts. Passing that unscoped map into an
+        account it does NOT belong to invents a phantom residual —
+        `positions_from_fills` adds the quantity to a symbol that account's
+        own fills and broker positions never mention, and
+        `reconcile_positions` then reports a disagreement against nothing,
+        aborting a genuinely healthy day over a fact recorded correctly,
+        just for the wrong account.
+
+        **An entry with no `account` field at all is skipped here entirely,
+        never guessed into either account.** The two original MBGL/MSFT
+        entries are exactly that shape, which is why fresh, account-tagged
+        entries were recorded for both the same day this method was added
+        (see `PROCEDURE_RATIONALE.md`) — this method deliberately does not
+        special-case the old, unscoped entries, so there is exactly one
+        rule to reason about rather than a legacy exception living forever.
+        """
+        out: dict[str, float] = {}
+        for e in self.of_kind("opening_balance"):
+            if e.payload.get("account") != account:
+                continue
             sym = e.payload.get("symbol")
             qty = e.payload.get("quantity")
             if sym is not None and qty is not None:
@@ -1393,14 +1442,59 @@ def bioguides_needing_discovery_check(bioguide_ids: Sequence[str],
 # trustworthy as the fold it stands in for.
 
 STATE_BUNDLE_SCHEMA_VERSION = 1
-STATE_BUNDLE_RE = re.compile(r"^state-bundle-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.json$")
+
+# The bundle collapses Stage 0's ~20-file read into one, but its own content
+# -- the FULL current journal, fills, and every cache -- routinely exceeds
+# CACHE_FILE_MAX_INLINE_BYTES by 5-6x (observed 361,643 bytes on 18 September
+# 2026). `create_file` takes content inline only, so a bundle this size can
+# never be written as a single file -- confirmed empty in the Drive folder
+# every day since 11 September regardless of what any run computed. This is
+# the exact bytes-proportional wall the fills cache hit on 8/15/16 September
+# and chunked its way past (`fills_cache_chunks`); the bundle needs the same
+# fix, but with one difference: a bundle is a full-state SNAPSHOT, not an
+# append-only accumulation like fills or journal entries, so a later write
+# must REPLACE an earlier one's chunks rather than fold alongside them, and
+# a run that aborts partway through writing one must not leave a half-
+# written group masquerading as a complete, readable bundle.
+#
+# The filename carries three numbers, always all three, never an optional
+# suffix: `state-bundle-{date}-{run_seq}-{chunk_seq}-of-{chunk_count}.json`.
+# `run_seq` distinguishes separate bundle WRITES the same day (0 for the
+# first, 1 for a watchdog retry's fresher one, ...) -- the role the old
+# single `-N` suffix played before chunking existed. `chunk_seq`/
+# `chunk_count` are new: which piece of THAT write this file is, out of how
+# many total. A group is usable only once every `chunk_seq` from 0 to
+# `chunk_count - 1` is actually present for its `(date, run_seq)` --
+# verifiable from the file LISTING alone, no download needed, which is what
+# lets an aborted partial write be silently skipped in favour of an older
+# complete group instead of being read as truth.
+STATE_BUNDLE_RE = re.compile(
+    r"^state-bundle-(\d{4}-\d{2}-\d{2})-(\d+)-(\d+)-of-(\d+)\.json$")
 
 
-def state_bundle_filename(run_date: date, seq: int = 0) -> str:
-    """Same create-only convention as the fills/splits/sector/
-    congress-discovery caches -- `create_file`, never `update_file`."""
-    stem = f"state-bundle-{run_date.isoformat()}"
-    return f"{stem}.json" if seq == 0 else f"{stem}-{seq}.json"
+def state_bundle_chunk_filename(run_date: date, run_seq: int, chunk_seq: int,
+                                chunk_count: int) -> str:
+    """One file per chunk of one bundle write. `chunk_count` is repeated in
+    every chunk's own filename (not just its content) so completeness is
+    checkable from a Drive listing alone -- see the module note above."""
+    return (f"state-bundle-{run_date.isoformat()}-{run_seq}-{chunk_seq}"
+            f"-of-{chunk_count}.json")
+
+
+def next_state_bundle_run_seq(titles: Sequence[str], run_date: date) -> int:
+    """The `run_seq` to use when writing a fresh bundle for `run_date`: one
+    past the highest `run_seq` already present for that date among
+    `titles` (a plain Drive listing of filenames, no download needed),
+    complete or not. An incomplete group left by an earlier aborted write
+    must never be reused -- its declared `chunk_count` may not match this
+    write's, and mixing the two would silently corrupt both."""
+    iso = run_date.isoformat()
+    seen = []
+    for title in titles:
+        m = STATE_BUNDLE_RE.match(title)
+        if m and m.group(1) == iso:
+            seen.append(int(m.group(2)))
+    return max(seen, default=-1) + 1
 
 
 def build_state_bundle(*, journal_entries: Sequence[JournalEntry],
@@ -1410,7 +1504,8 @@ def build_state_bundle(*, journal_entries: Sequence[JournalEntry],
                        congress_discovery: dict[str, dict],
                        as_of: date) -> dict:
     """Package everything Stage 0 needs into one JSON-serialisable object,
-    to be written as `state-bundle-{as_of}.json` at Stage 6.
+    passed to `state_bundle_chunks` to be split and written as one or more
+    `state-bundle-*.json` files.
 
     `journal_entries` should be the FULL history -- the previously unpacked
     bundle's `journal.entries` plus every entry this run added -- not just
@@ -1442,6 +1537,178 @@ def build_state_bundle(*, journal_entries: Sequence[JournalEntry],
             for bid, v in congress_discovery.items()
         ],
     }
+
+
+_STATE_BUNDLE_LIST_FIELDS = (
+    "journal_entries", "fills", "splits_by_symbol", "sector_by_symbol",
+    "congress_discovery",
+)
+
+
+def state_bundle_chunks(bundle: dict, run_date: date, *,
+                        run_seq: int = 0,
+                        max_bytes: int = CACHE_FILE_MAX_INLINE_BYTES
+                        ) -> list[tuple[str, str]]:
+    """Split one `build_state_bundle` result into `(title, content)` pairs
+    small enough to each be written by a single `create_file` call -- the
+    bundle-side counterpart of `fills_cache_chunks`.
+
+    Every chunk is a JSON object carrying `schema`, `as_of`, `part`
+    (0-based), `of` (the total chunk count), and a SLICE of each of the
+    five list-valued fields (`journal_entries`, `fills`,
+    `splits_by_symbol`, `sector_by_symbol`, `congress_discovery`) --
+    concatenating those five lists across every chunk, in `part` order,
+    reconstructs exactly the lists `build_state_bundle` produced.
+    `merge_state_bundle_chunks` is the reverse of this function, the same
+    relationship `unpack_state_bundle` has to `build_state_bundle`.
+
+    Unlike `fills_cache_chunks`, there is no "nothing to write" case --
+    always returns at least one chunk, even for a bundle whose lists are
+    all empty, because `schema`/`as_of` alone are the whole point of a
+    bundle existing (see `DAILY_PROCEDURE.md` step 7b: `state_bundle_written`
+    is never skippable). `run_seq` should be `next_state_bundle_run_seq`'s
+    result for this date so a same-day second write never collides with
+    (or gets mistaken for part of) an earlier one.
+    """
+    flat: list[tuple[str, str]] = [
+        (name, json.dumps(row, separators=(",", ":")))
+        for name in _STATE_BUNDLE_LIST_FIELDS
+        for row in bundle.get(name, [])
+    ]
+
+    header = {"schema": bundle.get("schema", STATE_BUNDLE_SCHEMA_VERSION),
+              "as_of": bundle["as_of"]}
+    empty_part_cost = len(json.dumps(
+        {**header, "part": 0, "of": 1,
+         **{name: [] for name in _STATE_BUNDLE_LIST_FIELDS}},
+        separators=(",", ":")).encode("utf-8"))
+
+    parts: list[list[tuple[str, str]]] = []
+    batch: list[tuple[str, str]] = []
+    size = empty_part_cost
+
+    def flush() -> None:
+        nonlocal batch, size
+        parts.append(batch)
+        batch = []
+        size = empty_part_cost
+
+    for name, row in flat:
+        cost = len(row.encode("utf-8")) + 1
+        if batch and size + cost > max_bytes:
+            flush()
+        batch.append((name, row))
+        size += cost
+    parts.append(batch)  # always at least one part, even if flat was empty
+
+    total = len(parts)
+    out: list[tuple[str, str]] = []
+    for i, part_rows in enumerate(parts):
+        payload: dict[str, Any] = {"schema": header["schema"],
+                                    "as_of": header["as_of"],
+                                    "part": i, "of": total}
+        for name in _STATE_BUNDLE_LIST_FIELDS:
+            payload[name] = []
+        for name, row in part_rows:
+            payload[name].append(json.loads(row))
+        title = state_bundle_chunk_filename(run_date, run_seq, i, total)
+        out.append((title, json.dumps(payload, separators=(",", ":"))))
+    return out
+
+
+def group_state_bundle_titles(titles: Sequence[str]
+                              ) -> Optional[tuple[str, int, list[str]]]:
+    """Given every `state-bundle-*.json` filename present in the Drive
+    folder (titles only -- no download needed), find the freshest COMPLETE
+    write and return `(as_of, run_seq, ordered_filenames)` to download, or
+    `None` if no complete group exists at all (the bootstrap path).
+
+    A write is a `(date, run_seq)` group; it counts as complete only when
+    every `chunk_seq` from 0 up to (but not including) its own declared
+    `chunk_count` is actually present among `titles` -- a run that aborted
+    partway through writing leaves a partial group, and this treats that
+    exactly like the group never existed rather than reading it as a
+    truncated truth. Preferred group: the latest `date`, then within that
+    date the highest `run_seq` among the COMPLETE ones only -- an
+    incomplete fresher write never masks an older complete one.
+    """
+    groups: dict[tuple[str, int], dict[int, str]] = {}
+    chunk_counts: dict[tuple[str, int], int] = {}
+    for title in titles:
+        m = STATE_BUNDLE_RE.match(title)
+        if not m:
+            continue
+        as_of, run_seq, chunk_seq, chunk_count = (
+            m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+        key = (as_of, run_seq)
+        groups.setdefault(key, {})[chunk_seq] = title
+        # A chunk_count that disagrees across files in the same group is
+        # itself a reason to treat the group as harder to complete, never
+        # easier -- keep the smallest one seen.
+        chunk_counts[key] = min(chunk_counts.get(key, chunk_count), chunk_count)
+
+    complete = [
+        key for key, files in groups.items()
+        if len(files) == chunk_counts[key]
+        and set(files) == set(range(chunk_counts[key]))
+    ]
+    if not complete:
+        return None
+
+    best = max(complete, key=lambda key: (key[0], key[1]))
+    as_of, run_seq = best
+    files = groups[best]
+    ordered = [files[i] for i in range(chunk_counts[best])]
+    return as_of, run_seq, ordered
+
+
+def merge_state_bundle_chunks(files: Iterable[dict]
+                              ) -> tuple[Optional[dict], list[str]]:
+    """Reassemble one bundle from its chunk files (`{"title", "content"}`,
+    the same shape `fold_journal`/`fold_fills_cache`/etc. all take) -- the
+    reverse of `state_bundle_chunks`. `files` should already be exactly one
+    group's files (`group_state_bundle_titles` gives you that), but this
+    function re-sorts by each chunk's own declared `part` regardless, so
+    passing them out of order is harmless.
+
+    Returns `(bundle, bad)`: `bundle` is the same shape `build_state_bundle`
+    produces (feed it straight to `unpack_state_bundle`), or `None` if
+    every chunk was unreadable. `bad` names any chunk that failed to parse
+    or whose `as_of` disagreed with the rest -- a bundle assembled from
+    mismatched chunks is worse than none, so a disagreeing chunk's rows are
+    never merged in, only reported.
+    """
+    parsed: list[tuple[int, dict]] = []
+    bad: list[str] = []
+    for f in files:
+        title = str(f.get("title", ""))
+        try:
+            payload = json.loads(f.get("content") or "{}")
+            part = int(payload["part"])
+        except (ValueError, TypeError, KeyError):
+            bad.append(title)
+            continue
+        parsed.append((part, payload))
+
+    if not parsed:
+        return None, bad
+
+    parsed.sort(key=lambda t: t[0])
+    schema = parsed[0][1].get("schema", STATE_BUNDLE_SCHEMA_VERSION)
+    as_of = parsed[0][1].get("as_of")
+
+    merged: dict[str, Any] = {"schema": schema, "as_of": as_of}
+    for name in _STATE_BUNDLE_LIST_FIELDS:
+        merged[name] = []
+
+    for _, payload in parsed:
+        if payload.get("as_of") != as_of:
+            bad.append(f"as_of mismatch in part {payload.get('part')}")
+            continue
+        for name in _STATE_BUNDLE_LIST_FIELDS:
+            merged[name].extend(payload.get(name, []))
+
+    return merged, bad
 
 
 def unpack_state_bundle(bundle: dict, *,

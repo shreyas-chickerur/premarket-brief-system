@@ -1632,3 +1632,135 @@ in `build_state_bundle` and in `DAILY_PROCEDURE.md`'s Stage 6 bullet;
 `_fill_cache_row` is now the single definition both the bundle and the
 chunk writer use, so the "identical by construction" claim above is
 enforced by the code rather than by two places agreeing.
+
+## Stage 16 -- the bundle gets the same fix, and a snapshot needs one thing chunks never did, 18 September 2026
+
+Stage 15 left the bundle's write unfixed on purpose: a real bundle is
+361,643 bytes, 5-6x `CACHE_FILE_MAX_INLINE_BYTES`, and it has never been
+written as a single file since it existed -- confirmed empty in the Drive
+folder every day since 11 September regardless of what any run computed.
+Chunking it the same way as the fills cache is the obvious move. The
+obstacle Stage 15 flagged is real, though: the fills cache and the journal
+are both APPEND-ONLY accumulations, so N files from N different runs all
+fold together correctly no matter how they arrived. A state bundle is a
+full-state SNAPSHOT. A second write on the same day must REPLACE the
+first's chunks, not fold alongside them -- concatenating an old bundle's
+rows with a new one's would double every fill, every journal entry, every
+cache row it carries.
+
+That means the read side needs something folding never needed:
+a way to tell a COMPLETE write from a PARTIAL one, from the file listing
+alone, before spending a single download on it. A run that aborts partway
+through writing its own fresher bundle must never have that partial group
+mistaken for the whole truth -- reading three of six chunks as if they were
+the complete state would silently drop rows step 6c's own bootstrap
+fallback would have caught.
+
+The filename says everything needed to answer that:
+`state-bundle-{date}-{run_seq}-{chunk_seq}-of-{chunk_count}.json`. `run_seq`
+keeps the role the old single `-N` suffix played -- which write, of however
+many happened this day. `chunk_seq`/`chunk_count` are new, and every chunk's
+own filename repeats the total, so `ledger.group_state_bundle_titles` can
+decide completeness from `search_files` metadata alone: a `(date, run_seq)`
+group counts only when every `chunk_seq` from 0 up to its own declared count
+is actually present. It picks the latest date, then the highest `run_seq`
+among only the COMPLETE groups -- an incomplete fresher write never shadows
+an older complete one. `ledger.merge_state_bundle_chunks` then does for the
+bundle what `fold_fills_cache` already did for chunked fills: reassemble the
+group into exactly the dict `build_state_bundle` would have produced,
+verifying every chunk agrees on `as_of` rather than silently merging a
+mismatch. `unpack_state_bundle` itself did not need to change at all -- it
+still takes one assembled bundle dict, same as always.
+
+This makes Stage 0 step 6c's read a small, fixed number of downloads (one
+per chunk in the winning group) instead of the ~20-file bootstrap, on the
+same principle as the 14 September read-side fix, and it makes Stage 6's
+and step 7b's writes something that can actually succeed: `run_seq` is
+computed fresh each write (`next_state_bundle_run_seq`, one past whatever
+`run_seq` is already on Drive for today) so a same-day second write can
+never collide with, or be folded into, an earlier one by accident.
+
+No fold semantics changed for anything the bundle already carried -- a
+merged bundle round-trips through `unpack_state_bundle` identically to an
+unchunked one, verified directly against `build_state_bundle`'s own output.
+
+## Stage 17 -- an opening balance recorded for one account was being read into both, 18 September 2026
+
+Found the same day, while re-reading Stage 0 step 7 end to end to design
+the chunking fix above: `journal.opening_balances` merges every recorded
+entry into one flat `symbol -> quantity` map with no idea which account
+each one is actually about, because the payload schema had no `account`
+field at all when the only two entries that exist (MBGL, MSFT, 1 September
+2026) were recorded. `DAILY_PROCEDURE.md` step 7 read that whole map and
+handed it to `ledger.positions_from_fills`/`reconcile_positions` -- called
+separately for each account -- with no instruction to filter it first.
+
+Both MBGL and MSFT are individual-account (792805129) facts; the agentic
+account (688021013) never held either. Passing the unscoped map into the
+agentic account's own reconcile call would add 4.316287 phantom MBGL shares
+and 0.021388 phantom MSFT shares to its DERIVED position, compared against
+a broker snapshot that correctly shows zero for both -- an unexplained
+residual, which is block-severity and aborts the run. A correctly-recorded
+fact about one account would halt a genuinely healthy day, for the other
+account, over nothing. It had not actually happened yet: the 18 September
+watchdog retry read the ambiguous instruction and, on its own judgment,
+passed the map to the individual account's reconcile call only -- the right
+call, but an inference the next fresh session, with no memory of this one,
+had no reason to make the same way twice.
+
+The fix adds `account` to what an opening-balance entry can (and, going
+forward, must) record, and `Journal.opening_balances_for_account(account)`
+-- the account-scoped counterpart `DAILY_PROCEDURE.md` step 7 now actually
+calls, once per account. An entry with no `account` field at all is
+invisible to it, on purpose, for both accounts -- not guessed into either
+one. That is a real behavior change for the two existing entries, so both
+were re-recorded the same day (`journal-2026-09-18-3.json`) with
+`account: "792805129"` and the original reason text otherwise unchanged; the
+1 September entries stay in the journal as an unaltered historical record
+(the connector cannot delete them) but no longer resolve anything on their
+own. The unscoped `opening_balances` property is untouched and still
+exists, documented as legacy, for anything that genuinely wants the
+merged view.
+
+No Stage 0 safety or reconciliation check was weakened by this -- if
+anything, an unrecorded or wrongly-scoped residual now aborts exactly where
+it used to slip through silently attributed to the wrong account; this
+closes a gap in what could pass, not one in what gets caught.
+
+## Stage 18 -- a dead-man's switch, because the watchdog can be silenced by the same thing that silences the run, 18 September 2026
+
+17 September 2026: both the 06:20 scheduled routine and the 08:20 watchdog
+died within five seconds of starting, before Stage 0 step 0 could even
+construct a run log -- a weekly Claude usage cap shared across every
+session on this account, hit by the FIRST of the two and still in effect
+when the second fired two hours later. Nothing was written to Drive that
+day: no heartbeat, no manifest, no journal, nothing. The next morning's
+"how was today's run" check found only silence, and had to fetch the raw
+RemoteTrigger session transcripts directly to learn why -- Drive alone
+gave no signal something had even attempted to run.
+
+This is a different failure shape from everything the heartbeat/deadline
+machinery (Stage 0 step 0, `PROCEDURE_RATIONALE.md` "a heartbeat, because a
+budget is not a timeout") was built to catch. That machinery watches for a
+run that started and then went quiet partway through; this run never
+started at all, so there was no run log, no heartbeat, and no code path
+inside `DAILY_PROCEDURE.md` that ever executed to notice. Worse, the
+watchdog -- the one thing designed to notice a `no_run` day and say so --
+was killed by the exact same shared cap at the exact same moment, so the
+one detector for this failure mode was itself unavailable on the one day
+it was needed. A THIRD Claude-triggered check would not have helped either:
+any new session under the same account hits the identical cap the moment
+it starts.
+
+The fix has to live outside this account's own Claude usage entirely.
+Stage 6 now ends with an unconditional, best-effort ping to an external
+dead-man's-switch URL (`{{HEALTHCHECKS_URL}}`, a third optional trigger-
+level placeholder) -- `curl -fsS -m 10 --retry 2 ... || true`, deliberately
+swallowing every failure, because a broken monitoring side-channel must
+never itself abort a real run. It fires regardless of health, regardless
+of who is calling, and regardless of outcome (nominal, degraded, aborted) --
+the only thing it attests is that THIS SESSION reached Stage 6 at all,
+which on 17 September neither one did. The alerting logic -- expect a ping
+by a certain time, escalate if none arrives -- belongs entirely to the
+external service, not to this procedure; a procedure that cannot run
+cannot be trusted to detect its own absence.
