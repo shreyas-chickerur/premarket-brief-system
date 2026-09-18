@@ -760,6 +760,16 @@ def to_washsale_trades(fills: Sequence[Fill], account: str):
     """Turn rebuilt fills into `washsale.Trade` objects, computing realised P&L
     per sell so the registry's `is_loss_sale` has the number it requires.
 
+    `account` is STAMPED onto every trade produced. This call never filters by
+    it -- pass one account's fills, via `fills_for_account(fills, account)`,
+    not the combined history. Handing it everything labels both accounts'
+    trades with one account number, which leaves the blocked set, severities
+    and `clears_on` dates untouched (every trade is just present twice under
+    two labels) and so slips past `washsale_registry_stable`, while silently
+    corrupting the `reason` prose a human reads to decide whether a block is
+    real. Observed live 18 September 2026; see `DAILY_PROCEDURE.md` Stage 0
+    step 8.
+
     This is the piece that made the registry's first live read come up empty:
     a `washsale.Trade` on a sell REQUIRES `realized_pnl`, and nothing had ever
     computed it from broker history. FIFO cost basis, same lot accounting as

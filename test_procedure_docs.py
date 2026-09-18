@@ -67,3 +67,13 @@ def test_watchdog_hard_limits_are_present_verbatim():
     body = _read("WATCHDOG_PROCEDURE.md")
     assert "Never touch `place_equity_order`-related code to make a check pass." in body
     assert "Never remove, weaken, or alter the `THIS IS A DRY RUN` guard" in body
+
+
+def test_step_8_spells_out_the_per_account_split():
+    """`to_washsale_trades` stamps rather than filters, and step 8 used to
+    read as though passing the combined history were fine. A watchdog retry
+    followed it literally on 18 September 2026 and wrote a wash-sale report
+    attributing one account's loss sales to both."""
+    body = _read("DAILY_PROCEDURE.md")
+    assert "ledger.to_washsale_trades(ledger.fills_for_account(fills, account), account)" in body
+    assert "STAMPS the account you pass onto every fill it is given and never filters by it" in body

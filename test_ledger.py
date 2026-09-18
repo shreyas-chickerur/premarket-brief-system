@@ -1666,3 +1666,50 @@ def test_state_bundle_fills_rows_match_the_dated_cache_rows():
     chunk_rows = [r for _, c in L.fills_cache_chunks(fills, date(2026, 9, 16))
                   for r in json.loads(c)]
     assert bundle["fills"] == chunk_rows
+
+
+def test_to_washsale_trades_stamps_the_account_and_never_filters_by_it():
+    """The 18 September 2026 caller error, pinned as a contract.
+
+    Handing the combined history to `to_washsale_trades` labels every fill
+    with the one account passed. It is safe in the sense that matters --
+    the blocked set is unchanged -- which is exactly why nothing downstream
+    catches it, so the guard has to live here.
+    """
+    import washsale as W
+    fills = [
+        L.Fill("AAA", "buy", 1.0, 10.0, date(2026, 9, 1), "o1", "IND"),
+        L.Fill("BBB", "buy", 1.0, 10.0, date(2026, 9, 1), "o2", "AGENT"),
+    ]
+    wrong = L.to_washsale_trades(fills, "IND")
+    assert [t.account for t in wrong] == ["IND", "IND"], (
+        "the call stamps, it does not filter -- BBB belongs to AGENT")
+    assert {t.symbol for t in wrong} == {"AAA", "BBB"}
+
+    right = L.to_washsale_trades(L.fills_for_account(fills, "IND"), "IND")
+    assert [(t.symbol, t.account) for t in right] == [("AAA", "IND")]
+
+
+def test_the_documented_pairing_attributes_a_loss_sale_to_one_account():
+    """What the corrupted prose actually costs: a loss sale in one account
+    read back as belonging to both."""
+    import washsale as W
+    fills = [
+        L.Fill("AAA", "buy", 1.0, 20.0, date(2026, 9, 1), "o1", "IND"),
+        L.Fill("AAA", "sell", 1.0, 10.0, date(2026, 9, 10), "o2", "IND"),
+    ]
+    both = W.Registry(L.to_washsale_trades(fills, "IND")
+                      + L.to_washsale_trades(fills, "AGENT"))
+    per_account = W.Registry(
+        L.to_washsale_trades(L.fills_for_account(fills, "IND"), "IND")
+        + L.to_washsale_trades(L.fills_for_account(fills, "AGENT"), "AGENT"))
+
+    asof = date(2026, 9, 18)
+    bad, good = both.check_buy("AAA", asof), per_account.check_buy("AAA", asof)
+    # identical safety outcome -- this is why nothing else catches it
+    assert bad.allowed is good.allowed is False
+    assert bad.severity == good.severity
+    assert bad.clears_on == good.clears_on
+    # and a different story about where the loss happened
+    assert "AGENT" in bad.reason and "accounts" in bad.reason
+    assert "AGENT" not in good.reason and "in the IND account" in good.reason
