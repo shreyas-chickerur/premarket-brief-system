@@ -1764,3 +1764,59 @@ which on 17 September neither one did. The alerting logic -- expect a ping
 by a certain time, escalate if none arrives -- belongs entirely to the
 external service, not to this procedure; a procedure that cannot run
 cannot be trusted to detect its own absence.
+
+## Stage 19 -- the research mechanism has no time-of-day dependency, and two silent gaps in how to feed it, found by proving that live, 18 September 2026
+
+Asked directly whether Stage 1 (gather) and Stage 2 (measure) could be
+validated ad hoc, independent of the scheduled trigger windows -- the only
+genuinely time-dependent part of this system is placing an order, which
+needs the market open. The honest answer needed proof, not an assertion:
+`research.gather()` and every `quantcore` function are already pure --
+no network call, no clock read, no dependency on what time it is -- by the
+design rules stated at the top of `quantcore.py`. That was verified by
+actually running them, live, well outside either trigger window: a real
+`TIME_SERIES_DAILY_ADJUSTED` pull and a real `NEWS_SENTIMENT` pull for
+GLDM, fed straight into `research.gather()` and the full measurement
+suite, using nothing this session hadn't fetched for itself in the moment.
+
+The exercise surfaced two real, silent gaps in how `DAILY_PROCEDURE.md`
+told Stage 1 to build that DataFrame in the first place -- both of which
+`quantcore`'s own tested contracts would catch immediately, and both of
+which this system had already been bitten by once, without ever writing
+down the fix that made the symptom go away:
+
+1. **Sort order.** Alpha Vantage returns `TIME_SERIES_DAILY_ADJUSTED` rows
+   newest-first. Fed directly into `quantcore.detect_anomalies` without
+   sorting, the very first live test failed with a block-severity
+   `ohlc_structure` anomaly -- `"index is not sorted ascending"` --
+   exactly what `quantcore.validate_ohlc` has always required
+   (`df.index.is_monotonic_increasing`, tested since this module existed).
+   This is not a code gap; `quantcore`'s contract was always right. The
+   gap was that Stage 1 never told a fresh session to call `.sort_index()`
+   before handing the frame over -- an instruction every real session must
+   therefore have been inferring correctly, silently, from the anomaly's
+   own error message, every single day, without it ever being written down.
+
+2. **The adjustment ratio's ordering.** `TIME_SERIES_DAILY_ADJUSTED` only
+   truly adjusts `close` (into `adjusted_close`); `open`/`high`/`low`
+   arrive raw. The ratio (`adjusted_close / close`) has to be computed
+   BEFORE `close` is overwritten, then applied to `open`/`high`/`low`,
+   or the ratio comes out identically `1.0` and every other field stays
+   unadjusted against an already-adjusted close -- which is not a
+   hypothetical: it is the exact defect a live run caught and fixed inline
+   on 3 September 2026 ("the adjusted-close ratio was applied to
+   open/high/low AFTER close had already been overwritten"), and it was
+   never written into this procedure, so it stood ready to be silently
+   rediscovered -- or missed -- by any later session with no memory of
+   that morning.
+
+Both are now explicit in `DAILY_PROCEDURE.md` Stage 1, next to the price
+pull itself, in the exact order that avoids each failure. Nothing in
+`quantcore.py` changed -- its contracts were already correct and already
+tested; the gap was entirely in the instructions a fresh session had to
+infer correctly, from scratch, every single morning. Confirmed by running
+the corrected sequence against the same live pull: `detect_anomalies`
+returns clean, and `consensus_volatility`/`average_true_range`/`rsi`/
+`stop_plan` all produce ordinary, sane values -- proof that the research
+mechanism itself is genuinely testable at any time of day, not just proof
+that it is theoretically pure.
