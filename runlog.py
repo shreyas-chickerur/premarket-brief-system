@@ -208,7 +208,11 @@ def brokerage_token_health(days_since_success: Optional[int], *,
 STAGE0_CAPACITY_WARN_MARGIN_DAYS = 3
 
 
-def stage0_read_cost_metric(*, files_materialised: int, duration_ms: int) -> dict:
+STAGE0_READ_PATHS = ("bundle", "bootstrap")
+
+
+def stage0_read_cost_metric(*, files_materialised: int, duration_ms: int,
+                            path: Optional[str] = None) -> dict:
     """The structured observation `stage0_capacity_forecast` reads back out
     of history. Record this once, via `log.metric("stage0_read_cost", ...)`,
     at the end of Stage 0 on every run that reaches that point -- aborted
@@ -222,8 +226,44 @@ def stage0_read_cost_metric(*, files_materialised: int, duration_ms: int) -> dic
     10 September 2026 this cost was only ever described in free-text
     journal notes a human had to read by hand (`chronic_stage_0_abort`,
     `preflight_read_cost`) instead of a structured metric later code
-    could act on."""
-    return {"files_materialised": files_materialised, "duration_ms": duration_ms}
+    could act on.
+
+    `path` names WHICH Stage 0 read produced the observation: `"bootstrap"`
+    for the full per-file fallback, `"bundle"` for the consolidated
+    one-group read that replaced it (`DAILY_PROCEDURE.md` step 6c). The two
+    are not the same measurement and must never be averaged or substituted
+    for one another -- the bundle path records `files_materialised=1` by
+    definition, so its `duration_ms` is the whole of Stage 0's fixed
+    overhead attributed to a single file, not a per-file cost anything can
+    extrapolate from. `stage0_capacity_forecast` forecasts the BOOTSTRAP
+    path specifically, so it reads only bootstrap observations back out.
+    `None` means the recorder did not say; see that function for how a
+    legacy observation without this field is classified.
+    """
+    if path is not None and path not in STAGE0_READ_PATHS:
+        raise ValueError(f"unknown Stage 0 read path {path!r}; "
+                         f"expected one of {STAGE0_READ_PATHS}")
+    return {"files_materialised": files_materialised, "duration_ms": duration_ms,
+            "path": path}
+
+
+def _is_bootstrap_observation(obs: dict) -> bool:
+    """Did this `stage0_read_cost` observation measure the full per-file
+    BOOTSTRAP read, the one `stage0_capacity_forecast` forecasts?
+
+    An explicit `path` (recorded since 21 September 2026) answers directly.
+    A legacy observation predates the field, so fall back to the one thing
+    that has always distinguished the two paths in practice and is stated
+    outright in `DAILY_PROCEDURE.md` step 9b -- the bundle path records
+    `files_materialised=1`, the bootstrap path records the real dated-file
+    count. A single-file observation therefore cannot be a bootstrap read
+    of a folder that needs many, and its duration is fixed overhead rather
+    than a per-file rate; treating it as one is what this guards against.
+    """
+    path = obs.get("path")
+    if path is not None:
+        return path == "bootstrap"
+    return (obs.get("files_materialised") or 0) > 1
 
 
 def stage0_capacity_forecast(*, journal_file_count: int, other_required_files: int,
@@ -249,21 +289,36 @@ def stage0_capacity_forecast(*, journal_file_count: int, other_required_files: i
     not just noted after.
 
     `seconds_per_file` is derived from the most recent run in `history`
-    that recorded a `stage0_read_cost` metric (see `stage0_read_cost_metric`)
-    -- self-calibrating to the live environment's actual observed cost
-    rather than a hardcoded constant that would itself go stale. Returns
+    that recorded a BOOTSTRAP-path `stage0_read_cost` metric (see
+    `stage0_read_cost_metric` and `_is_bootstrap_observation`) --
+    self-calibrating to the live environment's actual observed cost rather
+    than a hardcoded constant that would itself go stale. Returns
     `info`/pass with no observation yet if no run has recorded one.
+
+    **Bundle-path observations are deliberately ignored** (21 September
+    2026). Once the consolidated bundle exists, every ordinary run records
+    `files_materialised=1`, so calibrating off the newest observation of
+    any kind would divide the whole of Stage 0's fixed overhead by one file
+    and call the result a per-file rate -- then multiply it by the ~30
+    files the bootstrap fallback would need and conclude the deadline is
+    already blown, every single day, on runs that in fact just got faster.
+    That is not a conservative error: it is a `warn` that fires daily on
+    the happy path, which is how a forecast meant to give a human several
+    days' notice becomes noise nobody reads by the time the fallback is
+    real. This check is about the fallback path, so only the fallback
+    path's own measurements calibrate it.
     """
     required_files_today = journal_file_count + other_required_files
     seconds_per_file = None
     for h in reversed(list(history)):
         obs = h.get("metrics", {}).get("stage0_read_cost")
-        if obs and obs.get("files_materialised"):
+        if obs and obs.get("files_materialised") and _is_bootstrap_observation(obs):
             seconds_per_file = (obs["duration_ms"] / 1000) / obs["files_materialised"]
             break
     if seconds_per_file is None:
         return Check("stage0_capacity_forecast", True, "info",
-                     "no prior run has recorded a stage0_read_cost observation yet",
+                     "no prior run has recorded a bootstrap-path stage0_read_cost "
+                     "observation yet",
                      value=None)
 
     projected_seconds_today = required_files_today * seconds_per_file

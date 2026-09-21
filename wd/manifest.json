@@ -1,0 +1,520 @@
+{
+  "abort_reason": "",
+  "aborted": false,
+  "anomalies": [],
+  "calls": [
+    {
+      "detail": "brief sent to state.json config.email_to; message id 1a0c3dad2a6f2905",
+      "latency_ms": 0,
+      "ok": true,
+      "operation": "send_message",
+      "service": "gmail"
+    }
+  ],
+  "checks": [
+    {
+      "detail": "741 passed in 3.18s",
+      "name": "test_suite_passed",
+      "passed": true,
+      "severity": "block",
+      "value": null
+    },
+    {
+      "detail": "5 day(s) since the last successful brokerage call -- approaching the observed ~4-day expiry window (HANDOFF.md section 12); sign in again before it lapses mid-run",
+      "name": "brokerage_token_health",
+      "passed": false,
+      "severity": "warn",
+      "value": 5
+    },
+    {
+      "detail": "all 15 present",
+      "name": "tools_available",
+      "passed": true,
+      "severity": "block",
+      "value": []
+    },
+    {
+      "detail": "741 passed, 0 failed in 3180ms",
+      "name": "self_test",
+      "passed": true,
+      "severity": "block",
+      "value": {
+        "duration_ms": 3180,
+        "n_failed": 0,
+        "n_passed": 741,
+        "passed": true,
+        "summary": "741 passed"
+      }
+    },
+    {
+      "detail": "fired 06:21 local, expected 06:20 (off by 1 min)",
+      "name": "fired_on_schedule",
+      "passed": true,
+      "severity": "warn",
+      "value": 1
+    },
+    {
+      "detail": "verified through 2027-12-31",
+      "name": "holiday_table_current",
+      "passed": true,
+      "severity": "warn",
+      "value": "2027-12-31"
+    },
+    {
+      "detail": "regular session",
+      "name": "market_open_today",
+      "passed": true,
+      "severity": "info",
+      "value": {
+        "early_close": false,
+        "holiday": false,
+        "weekend": false
+      }
+    },
+    {
+      "detail": "every journal/fills-cache/splits-cache file parsed",
+      "name": "journal_fully_readable",
+      "passed": true,
+      "severity": "block",
+      "value": []
+    },
+    {
+      "detail": "in agreement",
+      "name": "ledger_reconciled",
+      "passed": true,
+      "severity": "block",
+      "value": {}
+    },
+    {
+      "detail": "10 of 10 recent runs not nominal",
+      "name": "recent_health",
+      "passed": false,
+      "severity": "warn",
+      "value": [
+        "critical",
+        "critical",
+        "critical",
+        "critical",
+        "critical",
+        "degraded",
+        "degraded",
+        "degraded",
+        "critical",
+        "degraded"
+      ]
+    },
+    {
+      "detail": "last run 2363636ms vs median 1396634ms",
+      "name": "duration_stable",
+      "passed": true,
+      "severity": "warn",
+      "value": {
+        "latest": 2363636,
+        "median": 1396634.5
+      }
+    },
+    {
+      "detail": "none",
+      "name": "no_chronic_failures",
+      "passed": true,
+      "severity": "warn",
+      "value": {}
+    },
+    {
+      "detail": "none",
+      "name": "no_repeat_data_faults",
+      "passed": true,
+      "severity": "warn",
+      "value": {}
+    },
+    {
+      "detail": "0% of recent external calls failed",
+      "name": "external_call_reliability",
+      "passed": true,
+      "severity": "warn",
+      "value": 0.0
+    },
+    {
+      "detail": "nothing to write: fills_ready_to_cache empty (no fresh fill older than the 7-day horizon). Skip-if-empty rule.",
+      "name": "early_fills_cache_written",
+      "passed": true,
+      "severity": "warn",
+      "value": null
+    },
+    {
+      "detail": "nothing to write: symbols_needing_split_check empty (all 68 traded symbols checked through 2026-09-16, inside the 7-day horizon). Skip rule.",
+      "name": "early_splits_cache_written",
+      "passed": true,
+      "severity": "warn",
+      "value": null
+    },
+    {
+      "detail": "all 7 chunks created (382951 bytes); first complete state-bundle group ever written. Verified by re-listing Drive: group_state_bundle_titles returns the complete group, and merge+unpack round-trips to 106 entries / 883 fills / 68 split symbols with bad=[]",
+      "name": "early_state_bundle_written",
+      "passed": true,
+      "severity": "warn",
+      "value": null
+    },
+    {
+      "detail": "agrees with the last recorded report",
+      "name": "washsale_registry_stable",
+      "passed": true,
+      "severity": "block",
+      "value": {
+        "compared": true,
+        "unexplained": []
+      }
+    },
+    {
+      "detail": "no prior run has recorded a stage0_read_cost observation yet",
+      "name": "stage0_capacity_forecast",
+      "passed": true,
+      "severity": "info",
+      "value": null
+    },
+    {
+      "detail": "",
+      "name": "circuit_breaker_clear",
+      "passed": true,
+      "severity": "info",
+      "value": null
+    },
+    {
+      "detail": "SGOV 44.89% and VGSH 19.99% against an 18% single-name cap",
+      "name": "agentic_max_weight",
+      "passed": false,
+      "severity": "warn",
+      "value": null
+    },
+    {
+      "detail": "all three agentic positions are fractional, so no resting stop can be placed",
+      "name": "agentic_positions_stop_protected",
+      "passed": false,
+      "severity": "warn",
+      "value": null
+    },
+    {
+      "detail": "VTI 17.11% against a 15% cap",
+      "name": "individual_single_name_cap",
+      "passed": false,
+      "severity": "warn",
+      "value": null
+    },
+    {
+      "detail": "cash 0.00% against a 12% floor; buying power 0.00",
+      "name": "individual_cash_floor",
+      "passed": false,
+      "severity": "warn",
+      "value": null
+    },
+    {
+      "detail": "place_equity_order not called; 0 orders placed, 0 would have been placed",
+      "name": "dry_run_no_orders",
+      "passed": true,
+      "severity": "info",
+      "value": null
+    },
+    {
+      "detail": "HTML brief sent via Gmail send_message, id 1a0c3dad2a6f2905",
+      "name": "email_sent",
+      "passed": true,
+      "severity": "info",
+      "value": null
+    }
+  ],
+  "decisions": [
+    {
+      "account": "individual",
+      "action": "trim",
+      "executed": false,
+      "gate_failed": null,
+      "inputs": {
+        "account_equity": 42453.9747158053,
+        "cap": 0.15,
+        "excess_usd": 896.0644376292057,
+        "price": 378.5,
+        "quantity": 2.367409346444401,
+        "shares_to_trim": 2.367409346444401,
+        "value": 7264.160645000001,
+        "weight": 0.17110672660516774
+      },
+      "reason": "VTI is 17.11% of the individual account (7264.16 dollars of 42453.97) against the 15% single-name cap in config. Trimming 2.3674 shares at the 378.50 pre-market quote raises about 896.06 dollars and brings the position back to the cap. It is above its 366.26 average cost, so the trim realises a gain and raises no wash-sale question. Not a gated idea: this is a cap-breach remedy, not a catalyst thesis. The individual account is read-only to this agent, so it is a suggestion only.",
+      "symbol": "VTI"
+    },
+    {
+      "account": "individual",
+      "action": "reject",
+      "executed": false,
+      "gate_failed": "no_blocking_conflict",
+      "inputs": {
+        "buying_power": 0.0,
+        "cash": 0.0,
+        "cash_floor": 0.12,
+        "cash_pct": 0.0
+      },
+      "reason": "BB has the same dated catalyst as in the agentic account (BlackBerry second-quarter earnings on 2026-09-24). Rejected before the catalyst is even weighed: this account holds 0.00 dollars of cash and 0.00 dollars of buying power against a 12 percent cash floor, so no purchase can clear condition five here until cash is restored.",
+      "symbol": "BB"
+    },
+    {
+      "account": "individual",
+      "action": "none",
+      "executed": false,
+      "gate_failed": "no_blocking_conflict",
+      "inputs": {
+        "breaches": 3,
+        "holdings": 21,
+        "ideas_opened": 0
+      },
+      "reason": "No idea cleared the five-condition gate in this account, so no thesis was opened here. Three configuration breaches are flagged for a human, unchanged since 1 September: VTI over the 15 percent single-name cap, cash at 0.00 percent against a 12 percent floor, and 21 holdings against a target of 8 to 12.",
+      "symbol": "*"
+    },
+    {
+      "account": "agentic",
+      "action": "reject",
+      "executed": false,
+      "gate_failed": "two_sources",
+      "inputs": {
+        "annual_vol": 0.6959487438372106,
+        "atr_fraction": 0.03899964241015556,
+        "catalyst_date": "2026-09-24",
+        "distinct_sources": 1,
+        "entry": 8.12,
+        "notional": 146.16,
+        "quantity": 18,
+        "risk_dollars": 14.4,
+        "rsi": 48.45318055290973,
+        "shares": 18,
+        "stop_fraction": 0.09854080599286398,
+        "stop_price": 7.32,
+        "vol_quality": "ok",
+        "weight": 0.14749164392191233
+      },
+      "reason": "The only eligible name with a dated catalyst inside the 21-day horizon: BlackBerry reports second-quarter fiscal 2027 earnings before the open on 2026-09-24. It clears four of the five conditions -- catalyst, a real invalidation level, a risk-derived size, and no blocking conflict (the wash-sale registry is clear for BB and the account holds none). Rejected at condition two: every usable research item for BB traced back to one distinct source, and the gate requires two independent ones. Had it cleared, the order would have been 18 shares at a 8.12 limit, about 146.16 dollars, 14.75 percent weight, with a good-for-day stop at 7.32.",
+      "symbol": "BB"
+    },
+    {
+      "account": "agentic",
+      "action": "hold",
+      "executed": false,
+      "gate_failed": null,
+      "inputs": {
+        "fractional": true,
+        "price": 100.5933,
+        "quantity": 4.421802,
+        "stop_protected": false,
+        "value": 444.80365512659995,
+        "weight": 0.4488562008558948
+      },
+      "reason": "Held 4.421802 shares at 100.5933, about 444.80 dollars, 44.89 percent of the account. The position is fractional, so it cannot carry a resting stop order. No change this run: nothing cleared the gate and this is a DRY RUN, so no order was placed or would have been.",
+      "symbol": "SGOV"
+    },
+    {
+      "account": "agentic",
+      "action": "hold",
+      "executed": false,
+      "gate_failed": null,
+      "inputs": {
+        "fractional": true,
+        "price": 57.6,
+        "quantity": 3.440007,
+        "stop_protected": false,
+        "value": 198.1444032,
+        "weight": 0.19994966996369887
+      },
+      "reason": "Held 3.440007 shares at 57.6000, about 198.14 dollars, 19.99 percent of the account. The position is fractional, so it cannot carry a resting stop order. No change this run: nothing cleared the gate and this is a DRY RUN, so no order was placed or would have been.",
+      "symbol": "VGSH"
+    },
+    {
+      "account": "agentic",
+      "action": "hold",
+      "executed": false,
+      "gate_failed": null,
+      "inputs": {
+        "fractional": true,
+        "price": 86.4503,
+        "quantity": 1.089682,
+        "stop_protected": false,
+        "value": 94.2033358046,
+        "weight": 0.09506160961103174
+      },
+      "reason": "Held 1.089682 shares at 86.4503, about 94.20 dollars, 9.51 percent of the account. The position is fractional, so it cannot carry a resting stop order. No change this run: nothing cleared the gate and this is a DRY RUN, so no order was placed or would have been.",
+      "symbol": "GLDM"
+    },
+    {
+      "account": "agentic",
+      "action": "none",
+      "executed": false,
+      "gate_failed": "two_sources",
+      "inputs": {
+        "buying_power": 253.82,
+        "circuit_breaker_usd": 700,
+        "equity": 990.9713941312,
+        "hard_stop_usd": 500,
+        "max_new_positions_effective": 2,
+        "max_new_positions_per_day": 2,
+        "orders_placed": 0,
+        "orders_reviewed": 0,
+        "orders_would_have_placed": 0,
+        "stale_resting_orders": 0
+      },
+      "reason": "No orders were placed and none would have been. This is a DRY RUN so place_equity_order is forbidden, and independently of that no candidate cleared the five-condition gate: BB reached the gate on a real dated catalyst and failed only on independent corroboration. get_equity_orders returned no open orders in this account, so there was nothing stale to cancel. Equity of 990.97 dollars sits above both the 700 dollar circuit breaker and the 500 dollar hard stop.",
+      "symbol": "*"
+    }
+  ],
+  "duration_ms": 2612333,
+  "errors": [],
+  "health": "degraded",
+  "may_trade": true,
+  "metrics": {
+    "correlation_concentration": {
+      "agentic_weights": {
+        "GLDM": 0.0951,
+        "SGOV": 0.4489,
+        "VGSH": 0.1999
+      },
+      "computed": false,
+      "reason": "only one price series (BB) was pulled this run; a portfolio covariance estimate needs several. Agentic concentration reported from weights instead."
+    },
+    "evidence_review": {
+      "looks_taken": 11,
+      "matured_this_run": 0,
+      "max_new_positions_effective": 2,
+      "outcomes_scored_this_run": 0,
+      "policy": {
+        "pause_new_positions": false,
+        "reason": "Evidence review: no closed trades yet (0 closed trades). No policy change."
+      },
+      "verdict": {
+        "asof": "2026-09-21",
+        "decision": "collect",
+        "effective_alpha": 0.004545454545454546,
+        "explanation": "Nothing has matured. On the registered claim this needs about 891 closed trades to settle.",
+        "looks_taken": 11,
+        "n": 0,
+        "pre_registration": {
+          "alpha": 0.05,
+          "assumed_sd_pct": 6.0,
+          "cost_pct": 0.1,
+          "decide_by": "2028-02-28",
+          "horizon_days": 21,
+          "hypothesis": "The five-condition gate, applied to the agentic account's stock/ETF universe, produces positive mean excess return over SPY after a 0.10% round-trip cost assumption.",
+          "min_sample": 30,
+          "power": 0.8,
+          "target_edge_pct": 0.5
+        },
+        "sample_needed": 891,
+        "verdict": "no closed trades yet"
+      }
+    },
+    "gate_funnel": {
+      "cleared_gate": 0,
+      "reached_gate": 1
+    },
+    "optimizations": [
+      {
+        "confidence": "observational",
+        "finding": "no action taken on 21 of 21 runs",
+        "kind": "throughput",
+        "proposal": "verify the gate is calibrated, not merely unreachable",
+        "sample": 21
+      },
+      {
+        "confidence": "measured",
+        "finding": "stage 'preflight' is 57% of runtime (891973ms average)",
+        "kind": "performance",
+        "proposal": "narrow or cache this stage's inputs",
+        "sample": 21
+      }
+    ],
+    "prior_day_review": {
+      "n": 0,
+      "verdict": "no closed positions yet"
+    },
+    "stage0_read_cost": {
+      "duration_ms": 1975065,
+      "files_materialised": 28
+    },
+    "state_bundle_first_write": {
+      "bytes": 382951,
+      "chunks": 7,
+      "fidelity_note": "chunk 2 stored 10 bytes larger than the local original -- one word duplicated inside a 2026-09-11 note payload prose field. Parses cleanly; not a field any run reads.",
+      "run_seq": 0
+    },
+    "universe_funnel": {
+      "cut_for_budget": 172,
+      "eligible_count": 173,
+      "note": "the eligible universe this run was the 23 held symbols plus the 150 names with an earnings date inside the 21-day horizon; the Robinhood screener and congress-discovery sources were not queried (see System health)",
+      "researched_count": 1
+    }
+  },
+  "mode": "dry_run",
+  "run_id": "2026-09-21-0620-routine",
+  "schema": 3,
+  "stages": [
+    {
+      "duration_ms": 1980263,
+      "error": "",
+      "name": "preflight",
+      "ok": true,
+      "records": 0,
+      "started_at": "2026-09-21T11:22:23.664613+00:00"
+    },
+    {
+      "duration_ms": 0,
+      "error": "",
+      "name": "evidence_review",
+      "ok": true,
+      "records": 0,
+      "started_at": "2026-09-21T11:55:28.184982+00:00"
+    },
+    {
+      "duration_ms": 0,
+      "error": "",
+      "name": "prior_day_review",
+      "ok": true,
+      "records": 0,
+      "started_at": "2026-09-21T11:55:28.185346+00:00"
+    },
+    {
+      "duration_ms": 700000,
+      "error": "",
+      "name": "gather",
+      "ok": true,
+      "records": 4,
+      "started_at": "2026-09-21T11:55:52+00:00"
+    },
+    {
+      "duration_ms": 0,
+      "error": "",
+      "name": "measure",
+      "ok": true,
+      "records": 0,
+      "started_at": "2026-09-21T12:01:22.483403+00:00"
+    },
+    {
+      "duration_ms": 26851,
+      "error": "",
+      "name": "gate",
+      "ok": true,
+      "records": 0,
+      "started_at": "2026-09-21T12:01:22.483494+00:00"
+    },
+    {
+      "duration_ms": 0,
+      "error": "",
+      "name": "individual_account",
+      "ok": true,
+      "records": 0,
+      "started_at": "2026-09-21T12:01:49.334735+00:00"
+    },
+    {
+      "duration_ms": 0,
+      "error": "",
+      "name": "agentic_account",
+      "ok": true,
+      "records": 0,
+      "started_at": "2026-09-21T12:02:12.055215+00:00"
+    }
+  ],
+  "started_at": "2026-09-21T11:21:55.487828+00:00"
+}

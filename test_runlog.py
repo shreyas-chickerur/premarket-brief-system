@@ -849,15 +849,30 @@ def test_brokerage_token_health_respects_a_custom_warn_after():
 
 # ------------------------------------------------------- stage0_capacity_forecast
 
-def _stage0_history(files_materialised: int, duration_ms: int):
+def _stage0_history(files_materialised: int, duration_ms: int, path=None):
     return [{"metrics": {"stage0_read_cost":
                         R.stage0_read_cost_metric(files_materialised=files_materialised,
-                                                  duration_ms=duration_ms)}}]
+                                                  duration_ms=duration_ms,
+                                                  path=path)}}]
 
 
 def test_stage0_read_cost_metric_shape():
     m = R.stage0_read_cost_metric(files_materialised=18, duration_ms=90_000)
-    assert m == {"files_materialised": 18, "duration_ms": 90_000}
+    assert m == {"files_materialised": 18, "duration_ms": 90_000, "path": None}
+
+
+def test_stage0_read_cost_metric_records_the_path_it_measured():
+    m = R.stage0_read_cost_metric(files_materialised=1, duration_ms=9_000,
+                                  path="bundle")
+    assert m["path"] == "bundle"
+
+
+def test_stage0_read_cost_metric_rejects_an_unknown_path():
+    """A typo must not quietly classify a bootstrap read as neither path and
+    leave the forecast permanently silent."""
+    with pytest.raises(ValueError):
+        R.stage0_read_cost_metric(files_materialised=28, duration_ms=1_000,
+                                  path="bootstrp")
 
 
 def test_stage0_capacity_forecast_no_history_passes_quietly():
@@ -912,6 +927,64 @@ def test_stage0_capacity_forecast_uses_the_most_recent_observation():
                                    warn_margin_days=3)
     assert not c.passed
     assert c.value["seconds_per_file"] == 10.0
+
+
+def test_stage0_capacity_forecast_ignores_a_bundle_path_observation():
+    """The 21 September 2026 defect. The consolidated bundle read records
+    `files_materialised=1`, so its duration is Stage 0's fixed overhead, not
+    a per-file rate. Calibrating off it divided ~120s by one file and then
+    multiplied that by the 19 files the bootstrap fallback would need,
+    declaring a 4200s deadline already blown on a run that had in fact just
+    got dramatically FASTER -- a daily false `warn` on the happy path."""
+    history = _stage0_history(files_materialised=1, duration_ms=120_000,
+                              path="bundle")
+    c = R.stage0_capacity_forecast(journal_file_count=13, other_required_files=6,
+                                   wall_clock_deadline_seconds=4200, history=history)
+    assert c.passed and c.severity == "info"
+    assert c.value is None
+    assert "bootstrap" in c.detail
+
+
+def test_stage0_capacity_forecast_prefers_the_latest_bootstrap_over_newer_bundles():
+    """A bundle-path run every day afterwards must not shadow the bootstrap
+    measurement the forecast actually needs -- the real shape of history from
+    21 September 2026 onwards, where the bootstrap runs once and the bundle
+    path runs every day after it."""
+    history = [
+        {"metrics": {"stage0_read_cost": R.stage0_read_cost_metric(
+            files_materialised=19, duration_ms=190_000, path="bootstrap")}},
+        {"metrics": {"stage0_read_cost": R.stage0_read_cost_metric(
+            files_materialised=1, duration_ms=120_000, path="bundle")}},
+        {"metrics": {"stage0_read_cost": R.stage0_read_cost_metric(
+            files_materialised=1, duration_ms=95_000, path="bundle")}},
+    ]
+    c = R.stage0_capacity_forecast(journal_file_count=13, other_required_files=6,
+                                   wall_clock_deadline_seconds=210, history=history,
+                                   warn_margin_days=3)
+    assert c.value["seconds_per_file"] == 10.0
+    assert not c.passed
+
+
+def test_stage0_capacity_forecast_still_reads_legacy_observations_without_a_path():
+    """Every observation recorded before the `path` field existed is a
+    bootstrap read -- there was no other path yet -- and must keep
+    calibrating the forecast rather than being discarded as unclassified."""
+    history = [{"metrics": {"stage0_read_cost":
+                            {"files_materialised": 19, "duration_ms": 190_000}}}]
+    c = R.stage0_capacity_forecast(journal_file_count=13, other_required_files=6,
+                                   wall_clock_deadline_seconds=4200, history=history)
+    assert c.severity == "warn"
+    assert c.value["seconds_per_file"] == 10.0
+
+
+def test_stage0_capacity_forecast_discards_a_legacy_single_file_observation():
+    """A legacy observation with no `path` and exactly one file cannot be a
+    bootstrap read of a folder needing many, so it is not a per-file rate."""
+    history = [{"metrics": {"stage0_read_cost":
+                            {"files_materialised": 1, "duration_ms": 120_000}}}]
+    c = R.stage0_capacity_forecast(journal_file_count=13, other_required_files=6,
+                                   wall_clock_deadline_seconds=4200, history=history)
+    assert c.passed and c.severity == "info" and c.value is None
 
 
 # ---------------------------------------------------------------- scoring
