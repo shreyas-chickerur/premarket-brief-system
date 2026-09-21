@@ -1820,3 +1820,57 @@ returns clean, and `consensus_volatility`/`average_true_range`/`rsi`/
 `stop_plan` all produce ordinary, sane values -- proof that the research
 mechanism itself is genuinely testable at any time of day, not just proof
 that it is theoretically pure.
+
+## Stage 20 -- the bundle read was still the slow path, and the bundle was about to be rewritten every day, 21 September 2026
+
+Monday 21 September was the first run to write a complete state bundle (7
+chunks, 382,057 bytes) and the first to reach every stage since the incidents
+began. It also showed what the bundle costs. Stage 0 took 1,980 seconds of a
+2,612-second run: roughly 8 minutes to read the 28-file bootstrap through
+`search_files` snippets (fast, as designed) and about 23 minutes to WRITE the
+bundle, because `create_file` takes content inline, so every byte is output
+the run has to generate (~280 bytes per second). What was left bought one
+researched name out of 173 eligible, with the screener and congress sources
+skipped.
+
+Two defects in the design as shipped on 18 September, both found by reading
+that run instead of trusting it:
+
+1. **Step 6c told tomorrow's run to read the bundle with
+   `download_file_content`.** That is the slow path the 14 September fix
+   exists to avoid: the payload must be passed back out through the caller,
+   at a measured 23-39 bytes per second on three separate runs. At that rate
+   382 KB is three to four hours. The 18 September text called it "a handful
+   of small reads", which was wrong in the same way the original per-file
+   estimate was: the cost is per byte, not per file. Checked directly this
+   time: one `search_files` listing with `snippetVerbosity="MAX_ALLOWED"`
+   returned all 7 chunks whole (each snippet within 1.5% of its file size),
+   and `merge_state_bundle_chunks` + `unpack_state_bundle` round-tripped them
+   to 106 entries, 883 fills, 68 split-checked symbols and 23 sector rows, with
+   the account-scoped opening balances intact. Step 6c now reads that way.
+
+2. **Steps 7b and 6 would have rewritten the whole bundle every day.** That
+   makes the fast read path a 23-minute daily write tax, on the budget it was
+   meant to protect. The dated files the run writes anyway are already the
+   daily deltas, so the bundle only needs refreshing about weekly
+   (`BUNDLE_MAX_AGE_DAYS = 7`, `state_bundle_needs_rewrite`). To make that
+   correct, `unpack_state_bundle` now folds delta files for all five families
+   (journal, fills, splits, sector, congress), and a bundle records which
+   journal files it already contains (`journal_sources`) so a rewritten bundle
+   never counts a same-day file twice; a legacy bundle without the list falls
+   back to file dates. Step 7b writes a bundle only when none exists. The
+   weekly refresh runs LAST in Stage 6, after the email and the ping: it can no
+   longer delay the brief or starve research, and an interrupted write costs
+   nothing (an incomplete group is ignored, the old bundle plus deltas still
+   serve, and the next run retries). `state_bundle_fresh` at step 6c makes a
+   refresh that keeps failing visible.
+
+Also cut: `note` entries (108 of the 382 KB) are no longer carried in the
+bundle. They are free-text audit narrative that no code path reads; the dated
+journal files keep them.
+
+One more thing the run showed, unfixed: the bundle write is hand-transcribed
+through the caller, and chunk 2 came back 10 bytes larger than the local
+original (a duplicated word in a historical note). Harmless here and disclosed
+by the run, but it is the risk a smaller, weekly write shrinks rather than
+removes.

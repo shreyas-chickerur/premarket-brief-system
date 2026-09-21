@@ -50,7 +50,9 @@ __all__ = [
     "STATE_BUNDLE_SCHEMA_VERSION", "STATE_BUNDLE_RE",
     "state_bundle_chunk_filename", "state_bundle_chunks",
     "next_state_bundle_run_seq", "group_state_bundle_titles",
-    "merge_state_bundle_chunks",
+    "merge_state_bundle_chunks", "BUNDLE_EXCLUDED_JOURNAL_KINDS",
+    "journal_files_to_supplement",
+    "BUNDLE_MAX_AGE_DAYS", "state_bundle_needs_rewrite", "state_bundle_age_days",
     "build_state_bundle", "unpack_state_bundle",
     "fills_cache_matches_fresh",
 ]
@@ -1497,15 +1499,60 @@ def next_state_bundle_run_seq(titles: Sequence[str], run_date: date) -> int:
     return max(seen, default=-1) + 1
 
 
+# 21 September 2026: the first complete bundle (382,057 bytes, 7 chunks) cost
+# ~23 minutes of Stage 0 just to WRITE -- `create_file` takes content inline, so
+# every byte is model output -- and a step that rewrote it every day would have
+# made the "fast bundle path" a 23-minute daily tax on exactly the budget it
+# exists to protect. The dated files are already the daily deltas, so the bundle
+# only needs refreshing occasionally: readers fold anything dated on/after its
+# `as_of` on top (see `unpack_state_bundle`'s `extra_*_files`).
+BUNDLE_MAX_AGE_DAYS = 7
+
+# `note` entries are free-text audit narrative (108 of the bundle's 382 KB) that
+# no code path reads -- they stay in the dated journal files, which remain the
+# audit trail, but carrying them in the bundle only makes every rewrite slower.
+BUNDLE_EXCLUDED_JOURNAL_KINDS = frozenset({"note"})
+
+
+def state_bundle_age_days(titles: Sequence[str], today: date) -> Optional[int]:
+    """Days between `today` and the freshest COMPLETE bundle group's `as_of`,
+    or `None` if there is no complete group (the bootstrap case)."""
+    group = group_state_bundle_titles(titles)
+    if group is None:
+        return None
+    return (today - date.fromisoformat(group[0])).days
+
+
+def state_bundle_needs_rewrite(titles: Sequence[str], today: date, *,
+                               max_age_days: int = BUNDLE_MAX_AGE_DAYS) -> bool:
+    """Should this run write a fresh bundle? True when no complete group exists
+    at all, or the freshest one is `max_age_days` or more old. Anything newer
+    is served by the dated files written since (folded on top at read time), so
+    rewriting it would spend Stage 0's budget to re-record what is already
+    recorded."""
+    age = state_bundle_age_days(titles, today)
+    return age is None or age >= max_age_days
+
+
 def build_state_bundle(*, journal_entries: Sequence[JournalEntry],
                        fills: Sequence[Fill],
                        splits_by_symbol: dict[str, SplitsCacheEntry],
                        sector_by_symbol: dict[str, dict],
                        congress_discovery: dict[str, dict],
-                       as_of: date) -> dict:
+                       as_of: date,
+                       journal_sources: Sequence[str] = ()) -> dict:
     """Package everything Stage 0 needs into one JSON-serialisable object,
     passed to `state_bundle_chunks` to be split and written as one or more
     `state-bundle-*.json` files.
+
+    `journal_sources` is the list of `journal-*.json` filenames whose entries
+    `journal_entries` already contains (`Journal.sources`, plus the file(s) this
+    run wrote). A reader folds every OTHER journal file on top
+    (`journal_files_to_supplement`); without the list it could not tell which
+    same-day file a rewritten bundle already absorbed, and would double-count it.
+
+    Entries whose kind is in `BUNDLE_EXCLUDED_JOURNAL_KINDS` (`note`) are
+    left out: nothing reads them, and the dated journal files keep them.
 
     `journal_entries` should be the FULL history -- the previously unpacked
     bundle's `journal.entries` plus every entry this run added -- not just
@@ -1518,7 +1565,9 @@ def build_state_bundle(*, journal_entries: Sequence[JournalEntry],
     return {
         "schema": STATE_BUNDLE_SCHEMA_VERSION,
         "as_of": as_of.isoformat(),
-        "journal_entries": [e.to_dict() for e in journal_entries],
+        "journal_sources": sorted(set(journal_sources)),
+        "journal_entries": [e.to_dict() for e in journal_entries
+                            if e.kind not in BUNDLE_EXCLUDED_JOURNAL_KINDS],
         "fills": [_fill_cache_row(f) for f in fills],
         "splits_by_symbol": [
             {"symbol": e.symbol, "checked_through": e.checked_through.isoformat(),
@@ -1540,7 +1589,7 @@ def build_state_bundle(*, journal_entries: Sequence[JournalEntry],
 
 
 _STATE_BUNDLE_LIST_FIELDS = (
-    "journal_entries", "fills", "splits_by_symbol", "sector_by_symbol",
+    "journal_sources", "journal_entries", "fills", "splits_by_symbol", "sector_by_symbol",
     "congress_discovery",
 )
 
@@ -1711,8 +1760,36 @@ def merge_state_bundle_chunks(files: Iterable[dict]
     return merged, bad
 
 
+def journal_files_to_supplement(bundle: dict, titles: Sequence[str]) -> list[str]:
+    """Which journal files in the folder still need folding on top of `bundle`.
+
+    With a `journal_sources` list (every bundle written from 21 September 2026)
+    the answer is exact: every journal file not named in it. A legacy bundle
+    without the list is a snapshot taken before that run's own journal file
+    existed, so every file dated on or after its `as_of` is the supplement --
+    which is also why a same-day file is not skipped: it was written after."""
+    sources = bundle.get("journal_sources")
+    journal_titles = [t for t in titles
+                      if JOURNAL_RE.match(t) or MONTHLY_JOURNAL_RE.match(t)]
+    if sources is not None:
+        have = set(sources)
+        return sorted(t for t in journal_titles if t not in have)
+    as_of = bundle.get("as_of") or ""
+    out = []
+    for t in journal_titles:
+        m = JOURNAL_RE.match(t)
+        if m and m.group(1) >= as_of:
+            out.append(t)
+    return sorted(out)
+
+
 def unpack_state_bundle(bundle: dict, *,
-                        extra_journal_files: Sequence[dict] = ()) -> dict:
+                        extra_journal_files: Sequence[dict] = (),
+                        extra_fills_cache_files: Sequence[dict] = (),
+                        extra_splits_cache_files: Sequence[dict] = (),
+                        extra_sector_cache_files: Sequence[dict] = (),
+                        extra_congress_discovery_cache_files: Sequence[dict] = ()
+                        ) -> dict:
     """Reverse of `build_state_bundle`: reconstruct the `Journal` and the
     four fold results by feeding the bundle's stored rows back through the
     exact fold functions the dated files use, each as one synthetic
@@ -1731,6 +1808,12 @@ def unpack_state_bundle(bundle: dict, *,
     there is normally at most one or two of these (today's own run, and
     a same-day watchdog retry's), never the unbounded backlog the bundle
     exists to avoid reading.
+
+    The other four `extra_*_files` parameters (21 September 2026) do the same
+    for the fills, splits, sector and congress-discovery dated files: since a
+    bundle is now refreshed only about weekly (`BUNDLE_MAX_AGE_DAYS`), the
+    small dated files written since its `as_of` ARE the deltas, and folding
+    them on top gives exactly the state a fresh bundle would have held.
 
     Returns `{"journal": Journal, "fills": list[Fill],
     "splits_by_symbol": dict[str, SplitsCacheEntry],
@@ -1753,25 +1836,25 @@ def unpack_state_bundle(bundle: dict, *,
     fills, fills_bad = fold_fills_cache([{
         "title": fills_cache_filename(date.fromisoformat(as_of)),
         "content": json.dumps(bundle.get("fills", [])),
-    }])
+    }, *extra_fills_cache_files])
     bad.extend(f"bundle:{x}" for x in fills_bad)
 
     splits_by_symbol, splits_bad = fold_splits_cache([{
         "title": splits_cache_filename(date.fromisoformat(as_of)),
         "content": json.dumps(bundle.get("splits_by_symbol", [])),
-    }])
+    }, *extra_splits_cache_files])
     bad.extend(f"bundle:{x}" for x in splits_bad)
 
     sector_by_symbol, sector_bad = fold_sector_cache([{
         "title": sector_cache_filename(date.fromisoformat(as_of)),
         "content": json.dumps(bundle.get("sector_by_symbol", [])),
-    }])
+    }, *extra_sector_cache_files])
     bad.extend(f"bundle:{x}" for x in sector_bad)
 
     congress_discovery, congress_bad = fold_congress_discovery_cache([{
         "title": congress_discovery_cache_filename(date.fromisoformat(as_of)),
         "content": json.dumps(bundle.get("congress_discovery", [])),
-    }])
+    }, *extra_congress_discovery_cache_files])
     bad.extend(f"bundle:{x}" for x in congress_bad)
 
     return {

@@ -560,7 +560,7 @@ What should be true before that paragraph comes out, roughly in order:
    the watchdog's silence-on-healthy immediately; a quiet watchdog on day one
    of real trading is worth a manual double-check regardless.
 
-#### Status snapshot (updated after each material change; latest 18 September 2026)
+#### Status snapshot (updated after each material change; latest 21 September 2026)
 
 | # | Item | Status |
 |---|---|---|
@@ -570,6 +570,8 @@ What should be true before that paragraph comes out, roughly in order:
 | 4 | Shrink the risk budget for the first live stretch | **Reframed, not applied.** Unchanged from 5 September — see the item's own text above. |
 | 5 | Confirm circuit breaker / hard stop actually halt trading | **Done, 4 September 2026.** Nothing since has touched it. |
 | 6 | The mechanical flip | **Not done, as it shouldn't be yet.** |
+
+**21 September 2026 (Monday):** the 06:20 run completed all stages for the first time and wrote the first complete state bundle. It also showed the bundle write costs ~23 minutes of Stage 0 and that research still got 1 of 173 names; the bundle is now refreshed about weekly (last, after the email), read via `search_files` snippets, and topped up with the dated delta files (`PROCEDURE_RATIONALE.md` Stage 20). Tomorrow is the first run that should take the bundle path end to end.
 
 **Action needed (18 September 2026, not something either routine can do for itself):** the new dead-man's-switch ping (`DAILY_PROCEDURE.md` Stage 6, `PROCEDURE_RATIONALE.md` Stage 18) needs an actual healthchecks.io check — create a free one at healthchecks.io, set its schedule/grace window to cover both trigger fire times (06:20 and 08:20 Central, with slack for a normal run's duration), copy its ping URL, and substitute it as `{{HEALTHCHECKS_URL}}` in both `trig_01SVsxixH6AQpRiy1WgHbadM` and `trig_01EqGKzJ6ymqcrfZMzWtR5vH`'s prompts (same pattern as `{{DRIVE_FOLDER_ID}}`/`{{STATE_FILE_ID}}`). Until that URL is substituted, the placeholder paragraph in Stage 6 is a documented no-op (see its own text) — safe, but not yet actually monitoring anything.
 

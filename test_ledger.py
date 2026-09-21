@@ -1725,6 +1725,107 @@ def test_merge_state_bundle_chunks_reorders_by_declared_part():
     assert merged_in_order == merged_reversed
 
 
+# --------------------------------------------- bundle refresh policy and deltas
+# 21 September 2026: the first bundle cost ~23 minutes of Stage 0 to write, so
+# it is refreshed weekly at most; the small dated files written since are the
+# deltas and fold on top at read time.
+
+def _small_bundle(as_of=date(2026, 9, 21)):
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    return L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery,
+        as_of=as_of)
+
+
+def test_bundle_leaves_out_note_entries_because_nothing_reads_them():
+    entries = [
+        L.JournalEntry(run_id="r1", on="2026-09-01", kind="run", payload={"i": 1}),
+        L.JournalEntry(run_id="r1", on="2026-09-01", kind="note", payload={"topic": "x"}),
+        L.JournalEntry(run_id="r2", on="2026-09-02", kind="opening_balance",
+                       payload={"symbol": "MBGL", "quantity": 1.0, "account": "A"}),
+    ]
+    bundle = L.build_state_bundle(journal_entries=entries, fills=[], splits_by_symbol={},
+                                  sector_by_symbol={}, congress_discovery={},
+                                  as_of=date(2026, 9, 21))
+    assert [e["kind"] for e in bundle["journal_entries"]] == ["run", "opening_balance"]
+    out = L.unpack_state_bundle(bundle)
+    assert out["journal"].opening_balances_for_account("A") == {"MBGL": 1.0}
+
+
+def test_unpack_folds_extra_dated_files_for_every_cache_family():
+    out = L.unpack_state_bundle(
+        _small_bundle(),
+        extra_fills_cache_files=[_cache_file("fills-cache-2026-09-22.json", [
+            _fill_row("MSFT", "buy", 1, 400.0, "2026-09-10", "o9", "IND1")])],
+        extra_splits_cache_files=[_cache_file("splits-cache-2026-09-23.json", [
+            _splits_row("MSFT", "2026-09-23", [])])],
+        extra_sector_cache_files=[_cache_file("sector-cache-2026-09-24.json", [
+            _sector_row("MSFT", "2026-09-24", "technology")])],
+        extra_congress_discovery_cache_files=[_cache_file(
+            "congress-discovery-cache-2026-09-25.json",
+            [_congress_row("C000001", "2026-09-25", ["MSFT"])])],
+    )
+    assert out["bad"] == []
+    assert "o9" in [f.order_id for f in out["fills"]]
+    assert "o1" in [f.order_id for f in out["fills"]]  # the bundle's own rows survive
+    assert "MSFT" in out["splits_by_symbol"] and "XOM" in out["splits_by_symbol"]
+    assert out["sector_by_symbol"]["MSFT"]["sector"] == "technology"
+    assert "C000001" in out["congress_discovery"] and "C001123" in out["congress_discovery"]
+
+
+def test_unpack_extra_file_reports_a_bad_row_rather_than_dropping_it():
+    out = L.unpack_state_bundle(
+        _small_bundle(),
+        extra_fills_cache_files=[{"title": "fills-cache-2026-09-22.json", "content": "not json"}])
+    assert any("fills-cache-2026-09-22.json" in b for b in out["bad"])
+
+
+def test_state_bundle_age_and_needs_rewrite():
+    titles = ["state-bundle-2026-09-14-0-0-of-1.json"]
+    assert L.state_bundle_age_days(titles, date(2026, 9, 21)) == 7
+    assert L.state_bundle_needs_rewrite(titles, date(2026, 9, 21)) is True
+    assert L.state_bundle_needs_rewrite(titles, date(2026, 9, 20)) is False
+    assert L.state_bundle_needs_rewrite(titles, date(2026, 9, 21), max_age_days=10) is False
+
+
+def test_no_complete_bundle_always_needs_a_write():
+    assert L.state_bundle_age_days([], date(2026, 9, 21)) is None
+    assert L.state_bundle_needs_rewrite([], date(2026, 9, 21)) is True
+    incomplete = ["state-bundle-2026-09-21-0-0-of-2.json"]  # 1 of 2
+    assert L.state_bundle_needs_rewrite(incomplete, date(2026, 9, 21)) is True
+
+
+def test_bundle_records_which_journal_files_it_already_contains():
+    bundle = L.build_state_bundle(journal_entries=[], fills=[], splits_by_symbol={},
+                                  sector_by_symbol={}, congress_discovery={},
+                                  as_of=date(2026, 9, 21),
+                                  journal_sources=["journal-2026-09-21.json",
+                                                   "journal-2026-09-18.json"])
+    assert bundle["journal_sources"] == ["journal-2026-09-18.json", "journal-2026-09-21.json"]
+    chunks = L.state_bundle_chunks(bundle, date(2026, 9, 21))
+    merged, bad = L.merge_state_bundle_chunks(
+        [{"title": ti, "content": c} for ti, c in chunks])
+    assert bad == [] and merged["journal_sources"] == bundle["journal_sources"]
+
+
+def test_journal_files_to_supplement_is_exact_when_sources_are_recorded():
+    bundle = {"as_of": "2026-09-21", "journal_sources": ["journal-2026-09-18.json",
+                                                         "journal-2026-09-21.json"]}
+    titles = ["journal-2026-09-18.json", "journal-2026-09-21.json",
+              "journal-2026-09-21-1.json", "fills-cache-2026-09-21.json"]
+    # the same-day file the bundle already absorbed is NOT folded twice
+    assert L.journal_files_to_supplement(bundle, titles) == ["journal-2026-09-21-1.json"]
+
+
+def test_journal_files_to_supplement_falls_back_to_dates_for_a_legacy_bundle():
+    bundle = {"as_of": "2026-09-21"}  # no journal_sources: the 21 Sept bundle
+    titles = ["journal-2026-09-18-3.json", "journal-2026-09-21.json",
+              "journal-2026-09-21-1.json", "journal-2026-09-22.json"]
+    assert L.journal_files_to_supplement(bundle, titles) == [
+        "journal-2026-09-21-1.json", "journal-2026-09-21.json", "journal-2026-09-22.json"]
+
+
 # --------------------------------------------------- fills_cache_matches_fresh
 # 14 September 2026: apply_splits is deliberately not idempotent, so caching
 # its OUTPUT instead of its input compounds every run. These pin the
