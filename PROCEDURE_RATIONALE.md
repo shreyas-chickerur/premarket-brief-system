@@ -1926,3 +1926,23 @@ After writing, the run re-reads and verifies, and trashes a group that failed,
 so a complete-looking group with a bad chunk cannot survive. Bundles written
 before this change have no hash and load as they always did. Refreshing weekly
 instead of daily (Stage 20) already removed most of the exposure.
+
+## Stage 22 -- the recurring `two_sources` rejection was a hand-off problem, not the gate, 22 September 2026
+
+BB, the one candidate with a dated catalyst (earnings 24 September), has been
+rejected at `two_sources` on 18 and 21 September, and cleared all five
+conditions on 16 September. The 21 September run's own note explains the
+rejection: a Robinhood `get_equity_news` call for BB returned 11 real articles
+from two publishers, "but those rows produced zero usable items in the bundle
+(coverage issue `news_rh:BB`)". Reproduced against a live BB response fetched
+for this check: `news_items_from_robinhood` handles the real shape correctly and
+yields one usable item per article, so the parser was not the fault; what reached
+it was. A response this large is auto-saved and re-read by the run, and any
+slice or re-wrapped piece of it (a bare article list, the inner `data`, a JSON
+string) produced nothing. The parser now accepts each of those hand-offs, the
+row counter agrees with it, and Stage 1 now says to pass the response
+unchanged and to check `coverage_issues()` before rejecting anything at
+`two_sources`. A gate that rejects because evidence went uncounted is the
+system misreporting itself, which is worse than the gate being strict.
+Unverified: whether AV `NEWS_SENTIMENT` also delivered for BB that day; the
+manifest only says one distinct source survived.

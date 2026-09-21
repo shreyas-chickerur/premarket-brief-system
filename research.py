@@ -56,6 +56,7 @@ them apart.
 
 from __future__ import annotations
 
+import json
 import csv
 import io
 import time
@@ -837,6 +838,34 @@ def news_items_from_alpha_vantage(raw: Optional[dict], *, symbol: str,
     return out
 
 
+def _robinhood_articles(raw: Any) -> Optional[list]:
+    """The article list from a Robinhood `get_equity_news` response, however
+    it was handed over. The real response is `{"data": {"articles": [...]}}`,
+    but a response this large is auto-saved to a file and re-read by the run,
+    and on 21 September 2026 BB's eleven real articles (two publishers) came
+    out of `gather` as ZERO usable items -- with the parser correct against the
+    real shape -- which cost the one candidate its second source and rejected
+    it at `two_sources` for the second time in three days. So the hand-off is
+    tolerated instead of assumed: the full dict, its bare `data` dict, a bare
+    list of articles, or the same as a JSON string."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        data = raw.get("data", raw)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and isinstance(data.get("articles"), list):
+            return data["articles"]
+        if isinstance(raw.get("articles"), list):
+            return raw["articles"]
+    return None
+
+
 def news_items_from_robinhood(raw: Optional[dict], *, symbol: str,
                                asof: str) -> list[ResearchItem]:
     """Robinhood `get_equity_news`, already fetched — the second,
@@ -848,7 +877,7 @@ def news_items_from_robinhood(raw: Optional[dict], *, symbol: str,
     the real list is `data.articles`, and each entry also carries a
     `publisher`, which is itself worth keeping since it is a second,
     finer-grained attribution than "Robinhood" alone."""
-    articles = (raw or {}).get("data", {}).get("articles")
+    articles = _robinhood_articles(raw)
     if not articles:
         return [ResearchItem(channel="news", symbol=symbol,
                              mechanism="no Robinhood news retrieved",
@@ -1313,9 +1342,9 @@ def _row_count(raw: Any) -> int:
                 return len(raw[key])
         # Robinhood get_equity_news: {"data": {"articles": [...]}} -- "data"
         # is a dict here, not a list, so the generic check above misses it.
-        articles = raw.get("data", {})
-        if isinstance(articles, dict) and isinstance(articles.get("articles"), list):
-            return len(articles["articles"])
+        articles = _robinhood_articles(raw)
+        if articles is not None:
+            return len(articles)
         if "result" in raw and isinstance(raw["result"], str):
             return max(len(raw["result"].strip().splitlines()) - 1, 0)
         return 1 if raw else 0

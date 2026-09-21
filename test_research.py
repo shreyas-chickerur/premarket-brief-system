@@ -604,6 +604,28 @@ def test_news_from_robinhood_fails_on_the_old_wrong_key_shape():
     assert items[0].quality == "failed"
 
 
+@pytest.mark.parametrize("wrap", ["full", "data_only", "bare_list", "json_string", "articles_key"])
+def test_news_from_robinhood_tolerates_every_way_the_response_can_be_handed_over(wrap):
+    """21 September 2026: eleven real BB articles from two publishers came out
+    of gather as zero usable items, costing the one candidate its second source.
+    The parser was right for the real shape, so the hand-off was the variable."""
+    import json as _json
+    full = _load("robinhood_news_oxy.json")
+    raw = {"full": full, "data_only": full["data"], "bare_list": full["data"]["articles"],
+           "json_string": _json.dumps(full),
+           "articles_key": {"articles": full["data"]["articles"]}}[wrap]
+    items = RS.news_items_from_robinhood(raw, symbol="OXY", asof=ASOF)
+    assert len(items) == 2 and all(i.quality == "ok" for i in items)
+
+
+def test_gather_row_count_matches_items_for_every_robinhood_hand_off_shape():
+    full = _load("robinhood_news_oxy.json")
+    for raw in (full, full["data"], full["data"]["articles"]):
+        bundle = RS.gather({"news_rh": {"OXY": raw}}, held_or_candidate=["OXY"], asof=ASOF)
+        assert bundle.coverage_issues() == []
+        assert bundle.coverage["news_rh:OXY"] == {"rows_in": 2, "items_out": 2}
+
+
 def test_two_news_sources_together_satisfy_corroboration():
     av = RS.news_items_from_alpha_vantage(_load("news_sentiment_oxy.json"), symbol="OXY", asof=ASOF)
     rh = RS.news_items_from_robinhood(_load("robinhood_news_oxy.json"), symbol="OXY", asof=ASOF)
