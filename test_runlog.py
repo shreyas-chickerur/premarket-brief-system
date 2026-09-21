@@ -829,10 +829,21 @@ def test_brokerage_token_health_passes_exactly_at_the_warn_boundary():
     assert c.passed
 
 
-def test_brokerage_token_health_warns_approaching_the_observed_expiry():
+def test_brokerage_token_health_warns_beyond_the_longest_known_good_gap():
     c = R.brokerage_token_health(R.BROKERAGE_TOKEN_WARN_AFTER_DAYS)
     assert not c.passed and c.severity == "warn"
-    assert "expiry" in c.detail
+    assert "sign in again" in c.detail
+
+
+def test_a_normal_weekend_gap_does_not_warn():
+    """Friday to Monday is 3 days and has worked every week since 8 September;
+    the previous threshold warned on every Monday."""
+    assert R.brokerage_token_health(3).passed
+
+
+def test_a_gap_longer_than_any_seen_to_work_warns():
+    c = R.brokerage_token_health(4)
+    assert not c.passed and "longest idle gap" in c.detail
 
 
 def test_brokerage_token_health_none_passes_quietly():

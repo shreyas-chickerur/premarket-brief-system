@@ -430,6 +430,33 @@ def test_run_entry_brokerage_ok_none_when_no_robinhood_call_made():
     assert L.run_entry(manifest)["brokerage_ok"] is None
 
 
+def test_run_entry_brokerage_ok_true_from_tools_available_when_no_call_was_logged():
+    """21 September 2026: the run logged only its Gmail send, so brokerage_ok
+    was None on a day the broker was read successfully."""
+    manifest = {"calls": [{"service": "gmail", "operation": "send_message", "ok": True}],
+                "checks": [{"name": "tools_available", "passed": True, "value": []}]}
+    assert L.run_entry(manifest)["brokerage_ok"] is True
+
+
+def test_run_entry_brokerage_ok_false_when_robinhood_tools_are_missing():
+    manifest = {"calls": [], "checks": [
+        {"name": "tools_available", "passed": False,
+         "value": ["get_accounts", "get_equity_positions"]}]}
+    assert L.run_entry(manifest)["brokerage_ok"] is False
+
+
+def test_run_entry_brokerage_ok_stays_true_when_only_other_tools_are_missing():
+    manifest = {"calls": [], "checks": [
+        {"name": "tools_available", "passed": False, "value": ["MARKET_STATUS"]}]}
+    assert L.run_entry(manifest)["brokerage_ok"] is True
+
+
+def test_run_entry_logged_robinhood_calls_take_precedence_over_the_check():
+    manifest = {"calls": [{"service": "robinhood", "operation": "get_accounts", "ok": False}],
+                "checks": [{"name": "tools_available", "passed": True, "value": []}]}
+    assert L.run_entry(manifest)["brokerage_ok"] is False
+
+
 def test_run_entry_brokerage_ok_ignores_service_name_case():
     manifest = {"calls": [{"service": "Robinhood", "operation": "get_accounts", "ok": True}]}
     assert L.run_entry(manifest)["brokerage_ok"] is True
@@ -1627,7 +1654,7 @@ def test_state_bundle_chunks_always_returns_at_least_one_chunk():
                                   as_of=date(2026, 9, 18))
     chunks = L.state_bundle_chunks(bundle, date(2026, 9, 18))
     assert len(chunks) == 1
-    assert chunks[0][0] == "state-bundle-2026-09-18-0-0-of-1.json"
+    assert chunks[0][0].startswith("state-bundle-2026-09-18-0-0-of-1-h")
 
 
 def test_state_bundle_chunks_splits_across_multiple_files_when_oversized():
@@ -1639,8 +1666,8 @@ def test_state_bundle_chunks_splits_across_multiple_files_when_oversized():
     chunks = L.state_bundle_chunks(bundle, date(2026, 9, 18), max_bytes=200)
     assert len(chunks) > 1
     titles = [title for title, _ in chunks]
-    assert titles == [f"state-bundle-2026-09-18-0-{i}-of-{len(chunks)}.json"
-                      for i in range(len(chunks))]
+    assert [t.rsplit("-h", 1)[0] for t in titles] == [
+        f"state-bundle-2026-09-18-0-{i}-of-{len(chunks)}" for i in range(len(chunks))]
 
 
 def test_state_bundle_chunks_respects_run_seq():
@@ -1648,7 +1675,7 @@ def test_state_bundle_chunks_respects_run_seq():
                                   sector_by_symbol={}, congress_discovery={},
                                   as_of=date(2026, 9, 18))
     chunks = L.state_bundle_chunks(bundle, date(2026, 9, 18), run_seq=3)
-    assert chunks[0][0] == "state-bundle-2026-09-18-3-0-of-1.json"
+    assert chunks[0][0].startswith("state-bundle-2026-09-18-3-0-of-1-h")
 
 
 def test_group_state_bundle_titles_picks_the_latest_complete_group():
@@ -1824,6 +1851,70 @@ def test_journal_files_to_supplement_falls_back_to_dates_for_a_legacy_bundle():
               "journal-2026-09-21-1.json", "journal-2026-09-22.json"]
     assert L.journal_files_to_supplement(bundle, titles) == [
         "journal-2026-09-21-1.json", "journal-2026-09-21.json", "journal-2026-09-22.json"]
+
+
+# ------------------------------------------------- chunk integrity (content hash)
+# 21 September 2026: chunk content is re-typed by the model through create_file
+# (one chunk of the first bundle came back 10 bytes larger). The hash in the
+# filename lets the reader prove each chunk arrived intact.
+
+def _hashed_group(as_of, run_seq, max_bytes=200):
+    journal_entries, fills, splits_by_symbol, sector_by_symbol, congress_discovery = _bundle_fixture()
+    bundle = L.build_state_bundle(
+        journal_entries=journal_entries, fills=fills, splits_by_symbol=splits_by_symbol,
+        sector_by_symbol=sector_by_symbol, congress_discovery=congress_discovery, as_of=as_of)
+    return [{"title": t, "content": c}
+            for t, c in L.state_bundle_chunks(bundle, as_of, run_seq=run_seq, max_bytes=max_bytes)]
+
+
+def test_chunk_titles_carry_a_hash_of_their_content():
+    for f in _hashed_group(date(2026, 9, 21), 0):
+        m = L.STATE_BUNDLE_RE.match(f["title"])
+        assert m and m.group(5) == L.state_bundle_content_hash(f["content"])
+
+
+def test_hash_ignores_whitespace_and_key_order_but_not_values():
+    a = '{"x":1,"y":[1,2]}'
+    assert L.state_bundle_content_hash(a) == L.state_bundle_content_hash('{ "y": [1, 2],\n "x": 1 }')
+    assert L.state_bundle_content_hash(a) != L.state_bundle_content_hash('{"x":1,"y":[1,3]}')
+
+
+def test_select_accepts_an_intact_group():
+    merged, rejected = L.select_state_bundle(_hashed_group(date(2026, 9, 21), 0))
+    assert rejected == [] and merged["as_of"] == "2026-09-21"
+
+
+def test_select_rejects_a_group_with_one_altered_value_and_falls_back_to_the_older():
+    older = _hashed_group(date(2026, 9, 14), 0)
+    newer = _hashed_group(date(2026, 9, 21), 0)
+    victim = next(f for f in newer if '"quantity":10' in f["content"])
+    victim["content"] = victim["content"].replace('"quantity":10', '"quantity":100', 1)
+    merged, rejected = L.select_state_bundle(older + newer)
+    assert merged["as_of"] == "2026-09-14"
+    assert len(rejected) == 1 and "2026-09-21" in rejected[0]
+
+
+def test_select_returns_none_when_every_group_fails():
+    grp = _hashed_group(date(2026, 9, 21), 0)
+    grp[0]["content"] = "not json"
+    merged, rejected = L.select_state_bundle(grp)
+    assert merged is None and len(rejected) == 1
+
+
+def test_select_accepts_legacy_chunks_with_no_hash():
+    legacy = []
+    for f in _hashed_group(date(2026, 9, 21), 0):
+        legacy.append({"title": f["title"].rsplit("-h", 1)[0] + ".json", "content": f["content"]})
+    merged, rejected = L.select_state_bundle(legacy)
+    assert rejected == [] and merged is not None
+
+
+def test_select_on_the_real_21_september_bundle_shape_still_reads_it():
+    """The bundle already in Drive has no hashes; it must keep loading."""
+    grp = _hashed_group(date(2026, 9, 21), 0)
+    for f in grp:
+        f["title"] = f["title"].rsplit("-h", 1)[0] + ".json"
+    assert L.group_state_bundle_titles([f["title"] for f in grp]) is not None
 
 
 # --------------------------------------------------- fills_cache_matches_fresh

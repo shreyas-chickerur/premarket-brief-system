@@ -24,6 +24,7 @@ That is the only state worth persisting, and appending never needs a rewrite.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field, asdict
@@ -51,6 +52,7 @@ __all__ = [
     "state_bundle_chunk_filename", "state_bundle_chunks",
     "next_state_bundle_run_seq", "group_state_bundle_titles",
     "merge_state_bundle_chunks", "BUNDLE_EXCLUDED_JOURNAL_KINDS",
+    "select_state_bundle", "state_bundle_content_hash",
     "journal_files_to_supplement",
     "BUNDLE_MAX_AGE_DAYS", "state_bundle_needs_rewrite", "state_bundle_age_days",
     "build_state_bundle", "unpack_state_bundle",
@@ -836,6 +838,12 @@ def journal_filename(run_date: date, seq: int = 0) -> str:
 # belongs in a "run" journal entry, which is why it stays a small, pinned
 # projection of the full manifest rather than the manifest itself (that
 # already gets written whole to run-manifest-YYYY-MM-DD[-N].json).
+_ROBINHOOD_TOOLS = (
+    "get_accounts", "get_equity_positions", "get_equity_orders", "get_portfolio",
+    "place_equity_order", "review_equity_order", "get_equity_quotes",
+    "cancel_equity_order",
+)
+
 RUN_ENTRY_SCHEMA_FIELDS = ("run_id", "health", "duration_ms", "decisions", "stages", "brokerage_ok")
 
 
@@ -875,7 +883,26 @@ def run_entry(log: Any) -> dict:
     # PROCEDURE_RATIONALE.md, 5 September 2026.
     brokerage_calls = [c for c in m.get("calls", [])
                        if str(c.get("service", "")).lower() == "robinhood"]
-    brokerage_ok = all(c.get("ok") for c in brokerage_calls) if brokerage_calls else None
+    if brokerage_calls:
+        brokerage_ok = all(c.get("ok") for c in brokerage_calls)
+    else:
+        # 21 September 2026: runs do not reliably log their Robinhood calls
+        # (the 21 Sept manifest logged only the Gmail send), so most days
+        # recorded `None` and the token forecast counted days since a run that
+        # merely FORGOT to log -- "5 days since last success" while the broker
+        # had been read successfully on 18 and 21 September. The
+        # `tools_available` check is recorded every run and is itself the
+        # evidence: an expired brokerage token makes every Robinhood tool
+        # disappear (`emailer.diagnose`), so Robinhood tools visible == token
+        # alive, and missing Robinhood tools == token dead. A check that failed
+        # only over non-Robinhood tools says nothing bad about the broker.
+        brokerage_ok = None
+        for c in m.get("checks", []):
+            if c.get("name") == "tools_available":
+                missing = " ".join(str(v) for v in (c.get("value") or []))
+                brokerage_ok = not (not c.get("passed") and
+                                    any(t in missing for t in _ROBINHOOD_TOOLS))
+                break
 
     return {
         "run_id": m.get("run_id", ""),
@@ -1471,16 +1498,37 @@ STATE_BUNDLE_SCHEMA_VERSION = 1
 # lets an aborted partial write be silently skipped in favour of an older
 # complete group instead of being read as truth.
 STATE_BUNDLE_RE = re.compile(
-    r"^state-bundle-(\d{4}-\d{2}-\d{2})-(\d+)-(\d+)-of-(\d+)\.json$")
+    r"^state-bundle-(\d{4}-\d{2}-\d{2})-(\d+)-(\d+)-of-(\d+)(?:-h([0-9a-f]{8}))?\.json$")
+
+
+def state_bundle_content_hash(content: str) -> str:
+    """Eight hex characters identifying a chunk's CONTENT, computed over the
+    canonical JSON (sorted keys, no insignificant whitespace) so it survives
+    any harmless re-encoding but changes if a single value does.
+
+    Why it exists (21 September 2026): `create_file` takes content inline, so
+    every chunk is re-typed by the model that writes it -- the first bundle
+    came back with one chunk 10 bytes larger than the original (a duplicated
+    word). Harmless that time, but the same channel could just as easily slip a
+    digit in a fill quantity, and a bundle is what every later run trusts. The
+    hash is computed by code from the intended content and travels in the
+    filename, so a reader can prove each chunk arrived intact instead of
+    hoping it did."""
+    canonical = json.dumps(json.loads(content), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
 
 
 def state_bundle_chunk_filename(run_date: date, run_seq: int, chunk_seq: int,
-                                chunk_count: int) -> str:
+                                chunk_count: int,
+                                content_hash: Optional[str] = None) -> str:
     """One file per chunk of one bundle write. `chunk_count` is repeated in
     every chunk's own filename (not just its content) so completeness is
-    checkable from a Drive listing alone -- see the module note above."""
+    checkable from a Drive listing alone -- see the module note above.
+    `content_hash` (`state_bundle_content_hash`) is appended when given; older
+    bundles have none and are accepted unverified."""
+    tail = f"-h{content_hash}" if content_hash else ""
     return (f"state-bundle-{run_date.isoformat()}-{run_seq}-{chunk_seq}"
-            f"-of-{chunk_count}.json")
+            f"-of-{chunk_count}{tail}.json")
 
 
 def next_state_bundle_run_seq(titles: Sequence[str], run_date: date) -> int:
@@ -1660,12 +1708,15 @@ def state_bundle_chunks(bundle: dict, run_date: date, *,
             payload[name] = []
         for name, row in part_rows:
             payload[name].append(json.loads(row))
-        title = state_bundle_chunk_filename(run_date, run_seq, i, total)
-        out.append((title, json.dumps(payload, separators=(",", ":"))))
+        content = json.dumps(payload, separators=(",", ":"))
+        title = state_bundle_chunk_filename(run_date, run_seq, i, total,
+                                            state_bundle_content_hash(content))
+        out.append((title, content))
     return out
 
 
-def group_state_bundle_titles(titles: Sequence[str]
+def group_state_bundle_titles(titles: Sequence[str], *,
+                              exclude: Iterable[tuple[str, int]] = ()
                               ) -> Optional[tuple[str, int, list[str]]]:
     """Given every `state-bundle-*.json` filename present in the Drive
     folder (titles only -- no download needed), find the freshest COMPLETE
@@ -1679,8 +1730,11 @@ def group_state_bundle_titles(titles: Sequence[str]
     exactly like the group never existed rather than reading it as a
     truncated truth. Preferred group: the latest `date`, then within that
     date the highest `run_seq` among the COMPLETE ones only -- an
-    incomplete fresher write never masks an older complete one.
+    incomplete fresher write never masks an older complete one. `exclude` is a
+    set of `(as_of, run_seq)` groups to ignore (`select_state_bundle` uses it
+    to step past a group whose content failed verification).
     """
+    skip = set(exclude)
     groups: dict[tuple[str, int], dict[int, str]] = {}
     chunk_counts: dict[tuple[str, int], int] = {}
     for title in titles:
@@ -1700,6 +1754,7 @@ def group_state_bundle_titles(titles: Sequence[str]
         key for key, files in groups.items()
         if len(files) == chunk_counts[key]
         and set(files) == set(range(chunk_counts[key]))
+        and key not in skip
     ]
     if not complete:
         return None
@@ -1758,6 +1813,50 @@ def merge_state_bundle_chunks(files: Iterable[dict]
             merged[name].extend(payload.get(name, []))
 
     return merged, bad
+
+
+def _chunk_intact(title: str, content: str) -> bool:
+    m = STATE_BUNDLE_RE.match(title)
+    if not m:
+        return False
+    try:
+        json.loads(content)
+    except (ValueError, TypeError):
+        return False
+    return m.group(5) is None or state_bundle_content_hash(content) == m.group(5)
+
+
+def select_state_bundle(files: Sequence[dict]
+                        ) -> tuple[Optional[dict], list[str]]:
+    """The freshest bundle whose chunks all VERIFY, from a snippet listing
+    (`{"title", "content"}` for every `state-bundle-*.json`).
+
+    Walks complete groups newest first. A group is accepted only if every chunk
+    parses and, where its filename carries a content hash, matches it; a group
+    that fails is recorded in `rejected` and the next older complete group is
+    tried, so a chunk mangled in transit costs one fallback, never a silently
+    wrong bundle. Returns `(merged_bundle_or_None, rejected_group_labels)`;
+    `None` means no group verified -- take the bootstrap path. Chunks written
+    before content hashes existed (no `-h…` in the name) are accepted as
+    parsed, exactly as before."""
+    by_title = {str(f.get("title", "")): f for f in files}
+    rejected: list[str] = []
+    skip: set[tuple[str, int]] = set()
+    while True:
+        group = group_state_bundle_titles(list(by_title), exclude=skip)
+        if group is None:
+            return None, rejected
+        as_of, run_seq, ordered = group
+        broken = [t for t in ordered
+                  if not _chunk_intact(t, str(by_title[t].get("content") or ""))]
+        if not broken:
+            merged, bad = merge_state_bundle_chunks([by_title[t] for t in ordered])
+            if merged is not None and not bad:
+                return merged, rejected
+            broken = bad or ordered
+        rejected.append(f"state bundle {as_of} run {run_seq}: failed verification "
+                        f"({', '.join(broken[:3])})")
+        skip.add((as_of, run_seq))
 
 
 def journal_files_to_supplement(bundle: dict, titles: Sequence[str]) -> list[str]:

@@ -176,8 +176,18 @@ def closest_calls(decisions: Sequence[dict], *, top: int = 3) -> list[dict]:
     return [d for _, d in ranked[:top]]
 
 
+# Recalibrated 21 September 2026 against the journal. The original "~4 day
+# expiry" was a single early observation. Since 8 September the broker was read
+# successfully on 8, 9, 11, 14, 15, 16, 18 and 21 September: thirteen days on
+# one token, and idle gaps of 3 days (every weekend) survived with no failure.
+# So the token is refreshed by use, and 3 days is the longest idle gap KNOWN to
+# work. The old threshold (warn at 3) therefore fired on every Monday for a
+# perfectly healthy weekend gap. Warn only once the gap exceeds what has been
+# seen to work (a 4-day gap: a Monday holiday), which is when it is genuinely
+# untested.
 BROKERAGE_TOKEN_OBSERVED_EXPIRY_DAYS = 4
-BROKERAGE_TOKEN_WARN_AFTER_DAYS = 3
+BROKERAGE_TOKEN_LONGEST_IDLE_KNOWN_OK_DAYS = 3
+BROKERAGE_TOKEN_WARN_AFTER_DAYS = BROKERAGE_TOKEN_LONGEST_IDLE_KNOWN_OK_DAYS + 1
 
 
 def brokerage_token_health(days_since_success: Optional[int], *,
@@ -200,8 +210,9 @@ def brokerage_token_health(days_since_success: Optional[int], *,
     detail = (f"{days_since_success} day(s) since the last successful brokerage call"
               if passed else
               f"{days_since_success} day(s) since the last successful brokerage call -- "
-              f"approaching the observed ~{BROKERAGE_TOKEN_OBSERVED_EXPIRY_DAYS}-day expiry "
-              f"window (HANDOFF.md section 12); sign in again before it lapses mid-run")
+              f"longer than the longest idle gap seen to work "
+              f"({BROKERAGE_TOKEN_LONGEST_IDLE_KNOWN_OK_DAYS} days, HANDOFF.md section 12); "
+              f"sign in again before it lapses mid-run")
     return Check("brokerage_token_health", passed, "warn", detail, value=days_since_success)
 
 

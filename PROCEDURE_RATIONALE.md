@@ -1874,3 +1874,55 @@ through the caller, and chunk 2 came back 10 bytes larger than the local
 original (a duplicated word in a historical note). Harmless here and disclosed
 by the run, but it is the risk a smaller, weekly write shrinks rather than
 removes.
+
+## Stage 21 -- the dead-man's switch moves into the user's own Google account; the broker-token warning was a recording gap; chunk writes become self-verifying, 22 September 2026
+
+Three loose ends from the first complete run, each resolved by looking at the
+evidence rather than at the code's own account of itself.
+
+**Dead-man's switch.** Stage 18's design was a `curl` ping to healthchecks.io at
+the end of Stage 6. Two problems only showed up on inspection. It needs a
+healthchecks.io account, which nothing here can create. And the routine's
+network access to an arbitrary host is unverified (git and pip work; that says
+little about `hc-ping.com`), so the ping could silently no-op forever. A ping
+also only proves the run reached Stage 6, when what matters is whether the
+brief reached the reader. So the switch is now `deadman_switch.gs`, an Apps
+Script in the user's own Google account: every weekday at 09:15 Central it
+looks for that day's brief ("Pre-Market Brief" in the subject; a holiday sends
+a short "market closed" one, so every weekday has one) and emails an alert if
+there is none. It shares nothing with the failure modes it watches (routines,
+the shared usage cap, connectors), needs no third party, and the signal is the
+deliverable itself. Checked against the real mailbox: nine briefs from 8 to 21
+September, and none on 17 September, the day it exists for. The decision logic
+is pure and tested under node; the Gmail glue can only run in the user's
+account. The `{{HEALTHCHECKS_URL}}` placeholder and ping paragraph are removed.
+
+**Broker token.** The forecast said "5 days since the last successful brokerage
+call". That was an artifact. `brokerage_ok` is derived from logged Robinhood
+calls, runs do not reliably log them (the 21 September manifest logged only its
+Gmail send), so most days recorded `None` and the count ran back to the last day
+that happened to log one. The journal shows the broker read successfully on 8,
+9, 11, 14, 15, 16, 18 and 21 September: thirteen days on one token, surviving a
+3-day idle gap every weekend. So the token is refreshed by use, and the old
+"~4 day expiry" was one early observation. Two changes: `brokerage_ok` now falls
+back to the `tools_available` check, which is recorded every run and is itself
+the evidence (an expired token makes every Robinhood tool disappear, so tools
+visible means token alive); and the warning threshold moves from 3 to 4 days,
+because 3 idle days is now known to work and the old threshold warned every
+Monday about a healthy weekend. What remains unknown is how long an idle gap the
+token survives beyond 3 days.
+
+**Manual writes.** There is no way around them: the routine's Drive connector
+takes file content only as an inline argument (`create_file`), there is no
+upload-from-disk, and a private repository for state does not exist. Every byte
+written is re-typed by the model, which costs time and tokens and can alter
+content: the first bundle came back with one chunk 10 bytes larger. Prevention
+is impossible, so the fix is detection by code. Each bundle chunk's filename now
+carries a hash of its canonical JSON content, computed by code from what was
+meant to be written. `select_state_bundle` verifies every chunk on read and
+steps over a group that fails, falling back to the previous bundle or the
+bootstrap, so a mangled chunk costs a slower run instead of a wrong state.
+After writing, the run re-reads and verifies, and trashes a group that failed,
+so a complete-looking group with a bad chunk cannot survive. Bundles written
+before this change have no hash and load as they always did. Refreshing weekly
+instead of daily (Stage 20) already removed most of the exposure.
