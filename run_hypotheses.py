@@ -44,6 +44,13 @@ def load_all():
 
 
 def trials_for(spec: dict, tr, earn, spy_tr, start: date, end: date) -> list[dict]:
+    if "momentum_min_percentile" in spec:
+        base = trials_for({k: v for k, v in spec.items() if k != "momentum_min_percentile"}, tr, earn, spy_tr, start, end)
+        return H.with_momentum_filter(base, tr, min_percentile=spec["momentum_min_percentile"])
+    if spec["signal"] == "ranked":
+        return H.ranked_monthly_trials(tr, spy_tr, rank=spec["rank"], top_n=spec["top_n"], start=start, end=end,
+                                       horizon_days=spec["horizon_days"],
+                                       require_uptrend=spec.get("require_uptrend", False))
     if spec["signal"] == "pead":
         kw = {k: spec[k] for k in ("min_surprise_pct", "min_reaction_excess_pct") if k in spec}
         return [t for s in tr for t in H.pead_trials(s, earn[s], tr[s], spy_tr, horizon_days=spec["horizon_days"],

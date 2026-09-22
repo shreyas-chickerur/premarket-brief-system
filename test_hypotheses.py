@@ -150,3 +150,41 @@ def test_congress_sales_and_small_amounts_are_filtered():
                       {"transaction_type": "BUY", "filed_date": "2024-02-06", "amount_min": "1001"}]}
     assert H.congress_trials("X", raw, px, horizon_days=63, start=date(2024, 1, 1), end=date(2024, 12, 31),
                              min_amount=15000) == []
+
+
+# --------------------------------------------------------------------------
+# round 3
+# --------------------------------------------------------------------------
+
+def test_volatility_ranking_uses_only_prices_before_entry():
+    n = 300
+    calm = _px([10.0 + (i % 2) * 0.01 for i in range(n)], start="2023-01-02")
+    wild = _px([10.0 + (i % 2) * 2.0 for i in range(n)], start="2023-01-02")
+    spy = _px([100.0] * n, start="2023-01-02")
+    t = H.ranked_monthly_trials({"C": calm, "W": wild}, spy, rank="low_vol", top_n=1,
+                                start=date(2024, 2, 1), end=date(2024, 2, 29), horizon_days=21)
+    assert t[0]["symbol"] == "C"
+    calm2 = calm.copy()
+    calm2.loc[calm2.index >= t[0]["entry_session"], "close"] *= [1 + (i % 2) for i in range((calm2.index >= t[0]["entry_session"]).sum())]
+    t2 = H.ranked_monthly_trials({"C": calm2, "W": wild}, spy, rank="low_vol", top_n=1,
+                                 start=date(2024, 2, 1), end=date(2024, 2, 29), horizon_days=21)
+    assert t2[0]["symbol"] == "C"
+
+
+def test_the_uptrend_filter_skips_months_when_spy_is_below_its_200_day_average():
+    n = 300
+    falling = _px([200.0 - i * 0.3 for i in range(n)], start="2023-01-02")
+    a = _px([10.0] * n, start="2023-01-02")
+    assert H.ranked_monthly_trials({"A": a}, falling, rank="momentum", top_n=1, start=date(2024, 2, 1),
+                                   end=date(2024, 2, 29), horizon_days=21, require_uptrend=True) == []
+
+
+def test_momentum_filter_keeps_only_strong_names_at_their_own_entry():
+    n = 300
+    strong = _px([10.0 + i * 0.05 for i in range(n)], start="2023-01-02")
+    weak = _px([30.0 - i * 0.05 for i in range(n)], start="2023-01-02")
+    entry = strong.index[280]
+    trials = [{"symbol": "S", "entry_session": entry, "exit_session": strong.index[290], "signal": {}},
+              {"symbol": "W", "entry_session": entry, "exit_session": weak.index[290], "signal": {}}]
+    kept = H.with_momentum_filter(trials, {"S": strong, "W": weak}, min_percentile=0.7)
+    assert [t["symbol"] for t in kept] == ["S"]

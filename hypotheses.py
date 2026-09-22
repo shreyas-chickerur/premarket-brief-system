@@ -343,3 +343,81 @@ def congress_trials(symbol: str, raw: Optional[dict], px_tr: pd.DataFrame, *, ho
             out.append({"symbol": symbol.upper(), "entry_session": later[0], "exit_session": ex,
                         "signal": {"filed_date": d.isoformat(), **info}})
     return out
+
+
+# --------------------------------------------------------------------------
+# round 3: rankings, a market filter, and combinations
+# --------------------------------------------------------------------------
+
+def momentum_score(px_tr: pd.DataFrame, entry: pd.Timestamp, lookback: int = 252, skip: int = 21) -> Optional[float]:
+    """12-1 month return from closes strictly before `entry`."""
+    past = px_tr.loc[px_tr.index < entry, "close"]
+    if len(past) <= lookback:
+        return None
+    return float(past.iloc[-1 - skip] / past.iloc[-1 - lookback] - 1)
+
+
+def volatility_score(px_tr: pd.DataFrame, entry: pd.Timestamp, lookback: int = 252) -> Optional[float]:
+    """Annualised stdev of daily returns over the `lookback` sessions strictly
+    before `entry`."""
+    past = px_tr.loc[px_tr.index < entry, "close"]
+    if len(past) <= lookback:
+        return None
+    r = past.iloc[-lookback - 1:].pct_change().dropna()
+    return float(r.std() * math.sqrt(252))
+
+
+def market_above_trend(spy_tr: pd.DataFrame, entry: pd.Timestamp, window: int = 200) -> bool:
+    """SPY's last close before `entry` above its `window`-session average."""
+    past = spy_tr.loc[spy_tr.index < entry, "close"]
+    return len(past) >= window and float(past.iloc[-1]) > float(past.iloc[-window:].mean())
+
+
+def momentum_percentile(prices_tr: dict, symbol: str, entry: pd.Timestamp) -> Optional[float]:
+    """Where `symbol`'s 12-1 momentum ranks in the universe at `entry`, 0..1
+    (1 = strongest), using only prices before `entry`."""
+    mine = momentum_score(prices_tr[symbol], entry)
+    if mine is None:
+        return None
+    others = [s for s in (momentum_score(px, entry) for px in prices_tr.values()) if s is not None]
+    return sum(o <= mine for o in others) / len(others)
+
+
+def ranked_monthly_trials(prices_tr: dict, spy_tr: pd.DataFrame, *, rank: str, top_n: int,
+                          start: date, end: date, horizon_days: int,
+                          require_uptrend: bool = False) -> list[dict]:
+    """Monthly portfolio on the first session of each month: `rank="momentum"`
+    buys the strongest 12-1 names, `rank="low_vol"` the calmest. With
+    `require_uptrend`, a month is skipped unless SPY sits above its 200-day
+    average going in."""
+    months = spy_tr.index[(spy_tr.index >= pd.Timestamp(start)) & (spy_tr.index <= pd.Timestamp(end))]
+    firsts = pd.Series(months, index=months).groupby([months.year, months.month]).first()
+    out = []
+    for entry in firsts:
+        if require_uptrend and not market_above_trend(spy_tr, entry):
+            continue
+        scored = []
+        for sym, px in prices_tr.items():
+            if entry not in px.index:
+                continue
+            s = momentum_score(px, entry) if rank == "momentum" else volatility_score(px, entry)
+            if s is not None:
+                scored.append((s, sym))
+        picks = sorted(scored, reverse=(rank == "momentum"))[:top_n]
+        for s, sym in picks:
+            ex = exit_after(prices_tr[sym].index, entry, horizon_days)
+            if ex is not None:
+                out.append({"symbol": sym, "entry_session": entry, "exit_session": ex,
+                            "signal": {rank: round(s, 4)}})
+    return out
+
+
+def with_momentum_filter(trials: list[dict], prices_tr: dict, *, min_percentile: float) -> list[dict]:
+    """Keep only trials whose symbol ranks at or above `min_percentile` on
+    12-1 momentum at its own entry session."""
+    out = []
+    for t in trials:
+        p = momentum_percentile(prices_tr, t["symbol"], t["entry_session"])
+        if p is not None and p >= min_percentile:
+            out.append(dict(t, signal=dict(t["signal"], momentum_percentile=round(p, 3))))
+    return out
