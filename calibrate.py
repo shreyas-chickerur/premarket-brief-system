@@ -70,7 +70,8 @@ def write_packets() -> list[str]:
     for w in sample:
         name = f"{w['symbol']}-{w['decision_date']}"
         raw = json.loads(D.path_for("news", w["symbol"], w["decision_date"]).read_text())
-        packet = B.judge_packet(raw, symbol=w["symbol"], decision=date.fromisoformat(w["decision_date"]))
+        packet = B.judge_packet(raw, symbol=w["symbol"], decision=date.fromisoformat(w["decision_date"]),
+                                max_articles=60)
         packet["rule"] = RULE.format(symbol=w["symbol"], decision=w["decision_date"])
         (CAL / "packets" / f"{name}.json").write_text(json.dumps(packet, indent=1))
         names.append(name)

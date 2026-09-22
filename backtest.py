@@ -581,7 +581,8 @@ def calibration_sample(windows: Sequence[dict], *, n: int, seed: int) -> list[di
 
 
 def judge_packet(raw: Optional[dict], *, symbol: str, decision: date,
-                 lookback_days: int = DEFAULT_HORIZON_DAYS, summary_chars: int = 400) -> dict:
+                 lookback_days: int = DEFAULT_HORIZON_DAYS, summary_chars: int = 400,
+                 max_articles: Optional[int] = None) -> dict:
     """What a judge sees for one window: the articles about `symbol`
     published in the lookback strictly before `decision` -- title, publisher,
     date, the feed's relevance score and a trimmed summary. No prices, no
@@ -602,8 +603,16 @@ def judge_packet(raw: Optional[dict], *, symbol: str, decision: date,
                      "published": published.isoformat(),
                      "relevance_to_symbol": match.get("relevance_score"),
                      "summary": str(e.get("summary", ""))[:summary_chars]})
+    total = len(arts)
+    if max_articles is not None and total > max_articles:
+        # A dense window (hundreds of articles) is capped to the ones most
+        # about the symbol; two genuine sources among them decide it.
+        arts = sorted(arts, key=lambda a: float(a["relevance_to_symbol"] or 0), reverse=True)[:max_articles]
     arts.sort(key=lambda a: a["published"], reverse=True)
-    return {"symbol": sym, "decision_date": decision.isoformat(), "articles": arts}
+    out = {"symbol": sym, "decision_date": decision.isoformat(), "articles": arts}
+    if len(arts) < total:
+        out["note"] = f"top {len(arts)} of {total} articles by relevance to {sym}"
+    return out
 
 
 def agreement(proxy: dict, judge: dict) -> dict:

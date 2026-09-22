@@ -551,3 +551,12 @@ def test_a_non_rate_limit_refusal_raises(monkeypatch):
     monkeypatch.setattr(D, "_download", lambda url: json.dumps({"Error Message": "Invalid API call."}))
     with pytest.raises(RuntimeError):
         D._get({"function": "EARNINGS"}, key="k", per_minute=10_000, sleep=lambda s: None)
+
+
+def test_judge_packet_caps_a_dense_window_to_the_most_relevant_and_says_so():
+    feed = [{"title": f"t{i}", "time_published": "20250620T120000", "source": f"P{i}", "summary": "",
+             "ticker_sentiment": [{"ticker": "NOK", "relevance_score": str(i / 100)}]} for i in range(100)]
+    p = B.judge_packet({"feed": feed}, symbol="NOK", decision=date(2025, 7, 3), max_articles=10)
+    assert len(p["articles"]) == 10
+    assert min(float(a["relevance_to_symbol"]) for a in p["articles"]) == 0.90
+    assert p["note"] == "top 10 of 100 articles by relevance to NOK"
