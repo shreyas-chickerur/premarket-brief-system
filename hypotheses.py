@@ -48,9 +48,22 @@ def session_offset(index: pd.DatetimeIndex, ts: pd.Timestamp, n: int) -> Optiona
     return index[i] if 0 <= i < len(index) else None
 
 
-def exit_after(index: pd.DatetimeIndex, entry: pd.Timestamp, horizon_days: int) -> Optional[pd.Timestamp]:
+DELISTED_GAP_DAYS = 10     # a series ending this long before the market data does has stopped trading
+
+
+def exit_after(index: pd.DatetimeIndex, entry: pd.Timestamp, horizon_days: int,
+               data_end: Optional[pd.Timestamp] = None) -> Optional[pd.Timestamp]:
+    """First session on or after `entry + horizon_days`. When the stock
+    stopped trading before then (its series ends well before `data_end`),
+    the exit is its LAST trade: a delisted position is closed at what it was
+    last worth, never dropped -- dropping it is survivorship bias again."""
     later = index[index >= entry + pd.Timedelta(days=horizon_days)]
-    return later[0] if len(later) else None
+    if len(later):
+        return later[0]
+    if data_end is not None and len(index) and index[-1] > entry and \
+            (data_end - index[-1]).days > DELISTED_GAP_DAYS:
+        return index[-1]
+    return None
 
 
 def _num(x) -> Optional[float]:
@@ -405,7 +418,7 @@ def ranked_monthly_trials(prices_tr: dict, spy_tr: pd.DataFrame, *, rank: str, t
                 scored.append((s, sym))
         picks = sorted(scored, reverse=(rank == "momentum"))[:top_n]
         for s, sym in picks:
-            ex = exit_after(prices_tr[sym].index, entry, horizon_days)
+            ex = exit_after(prices_tr[sym].index, entry, horizon_days, data_end=spy_tr.index[-1])
             if ex is not None:
                 out.append({"symbol": sym, "entry_session": entry, "exit_session": ex,
                             "signal": {rank: round(s, 4)}})
@@ -420,4 +433,50 @@ def with_momentum_filter(trials: list[dict], prices_tr: dict, *, min_percentile:
         p = momentum_percentile(prices_tr, t["symbol"], t["entry_session"])
         if p is not None and p >= min_percentile:
             out.append(dict(t, signal=dict(t["signal"], momentum_percentile=round(p, 3))))
+    return out
+
+
+# --------------------------------------------------------------------------
+# round 4: price-only rankings on a survivorship-reduced universe
+# --------------------------------------------------------------------------
+
+def _score(rank: str, px_tr: pd.DataFrame, entry: pd.Timestamp) -> Optional[float]:
+    past = px_tr.loc[px_tr.index < entry, "close"]
+    if rank == "momentum":
+        return momentum_score(px_tr, entry)
+    if rank == "reversal5":                      # last week's return; LOWEST ranks first
+        return float(past.iloc[-1] / past.iloc[-6] - 1) if len(past) > 6 else None
+    if rank == "high52":                         # closeness to the 52-week high; HIGHEST first
+        return float(past.iloc[-1] / past.iloc[-252:].max()) if len(past) >= 252 else None
+    raise ValueError(rank)
+
+
+def ranked_trials(prices_tr: dict, raw_close: dict, spy_tr: pd.DataFrame, *, rank: str, top_n: int,
+                  start: date, end: date, horizon_days: int, freq: str = "M",
+                  min_price: float = 5.0) -> list[dict]:
+    """A portfolio formed on the first session of each month (`freq="M"`) or
+    week (`"W"`), ranked on prices strictly before that session. `min_price`
+    is checked on the RAW prior close -- the real traded price, not a
+    back-adjusted one. Delisted names exit at their last trade."""
+    days = spy_tr.index[(spy_tr.index >= pd.Timestamp(start)) & (spy_tr.index <= pd.Timestamp(end))]
+    key = [days.year, days.month] if freq == "M" else [days.isocalendar().year, days.isocalendar().week]
+    firsts = pd.Series(days, index=days).groupby(key).first()
+    ascending = rank == "reversal5"
+    out = []
+    for entry in firsts:
+        scored = []
+        for sym, px in prices_tr.items():
+            if entry not in px.index:
+                continue
+            prior = raw_close[sym].loc[raw_close[sym].index < entry]
+            if not len(prior) or float(prior.iloc[-1]) < min_price:
+                continue
+            sc = _score(rank, px, entry)
+            if sc is not None:
+                scored.append((sc, sym))
+        for sc, sym in sorted(scored, reverse=not ascending)[:top_n]:
+            ex = exit_after(prices_tr[sym].index, entry, horizon_days, data_end=spy_tr.index[-1])
+            if ex is not None:
+                out.append({"symbol": sym, "entry_session": entry, "exit_session": ex,
+                            "signal": {rank: round(sc, 4)}})
     return out
