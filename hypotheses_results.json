@@ -309,6 +309,36 @@
      "mean_excess_pct_at_0.30_cost": 1.217939313104185
     }
    }
+  },
+  "holdout": {
+   "period": [
+    "2022-01-03",
+    "2026-08-01"
+   ],
+   "critical_t": 1.9599639845400536,
+   "confirmed": [],
+   "results": {
+    "H11": {
+     "candidates": 550,
+     "gated": {
+      "risk_sized": 78,
+      "no_blocking_conflict": 87
+     },
+     "n": 385,
+     "mean_excess_pct": -0.5883436268414162,
+     "median_excess_pct": -2.9789278145634035,
+     "sd_excess_pct": 31.985252187806648,
+     "win_rate_vs_spy": 0.44155844155844154,
+     "months": 55,
+     "mean_monthly_excess_pct": -0.31407880991728093,
+     "t": -0.20799645576697717,
+     "mean_excess_pct_at_0.30_cost": -0.7883436268414163
+    }
+   },
+   "supplementary_newey_west_lag2_t": {
+    "discovery": 2.38,
+    "holdout": -0.17
+   }
   }
  }
 }
