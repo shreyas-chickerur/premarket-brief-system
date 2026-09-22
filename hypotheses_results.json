@@ -216,5 +216,99 @@
     }
    }
   }
+ },
+ "round3": {
+  "discovery": {
+   "period": [
+    "2012-01-01",
+    "2021-12-31"
+   ],
+   "screen_t": 2.3263478740408408,
+   "carried": [
+    "H11"
+   ],
+   "results": {
+    "H11": {
+     "candidates": 1200,
+     "gated": {
+      "risk_sized": 139,
+      "no_blocking_conflict": 130
+     },
+     "n": 931,
+     "mean_excess_pct": 3.460386232864857,
+     "median_excess_pct": 0.3722504133689798,
+     "sd_excess_pct": 26.25311942549233,
+     "win_rate_vs_spy": 0.5069817400644469,
+     "months": 120,
+     "mean_monthly_excess_pct": 3.6771939708269303,
+     "t": 3.010023227746717,
+     "mean_excess_pct_at_0.30_cost": 3.2603862328648567
+    },
+    "H12": {
+     "candidates": 1080,
+     "gated": {
+      "risk_sized": 120,
+      "no_blocking_conflict": 123
+     },
+     "n": 837,
+     "mean_excess_pct": 1.1659628649349896,
+     "median_excess_pct": 0.395457105394892,
+     "sd_excess_pct": 14.206968447087503,
+     "win_rate_vs_spy": 0.5197132616487455,
+     "months": 108,
+     "mean_monthly_excess_pct": 1.3105346500022221,
+     "t": 1.9894498255730804,
+     "mean_excess_pct_at_0.30_cost": 0.9659628649349898
+    },
+    "H13": {
+     "candidates": 1200,
+     "gated": {
+      "risk_sized": 143,
+      "no_blocking_conflict": 22
+     },
+     "n": 1035,
+     "mean_excess_pct": -0.24256621791055308,
+     "median_excess_pct": -0.21812502841697104,
+     "sd_excess_pct": 4.5149067646503545,
+     "win_rate_vs_spy": 0.4753623188405797,
+     "months": 120,
+     "mean_monthly_excess_pct": -0.2549176614234693,
+     "t": -1.413928343683362,
+     "mean_excess_pct_at_0.30_cost": -0.4425662179105531
+    },
+    "H14": {
+     "candidates": 372,
+     "gated": {
+      "risk_sized": 60,
+      "no_blocking_conflict": 15
+     },
+     "n": 297,
+     "mean_excess_pct": 1.7156323154197737,
+     "median_excess_pct": 0.25433292579553124,
+     "sd_excess_pct": 15.860166991672799,
+     "win_rate_vs_spy": 0.5050505050505051,
+     "months": 90,
+     "mean_monthly_excess_pct": 0.8110788791066176,
+     "t": 0.9622229547960018,
+     "mean_excess_pct_at_0.30_cost": 1.515632315419774
+    },
+    "H15": {
+     "candidates": 257,
+     "gated": {
+      "risk_sized": 7,
+      "no_blocking_conflict": 3
+     },
+     "n": 247,
+     "mean_excess_pct": 1.4179393131041849,
+     "median_excess_pct": -0.7857551923202476,
+     "sd_excess_pct": 16.26084392409834,
+     "win_rate_vs_spy": 0.46963562753036436,
+     "months": 107,
+     "mean_monthly_excess_pct": 1.0385554069620038,
+     "t": 0.8571503983376981,
+     "mean_excess_pct_at_0.30_cost": 1.217939313104185
+    }
+   }
+  }
  }
 }
