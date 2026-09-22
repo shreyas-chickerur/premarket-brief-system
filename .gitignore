@@ -17,3 +17,6 @@ data/
 
 # Rendered email drafts.
 *.html
+
+# graphify knowledge-graph output (local, regenerable)
+graphify-out/
