@@ -501,7 +501,10 @@ def simulate(trials: Sequence[dict], prices: dict, benchmark: pd.DataFrame, *,
                 continue
             cash -= shares * t["entry"]
             registry.add(washsale.Trade(sym, "agentic", day.date(), "buy", shares))
-            due = prices[sym].index[prices[sym].index >= day + pd.Timedelta(days=horizon_days)]
+            # A trial may carry its own exit date (signals whose holding period
+            # is set in sessions, e.g. out before an earnings release).
+            due = (prices[sym].index[prices[sym].index >= pd.Timestamp(t["exit_on"])] if t.get("exit_on")
+                   else prices[sym].index[prices[sym].index >= day + pd.Timedelta(days=horizon_days)])
             positions[sym] = {"shares": shares, "entry": t["entry"], "stop": plan.stop_price,
                               "opened": day, "due": due[0] if len(due) else None,
                               "bench_entry": float(benchmark.loc[day, "open"])}

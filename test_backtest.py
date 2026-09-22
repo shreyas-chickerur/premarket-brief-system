@@ -560,3 +560,12 @@ def test_judge_packet_caps_a_dense_window_to_the_most_relevant_and_says_so():
     assert len(p["articles"]) == 10
     assert min(float(a["relevance_to_symbol"]) for a in p["articles"]) == 0.90
     assert p["note"] == "top 10 of 100 articles by relevance to NOK"
+
+
+def test_simulate_honours_a_trials_own_exit_date():
+    px = _bars("2025-01-06", [50.0] * 40, closes=[50.0] * 5 + [52.0] * 35)
+    spy = _bars("2025-01-06", [100.0] * 40)
+    t = dict(_trial("AAA", px.index[0].date()), exit_on=px.index[5].date().isoformat())
+    r = B.simulate([t], {"AAA": px}, spy, starting_cash=1000)
+    assert r["trades"][0]["closed"] == px.index[5].date().isoformat()
+    assert r["trades"][0]["exit"] == 52.0

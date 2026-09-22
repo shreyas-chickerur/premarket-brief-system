@@ -1,0 +1,21 @@
+{
+ "round": 1,
+ "frozen_on": "2026-09-22",
+ "purpose": "Search for a signal with edge for the $1,000 agentic account WITHOUT fooling ourselves. Frozen before any round-1 number exists. Later rounds append; tests are counted across rounds.",
+ "universe": "Every symbol with earnings+prices on disk from backtest_universe.json (202 run; 38 delisted/acquired names lack earnings data -- a survivorship gap that favours positive results and is disclosed).",
+ "account": {"sizing_equity": 1000, "rules": "live quantcore sizing: 2% risk, 25% gap haircut, 18% cap, whole shares; anomaly block. A trade the $1,000 account cannot size is not counted."},
+ "periods": {"discovery": ["2012-01-01", "2021-12-31"], "holdout": ["2022-01-03", "2026-08-01"],
+             "note": "Holdout starts on the universe's listing-snapshot date, so the sampled stratum is survivorship-free there (apart from missing earnings data). Discovery is survivorship-exposed and is only a screen."},
+ "cost_pct": 0.10,
+ "hypotheses": {
+  "H1": {"signal": "pead", "min_surprise_pct": 5, "horizon_days": 21, "idea": "post-earnings drift after a beat, 1 month"},
+  "H2": {"signal": "pead", "min_surprise_pct": 5, "horizon_days": 63, "idea": "post-earnings drift after a beat, 3 months"},
+  "H3": {"signal": "pead", "min_surprise_pct": 5, "min_reaction_excess_pct": 2, "horizon_days": 42, "idea": "beat confirmed by the market's reaction"},
+  "H4": {"signal": "pead", "min_reaction_excess_pct": 5, "horizon_days": 42, "idea": "large positive earnings gap, regardless of the reported surprise"},
+  "H5": {"signal": "runup", "lead_sessions": 10, "idea": "pre-announcement run-up, out before the number"},
+  "H6": {"signal": "momentum", "top_n": 10, "horizon_days": 21, "idea": "12-1 month momentum, monthly"}
+ },
+ "discovery_screen": "carry to holdout only if n>=100 trades, mean excess >= +0.50% per trade, and calendar-month t >= 2.39 (one-sided alpha 0.05/6).",
+ "holdout_confirmation": "EDGE only if, with m = number carried: calendar-month t >= z(1 - 0.05/m), mean excess > 0 per trade at cost 0.10% AND still > 0 at 0.30%, n >= 50.",
+ "reported_regardless": "every hypothesis's discovery numbers; the $1,000 replay for anything confirmed."
+}
