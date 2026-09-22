@@ -111,6 +111,32 @@
      "mean_excess_pct_at_0.30_cost": 1.0567169730962525
     }
    }
+  },
+  "holdout": {
+   "period": [
+    "2022-01-03",
+    "2026-08-01"
+   ],
+   "critical_t": 1.6448536269514715,
+   "confirmed": [],
+   "results": {
+    "H3": {
+     "candidates": 714,
+     "gated": {
+      "no_blocking_conflict": 45,
+      "risk_sized": 120
+     },
+     "n": 549,
+     "mean_excess_pct": 1.2654714168393228,
+     "median_excess_pct": -0.6612352792617514,
+     "sd_excess_pct": 19.27563014791278,
+     "win_rate_vs_spy": 0.47358834244080145,
+     "months": 53,
+     "mean_monthly_excess_pct": 0.3217196521639868,
+     "t": 0.2907757173479471,
+     "mean_excess_pct_at_0.30_cost": 1.0654714168393231
+    }
+   }
   }
  }
 }
