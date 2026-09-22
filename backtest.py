@@ -215,7 +215,7 @@ def evaluate_price_conditions(symbol: str, prices: pd.DataFrame, *,
     session = sessions[0]
     result["session"] = session.date().isoformat()
     result["entry"] = float(prices.loc[session, "open"])
-    cut = prices.loc[prices.index < session]
+    cut = point_in_time_frame(prices, asof=session)
     if cut.empty:
         result.update(gate_failed="invalidation_level", detail="no prices before the decision session")
         return result
@@ -250,6 +250,44 @@ def evaluate_price_conditions(symbol: str, prices: pd.DataFrame, *,
         result.update(gate_failed="no_blocking_conflict", detail=verdict.reason)
         return result
     return result
+
+
+# --------------------------------------------------------------------------
+# prices as they stood: splits and dividends
+# --------------------------------------------------------------------------
+
+_OHLC = ["open", "high", "low", "close"]
+
+
+def point_in_time_frame(raw: pd.DataFrame, *, asof: pd.Timestamp) -> pd.DataFrame:
+    """Bars strictly before `asof`, adjusted only for splits that had already
+    happened by then -- what a pre-market decision on `asof` could see.
+
+    Alpha Vantage's `adjusted_close` is back-adjusted with EVERY later split
+    and dividend, which silently rewrites old price levels: NVDA at ~$1,000
+    before its 10:1 split reads as ~$100, a share a $1,000 account "could have
+    bought" but could not. Here the latest bar is always a real traded price,
+    and earlier bars are rescaled only by splits on or before it, so returns
+    and volatility are continuous and the price level is the true one."""
+    cut = raw.loc[raw.index < asof].copy()
+    if cut.empty or "split_coefficient" not in cut:
+        return cut
+    coef = cut["split_coefficient"].astype(float).where(lambda c: c > 0, 1.0)
+    # factor for a row = product of split coefficients strictly after it
+    after = coef[::-1].cumprod()[::-1].shift(-1).fillna(1.0)
+    cut[_OHLC] = cut[_OHLC].div(after, axis=0)
+    cut["volume"] = cut["volume"] * after
+    return cut
+
+
+def total_return_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    """OHLC scaled by `adjusted_close / close`: split- and dividend-adjusted.
+    Its LEVELS are hindsight, but its RATIOS between any two dates are exact
+    total returns -- which is all `settle_window` reads from it."""
+    out = raw.copy()
+    ratio = raw["adjusted_close"].astype(float) / raw["close"].astype(float)
+    out[_OHLC] = raw[_OHLC].mul(ratio, axis=0)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -381,6 +419,11 @@ def simulate(trials: Sequence[dict], prices: dict, benchmark: pd.DataFrame, *,
     this simulation's own trades). `cost_pct` (round trip, percent of
     notional) is charged on every trade.
 
+    `prices` are RAW traded prices (with `split_coefficient` and
+    `dividend_amount` when available): a split during a hold rescales shares,
+    entry and stop as the broker would, and a dividend is paid in cash to a
+    position held into its ex-date.
+
     Not modelled, and to be disclosed with any result: sector caps and the
     cash floor beyond settled cash, partial fills, and slippage past a stop
     beyond `cost_pct`."""
@@ -413,9 +456,28 @@ def simulate(trials: Sequence[dict], prices: dict, benchmark: pd.DataFrame, *,
                        "excess_pct": round(ret - bench_ret - cost_pct, 4)})
         del positions[sym]
 
+    dividends = 0.0
     for day in days:
         cash += sum(a for d, a in pending if d <= day)
         pending = [(d, a) for d, a in pending if d > day]
+
+        # Corporate actions on held names, before anything trades: a split
+        # rescales the position the way the broker does; a dividend is paid
+        # to a position held into its ex-date (not one bought that morning).
+        for sym, pos in positions.items():
+            px = prices[sym]
+            if day not in px.index:
+                continue
+            coef = float(px.loc[day].get("split_coefficient", 1.0) or 1.0)
+            if coef > 0 and coef != 1.0:
+                pos["shares"] *= coef
+                pos["entry"] /= coef
+                pos["stop"] /= coef
+                last_close[sym] = last_close.get(sym, pos["entry"] * coef) / coef
+            div = float(px.loc[day].get("dividend_amount", 0.0) or 0.0)
+            if div > 0 and pos["opened"] < day:
+                pending.append((day, pos["shares"] * div))
+                dividends += pos["shares"] * div
 
         equity_open = cash + sum(a for _, a in pending) + sum(
             p["shares"] * last_close.get(s, p["entry"]) for s, p in positions.items())
@@ -472,6 +534,7 @@ def simulate(trials: Sequence[dict], prices: dict, benchmark: pd.DataFrame, *,
         "total_return_pct": round((final / starting_cash - 1) * 100, 4),
         "benchmark_return_pct": round(bench_ret, 4),
         "max_drawdown_pct": round(max_dd, 4),
+        "dividends": round(dividends, 2),
         "trades": trades, "skipped": skipped,
         "open_positions": sorted(positions),
         "equity_curve": [(d.date().isoformat(), round(e, 2)) for d, e in equity_curve],

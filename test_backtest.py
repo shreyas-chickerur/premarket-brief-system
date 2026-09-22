@@ -392,3 +392,95 @@ def test_final_equity_is_starting_cash_plus_every_trades_pnl():
     r = B.simulate([_trial("AAA", px.index[0].date(), 30.0, 30.0)], {"AAA": px}, spy, starting_cash=1000)
     assert r["final_equity"] == pytest.approx(1000 + sum(t["pnl"] for t in r["trades"]))
     assert r["trades"][0]["pnl"] < r["trades"][0]["shares"] * 3.0      # costs are charged
+
+
+# --------------------------------------------------------------------------
+# data ingestion
+# --------------------------------------------------------------------------
+
+def test_news_ingest_refuses_an_article_outside_its_window():
+    import backtest_data as D
+    text = json.dumps({"feed": [{"time_published": "20250704T090000", "title": "t"}]})
+    with pytest.raises(ValueError):
+        D.check_news_window(text, "NOK", "2025-07-03")
+
+
+def test_news_ingest_accepts_a_payload_inside_its_window():
+    import backtest_data as D
+    text = json.dumps({"feed": [{"time_published": "20250629T000000", "title": "t"},
+                                {"time_published": "20250612T000000", "title": "u"}]})
+    D.check_news_window(text, "NOK", "2025-07-03")
+
+
+def test_a_preview_envelope_without_a_data_url_is_refused():
+    import backtest_data as D
+    with pytest.raises(ValueError):
+        D.payload_text(json.dumps({"preview": True, "sample_data": "a,b"}))
+
+
+def test_news_ingest_tolerates_alpha_vantages_inclusive_time_to_boundary():
+    import backtest_data as D
+    text = json.dumps({"feed": [{"time_published": "20231017T000000", "title": "t"}]})
+    D.check_news_window(text, "OXY", "2023-10-17")
+
+
+def test_news_requests_end_before_the_decision_day():
+    import backtest_data as D
+    p = D.news_window_params("OXY", date(2023, 10, 17))
+    assert p["time_from"] == "20230926T0000" and p["time_to"] == "20231016T2359"
+
+
+# --------------------------------------------------------------------------
+# splits and dividends, point in time
+# --------------------------------------------------------------------------
+
+def _raw_with_split():
+    """A 2:1 split effective 2025-01-08: raw price halves, split_coefficient 2."""
+    idx = pd.to_datetime(["2025-01-06", "2025-01-07", "2025-01-08", "2025-01-09"])
+    return pd.DataFrame({"open": [100.0, 102.0, 51.0, 52.0], "high": [101.0, 103.0, 52.0, 53.0],
+                         "low": [99.0, 101.0, 50.0, 51.0], "close": [100.0, 102.0, 51.0, 52.0],
+                         "adjusted_close": [50.0, 51.0, 51.0, 52.0], "volume": [10, 10, 20, 20],
+                         "dividend_amount": [0.0, 0.0, 0.0, 0.0],
+                         "split_coefficient": [1.0, 1.0, 2.0, 1.0]}, index=idx)
+
+
+def test_point_in_time_frame_adjusts_only_for_splits_already_known():
+    raw = _raw_with_split()
+    before = B.point_in_time_frame(raw, asof=pd.Timestamp("2025-01-08"))
+    after = B.point_in_time_frame(raw, asof=pd.Timestamp("2025-01-10"))
+    assert list(before["close"]) == [100.0, 102.0]            # the split is not yet known
+    assert list(after["close"]) == [50.0, 51.0, 51.0, 52.0]   # known: history rescaled
+    assert after["close"].iloc[-1] == raw["close"].iloc[-1]   # the latest bar stays a real price
+
+
+def test_total_return_frame_scales_ohlc_by_the_adjustment_ratio():
+    tr = B.total_return_frame(_raw_with_split())
+    assert list(tr["close"]) == [50.0, 51.0, 51.0, 52.0]
+    assert tr["open"].iloc[0] == 50.0
+
+
+def test_simulate_carries_a_position_through_a_split_like_a_real_account():
+    raw = _raw_with_split()
+    idx = pd.bdate_range("2025-01-06", periods=30)
+    px = pd.DataFrame({"open": [100.0, 102.0] + [51.0] * 28, "high": [101.0, 103.0] + [52.0] * 28,
+                       "low": [99.0, 101.0] + [50.0] * 28, "close": [100.0, 102.0] + [51.0] * 28,
+                       "volume": 10, "dividend_amount": 0.0,
+                       "split_coefficient": [1.0, 1.0, 2.0] + [1.0] * 27}, index=idx)
+    spy = _bars("2025-01-06", [100.0] * 30)
+    plan = dict(PLAN, stop_fraction=0.10)
+    r = B.simulate([_trial("AAA", idx[0].date(), sized_at=100.0, entry=100.0, plan=plan)],
+                   {"AAA": px}, spy, starting_cash=100_000, sizing_equity=100_000)
+    t = r["trades"][0]
+    assert t["exit_reason"] == "horizon"                     # the halving is not a stop-out
+    assert t["pnl"] == pytest.approx(t["shares"] * 51.0 - t["shares"] / 2 * 100.0 - (t["shares"] / 2 * 100.0 + t["shares"] * 51.0) / 2 * 0.001, rel=1e-3)
+
+
+def test_simulate_credits_dividends_on_a_held_position():
+    idx = pd.bdate_range("2025-01-06", periods=30)
+    px = pd.DataFrame({"open": 50.0, "high": 50.5, "low": 49.9, "close": 50.0, "volume": 10,
+                       "dividend_amount": [0.0] * 5 + [1.0] + [0.0] * 24,
+                       "split_coefficient": 1.0}, index=idx)
+    spy = _bars("2025-01-06", [100.0] * 30)
+    r = B.simulate([_trial("AAA", idx[0].date(), 50.0, 50.0)], {"AAA": px}, spy, starting_cash=1000)
+    t = r["trades"][0]
+    assert r["final_equity"] == pytest.approx(1000 + t["pnl"] + t["shares"] * 1.0)
