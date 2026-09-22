@@ -1397,13 +1397,36 @@ a field that drifted out of sync between what got hand-written and what
 those functions expect would not raise, it would just silently stop
 contributing to the optimization findings.
 
-`ledger.run_entry(log)` pins the exact five-field schema
+`ledger.run_entry(log)` pins the exact schema
 (`RUN_ENTRY_SCHEMA_FIELDS`) and is the only sanctioned way to build the
 payload now — `DAILY_PROCEDURE.md` Stage 6 calls it directly rather than
 describing the shape in prose. Duck-typed to accept either a
 `runlog.RunLog` (via `.manifest()`) or a plain manifest `dict`, matching
 the same import-cycle-avoidance pattern `to_washsale_trades` already
 uses for `washsale`.
+
+**22 September 2026 — `metrics` joined that schema, because the drift it
+was built to prevent had happened anyway, through a field that was never
+there rather than one that got renamed.** `runlog.stage0_capacity_forecast`
+calibrates from "the most recent run in `history` that recorded a
+BOOTSTRAP-path `stage0_read_cost` metric", and step 9b passes it
+`history=journal.runs` — this payload. `metrics` was not in the schema, so
+`h.get("metrics", {})` was `{}` on every run ever recorded, `seconds_per_file`
+was unconditionally `None`, and the check returned its "no prior run has
+recorded a bootstrap-path stage0_read_cost observation yet" info branch
+forever, however faithfully step 9b wrote the observation to each manifest.
+A forecast built to give a human several days' notice before Stage 0 blows
+its wall-clock deadline had therefore never been capable of firing once.
+Caught by the 22 September watchdog review pass, from the contradiction
+between that check's wording on the 22 September manifest and the real
+bootstrap observation the 21 September run had recorded (28 files,
+1975065ms): read through `journal.runs` it produced the info branch; read
+from the manifest it projects 2822s against the 2700s deadline and warns.
+`metrics` is a deliberate PROJECTION — only `stage0_read_cost`, the one
+thing anything reads back out of history — for the same reason `decisions`
+and `stages` are trimmed and `calls` is excluded: a run's full metrics block
+carries the correlation matrix, the evidence verdict and both funnels, which
+every journal file and every state bundle would otherwise carry forever.
 
 `test_run_entry_round_trips_through_the_journal_into_find_optimizations`
 is the test that matters most here: it builds real `run_entry` payloads

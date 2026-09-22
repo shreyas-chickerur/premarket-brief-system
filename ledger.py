@@ -844,7 +844,8 @@ _ROBINHOOD_TOOLS = (
     "cancel_equity_order",
 )
 
-RUN_ENTRY_SCHEMA_FIELDS = ("run_id", "health", "duration_ms", "decisions", "stages", "brokerage_ok")
+RUN_ENTRY_SCHEMA_FIELDS = ("run_id", "health", "duration_ms", "decisions", "stages",
+                           "brokerage_ok", "metrics")
 
 
 def run_entry(log: Any) -> dict:
@@ -904,6 +905,38 @@ def run_entry(log: Any) -> dict:
                                     any(t in missing for t in _ROBINHOOD_TOOLS))
                 break
 
+    # metrics (added 22 September 2026): a TRIMMED projection, carrying only
+    # the observations a later run actually reads back out of history --
+    # today exactly `stage0_read_cost`. `runlog.stage0_capacity_forecast`
+    # documents itself as calibrating from "the most recent run in `history`
+    # that recorded a BOOTSTRAP-path `stage0_read_cost` metric", and
+    # `DAILY_PROCEDURE.md` step 9b passes it `history=journal.runs` -- which
+    # is exactly this payload. Before this, `metrics` was not part of the
+    # pinned schema at all, so `h.get("metrics", {})` was `{}` on every run
+    # ever recorded and `seconds_per_file` was unconditionally `None`: the
+    # forecast returned its "no prior run has recorded a bootstrap-path
+    # stage0_read_cost observation yet" info branch forever, no matter how
+    # many observations step 9b faithfully wrote to each manifest. A check
+    # built to give a human several days' notice before Stage 0 blows its
+    # wall-clock deadline could therefore never fire once -- the precise
+    # silent-drift failure this function's own docstring above was written
+    # to guard against, reached through a field that was missing rather
+    # than renamed. Verified against the real 21 September observation
+    # (files_materialised=28, duration_ms=1975065, path="bootstrap"): read
+    # through `journal.runs` it produced the info branch; read from the
+    # manifest it projects 2822s against the 2700s deadline and warns.
+    #
+    # Deliberately a projection and not `m.get("metrics", {})` wholesale,
+    # for the same reason `decisions`/`stages` are trimmed and `calls` is
+    # excluded: a run's full metrics block carries the correlation matrix,
+    # the evidence verdict and both funnels, none of which anything reads
+    # back out of history, all of which every journal file and every state
+    # bundle would then have to carry forever.
+    metrics = {}
+    stage0_read_cost = m.get("metrics", {}).get("stage0_read_cost")
+    if stage0_read_cost is not None:
+        metrics["stage0_read_cost"] = stage0_read_cost
+
     return {
         "run_id": m.get("run_id", ""),
         "health": m.get("health", ""),
@@ -911,6 +944,7 @@ def run_entry(log: Any) -> dict:
         "decisions": m.get("decisions", []),
         "stages": m.get("stages", []),
         "brokerage_ok": brokerage_ok,
+        "metrics": metrics,
     }
 
 

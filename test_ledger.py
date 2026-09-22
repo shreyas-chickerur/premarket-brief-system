@@ -381,7 +381,8 @@ def test_run_entry_accepts_a_real_runlog_via_manifest():
 def test_run_entry_defaults_missing_fields_rather_than_raising():
     entry = L.run_entry({})
     assert entry == {"run_id": "", "health": "", "duration_ms": 0,
-                     "decisions": [], "stages": [], "brokerage_ok": None}
+                     "decisions": [], "stages": [], "brokerage_ok": None,
+                     "metrics": {}}
 
 
 def test_run_entry_round_trips_through_the_journal_into_find_optimizations():
@@ -405,6 +406,91 @@ def test_run_entry_round_trips_through_the_journal_into_find_optimizations():
     journal = L.fold_journal(entries)
     findings = R.find_optimizations(journal.runs)
     assert any(f["kind"] == "gate_balance" for f in findings)
+
+
+# ------------------------------------- stage0_read_cost reaches the forecast
+
+def _manifest_with_stage0_read_cost(**kw):
+    m = _run_log_with()
+    m["metrics"] = {"stage0_read_cost": R.stage0_read_cost_metric(**kw)}
+    return m
+
+
+def test_run_entry_carries_stage0_read_cost_into_the_journal_payload():
+    """Fails before 22 September 2026: `metrics` was not in the pinned
+    schema at all, so the observation step 9b faithfully wrote to every
+    manifest was dropped on the way into the journal."""
+    manifest = _manifest_with_stage0_read_cost(
+        files_materialised=28, duration_ms=1975065, path="bootstrap")
+    entry = L.run_entry(manifest)
+    assert entry["metrics"]["stage0_read_cost"]["files_materialised"] == 28
+    assert entry["metrics"]["stage0_read_cost"]["path"] == "bootstrap"
+
+
+def test_run_entry_metrics_is_a_projection_not_the_whole_block():
+    """Only what a later run reads back out of history travels -- the rest
+    of a run's metrics would otherwise be carried by every journal file and
+    every state bundle forever."""
+    manifest = _run_log_with()
+    manifest["metrics"] = {
+        "stage0_read_cost": R.stage0_read_cost_metric(
+            files_materialised=28, duration_ms=1975065, path="bootstrap"),
+        "correlation_concentration": {"n_obs": 68, "n_symbols": 38},
+        "universe_funnel": {"universe_size": 251},
+        "evidence_verdict": {"decision": "collect"},
+    }
+    entry = L.run_entry(manifest)
+    assert set(entry["metrics"]) == {"stage0_read_cost"}
+
+
+def test_run_entry_omits_stage0_read_cost_when_the_run_recorded_none():
+    assert L.run_entry(_run_log_with())["metrics"] == {}
+
+
+def test_stage0_forecast_sees_a_bootstrap_observation_through_the_journal():
+    """The guarantee that actually matters, and the one that was broken:
+    DAILY_PROCEDURE.md step 9b passes `history=journal.runs`, so an
+    observation must survive the round trip from manifest, through
+    run_entry, through a journal file, back out of fold_journal, and still
+    calibrate the forecast.
+
+    Before this fix the identical 21 September observation
+    (28 files, 1975065ms, bootstrap) produced the "no prior run has
+    recorded a bootstrap-path stage0_read_cost observation yet" info
+    branch on every single run -- a check built to warn a human several
+    days ahead of a Stage 0 deadline breach could never fire at all.
+    """
+    manifest = _manifest_with_stage0_read_cost(
+        files_materialised=28, duration_ms=1975065, path="bootstrap")
+    journal = L.fold_journal([_file("journal-2026-09-21.json",
+        [{"run_id": "r", "kind": "run", "payload": L.run_entry(manifest)}])])
+
+    check = R.stage0_capacity_forecast(
+        journal_file_count=30, other_required_files=10,
+        wall_clock_deadline_seconds=R.DEFAULT_WALL_CLOCK_DEADLINE_SECONDS,
+        history=journal.runs)
+
+    # 1975065ms / 28 files = ~70.5 s/file; 40 files projects ~2822s, past 2700s.
+    assert check.severity == "warn" and not check.passed
+    assert check.value["seconds_per_file"] == 70.54
+    assert check.value["required_files_today"] == 40
+
+
+def test_stage0_forecast_still_ignores_a_bundle_observation_through_the_journal():
+    """The 21 September rule survives the round trip too: a bundle-path
+    observation reaching the forecast through the journal must still be
+    skipped, or carrying `metrics` would have re-opened exactly the
+    daily-false-warn defect commit a794571 closed."""
+    manifest = _manifest_with_stage0_read_cost(
+        files_materialised=1, duration_ms=356060, path="bundle")
+    journal = L.fold_journal([_file("journal-2026-09-22.json",
+        [{"run_id": "r", "kind": "run", "payload": L.run_entry(manifest)}])])
+
+    check = R.stage0_capacity_forecast(
+        journal_file_count=30, other_required_files=10,
+        wall_clock_deadline_seconds=R.DEFAULT_WALL_CLOCK_DEADLINE_SECONDS,
+        history=journal.runs)
+    assert check.severity == "info" and check.value is None
 
 
 # ------------------------------------------------------------ brokerage_ok
