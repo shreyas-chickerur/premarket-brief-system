@@ -484,3 +484,70 @@ def test_simulate_credits_dividends_on_a_held_position():
     r = B.simulate([_trial("AAA", idx[0].date(), 50.0, 50.0)], {"AAA": px}, spy, starting_cash=1000)
     t = r["trades"][0]
     assert r["final_equity"] == pytest.approx(1000 + t["pnl"] + t["shares"] * 1.0)
+
+
+# --------------------------------------------------------------------------
+# calibration of the two_sources proxy against real judgment (plan 6b)
+# --------------------------------------------------------------------------
+
+def _windows(n_per_bucket=5):
+    rows = []
+    for year in (2023, 2024, 2025, 2026):
+        for articles in (0, 3, 40):
+            for i in range(n_per_bucket):
+                rows.append({"symbol": f"S{i}", "decision_date": f"{year}-03-0{i + 1}", "articles": articles})
+    return rows
+
+
+def test_calibration_sample_is_reproducible_and_covers_every_stratum():
+    a = B.calibration_sample(_windows(), n=12, seed=3)
+    assert a == B.calibration_sample(_windows(), n=12, seed=3)
+    strata = {(r["decision_date"][:4], B.density_bucket(r["articles"])) for r in a}
+    assert len(strata) == 8          # 4 years x {sparse, dense}; empty windows are never drawn
+
+
+def test_calibration_sample_skips_windows_with_no_articles_to_judge():
+    a = B.calibration_sample(_windows(), n=40, seed=3)
+    assert all(r["articles"] > 0 for r in a)
+
+
+def test_judge_packet_holds_only_what_existed_before_the_decision():
+    raw = {"feed": [
+        {"title": "before", "time_published": "20250620T120000", "source": "A", "summary": "s",
+         "ticker_sentiment": [{"ticker": "NOK", "relevance_score": "0.9"}]},
+        {"title": "on the day", "time_published": "20250703T080000", "source": "B", "summary": "s",
+         "ticker_sentiment": [{"ticker": "NOK", "relevance_score": "0.9"}]},
+        {"title": "other ticker", "time_published": "20250621T120000", "source": "C", "summary": "s",
+         "ticker_sentiment": [{"ticker": "VZ", "relevance_score": "0.9"}]},
+    ]}
+    p = B.judge_packet(raw, symbol="NOK", decision=date(2025, 7, 3))
+    assert [a["title"] for a in p["articles"]] == ["before"]
+    assert "price" not in json.dumps(p).lower()
+
+
+def test_agreement_counts_the_dangerous_direction_separately():
+    proxy = {"a": True, "b": True, "c": False, "d": True}
+    judge = {"a": True, "b": False, "c": False, "d": False}
+    r = B.agreement(proxy, judge)
+    assert r["n"] == 4
+    assert r["agreement"] == 0.5
+    assert r["false_clear_rate"] == pytest.approx(2 / 3)      # of the proxy's clears, 2 of 3 wrong
+    assert r["false_reject_rate"] == 0.0
+
+
+def test_a_rate_limit_refusal_is_waited_out_not_stored(monkeypatch):
+    import backtest_data as D
+    replies = iter([json.dumps({"Information": "Minute-level rate limit exceed."}),
+                    json.dumps({"symbol": "OXY", "quarterlyEarnings": []})])
+    monkeypatch.setattr(D, "_download", lambda url: next(replies))
+    slept = []
+    text = D._get({"function": "EARNINGS"}, key="k", per_minute=10_000, sleep=slept.append)
+    assert json.loads(text)["symbol"] == "OXY"
+    assert 61.0 in slept
+
+
+def test_a_non_rate_limit_refusal_raises(monkeypatch):
+    import backtest_data as D
+    monkeypatch.setattr(D, "_download", lambda url: json.dumps({"Error Message": "Invalid API call."}))
+    with pytest.raises(RuntimeError):
+        D._get({"function": "EARNINGS"}, key="k", per_minute=10_000, sleep=lambda s: None)

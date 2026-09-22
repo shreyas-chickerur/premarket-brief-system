@@ -539,3 +539,86 @@ def simulate(trials: Sequence[dict], prices: dict, benchmark: pd.DataFrame, *,
         "open_positions": sorted(positions),
         "equity_curve": [(d.date().isoformat(), round(e, 2)) for d, e in equity_curve],
     }
+
+
+# --------------------------------------------------------------------------
+# calibrating the two_sources proxy against real judgment (plan section 6b)
+# --------------------------------------------------------------------------
+
+def density_bucket(articles: int) -> str:
+    """How much news a window holds -- the archive thins out going back in
+    time, so agreement has to be measured across densities, not on the
+    easy, news-rich recent windows alone."""
+    if articles <= 0:
+        return "none"
+    if articles <= 5:
+        return "sparse"
+    if articles <= 30:
+        return "moderate"
+    return "dense"
+
+
+def calibration_sample(windows: Sequence[dict], *, n: int, seed: int) -> list[dict]:
+    """A seeded draw of `n` windows spread across (year, news density)
+    strata, round-robin, so each stratum is represented before any repeats.
+    Windows with no articles are left out: there is nothing to judge, and
+    both the proxy and a reader reject them trivially."""
+    strata: dict = {}
+    for w in windows:
+        if w.get("articles", 0) <= 0:
+            continue
+        strata.setdefault((str(w["decision_date"])[:4], density_bucket(w["articles"])), []).append(w)
+    shuffled = {k: pd.Series(range(len(v))).sample(frac=1, random_state=seed).tolist()
+                for k, v in strata.items()}
+    out, round_ = [], 0
+    keys = sorted(strata)
+    while len(out) < n and any(round_ < len(shuffled[k]) for k in keys):
+        for k in keys:
+            if round_ < len(shuffled[k]) and len(out) < n:
+                out.append(strata[k][shuffled[k][round_]])
+        round_ += 1
+    return out
+
+
+def judge_packet(raw: Optional[dict], *, symbol: str, decision: date,
+                 lookback_days: int = DEFAULT_HORIZON_DAYS, summary_chars: int = 400) -> dict:
+    """What a judge sees for one window: the articles about `symbol`
+    published in the lookback strictly before `decision` -- title, publisher,
+    date, the feed's relevance score and a trimmed summary. No prices, no
+    outcome, no proxy verdict: the judgment has to be made blind to all
+    three, or the calibration measures agreement with hindsight."""
+    sym, lo = symbol.upper(), decision - timedelta(days=lookback_days)
+    arts = []
+    for e in (raw or {}).get("feed", []):
+        match = next((t for t in e.get("ticker_sentiment", ())
+                      if str(t.get("ticker", "")).upper() == sym), None)
+        try:
+            published = datetime.strptime(str(e.get("time_published", ""))[:15], "%Y%m%dT%H%M%S").date()
+        except ValueError:
+            continue
+        if match is None or not (lo <= published < decision):
+            continue
+        arts.append({"title": e.get("title", ""), "publisher": e.get("source", "unknown"),
+                     "published": published.isoformat(),
+                     "relevance_to_symbol": match.get("relevance_score"),
+                     "summary": str(e.get("summary", ""))[:summary_chars]})
+    arts.sort(key=lambda a: a["published"], reverse=True)
+    return {"symbol": sym, "decision_date": decision.isoformat(), "articles": arts}
+
+
+def agreement(proxy: dict, judge: dict) -> dict:
+    """Agreement between proxy and judge verdicts over the windows both
+    judged (`{window_id: cleared}`). `false_clear_rate` -- of the windows the
+    proxy CLEARED, the share the judge rejected -- is reported on its own:
+    it is the direction that inflates a backtest's apparent edge."""
+    keys = sorted(set(proxy) & set(judge))
+    agree = sum(proxy[k] == judge[k] for k in keys)
+    p_clear = [k for k in keys if proxy[k]]
+    p_reject = [k for k in keys if not proxy[k]]
+    return {
+        "n": len(keys),
+        "agreement": agree / len(keys) if keys else float("nan"),
+        "false_clear_rate": (sum(not judge[k] for k in p_clear) / len(p_clear)) if p_clear else float("nan"),
+        "false_reject_rate": (sum(judge[k] for k in p_reject) / len(p_reject)) if p_reject else float("nan"),
+        "disagreements": [k for k in keys if proxy[k] != judge[k]],
+    }

@@ -107,20 +107,39 @@ def ingest(kind: str, symbol: str, result_file: str, window: str = "") -> Path:
 # --------------------------------------------------------------------------
 
 _last_call = [0.0]
+RATE_LIMIT_WORDS = ("rate limit", "burst pattern", "per minute", "requests per")
 
 
-def _get(params: dict, *, key: str, per_minute: int) -> str:
-    wait = 60.0 / per_minute - (time.monotonic() - _last_call[0])
-    if wait > 0:
-        time.sleep(wait)
-    _last_call[0] = time.monotonic()
-    text = _download(API + "?" + urllib.parse.urlencode(dict(params, apikey=key)))
-    if text.lstrip().startswith("{"):
+class RateLimited(RuntimeError):
+    pass
+
+
+def _get(params: dict, *, key: str, per_minute: int, retries: int = 6,
+         backoff_seconds: float = 61.0, sleep=time.sleep) -> str:
+    """One paced call. Alpha Vantage refuses both bursts (more than 5 a
+    second) and the plan's per-minute cap with a 200 and a one-key JSON
+    message; a rate-limit refusal is waited out and retried, anything else
+    is raised. A refusal is never returned as data, so it can never be
+    written to disk in place of a real response."""
+    for attempt in range(retries + 1):
+        wait = 60.0 / per_minute - (time.monotonic() - _last_call[0])
+        if wait > 0:
+            sleep(wait)
+        _last_call[0] = time.monotonic()
+        text = _download(API + "?" + urllib.parse.urlencode(dict(params, apikey=key)))
+        if not text.lstrip().startswith("{"):
+            return text
         obj = json.loads(text)
-        for k in ("Note", "Information", "Error Message"):
-            if k in obj and len(obj) == 1:
-                raise RuntimeError(f"Alpha Vantage refused {params.get('function')}: {obj[k]}")
-    return text
+        refusal = next((obj[k] for k in ("Note", "Information", "Error Message")
+                        if k in obj and len(obj) == 1), None)
+        if refusal is None:
+            return text
+        if any(w in str(refusal).lower() for w in RATE_LIMIT_WORDS) and attempt < retries:
+            sleep(backoff_seconds)
+            continue
+        raise (RateLimited if any(w in str(refusal).lower() for w in RATE_LIMIT_WORDS)
+               else RuntimeError)(f"Alpha Vantage refused {params.get('function')}: {refusal}")
+    raise RateLimited("unreachable")
 
 
 def news_window_params(symbol: str, decision: date, lookback_days: int = 21) -> dict:
@@ -182,9 +201,10 @@ def main(argv: list[str]) -> int:
         symbols = argv[1:] or universe["surfaced"]["symbols"] + universe["sampled"]["symbols"]
         for s in symbols:
             try:
-                print(s, fetch_symbol(s, key=key, start=start, end=end))
+                print(s, fetch_symbol(s, key=key, start=start, end=end,
+                                      per_minute=int(os.environ.get("AV_PER_MINUTE", "70"))), flush=True)
             except Exception as e:           # one bad symbol must not stop the rest
-                print(s, "FAILED", e, file=sys.stderr)
+                print(s, "FAILED", str(e).replace(key, "<key>"), file=sys.stderr)
         return 0
     print("usage: backtest_data.py ingest <earnings|prices|news> <SYM> <result-file> [decision-date]\n"
           "       backtest_data.py fetch [SYM ...]", file=sys.stderr)
