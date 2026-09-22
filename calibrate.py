@@ -78,6 +78,27 @@ def write_packets() -> list[str]:
     return names
 
 
+def write_population_packets() -> list[str]:
+    """Plan 6c: a blind packet for every window that cleared the proxy AND
+    conditions 3-5 in the last run_backtest.py results. Judges write
+    data/bt/judged/verdicts/<name>.json in the same shape as calibration."""
+    log = json.loads((D.ROOT / "results.json").read_text())["decision_log"]
+    out_dir = D.ROOT / "judged" / "packets"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    names = []
+    for row in log:
+        if row["gate_failed"] is not None:
+            continue
+        sym, decision = row["symbol"], row["decision_date"]
+        raw = json.loads(D.path_for("news", sym, decision).read_text())
+        packet = B.judge_packet(raw, symbol=sym, decision=date.fromisoformat(decision), max_articles=60)
+        packet["rule"] = RULE.format(symbol=sym, decision=decision)
+        name = f"{sym}-{decision}"
+        (out_dir / f"{name}.json").write_text(json.dumps(packet, indent=1))
+        names.append(name)
+    return names
+
+
 def score() -> dict:
     fz = _frozen()
     ts = json.loads((HERE / "backtest_universe.json").read_text())["gate"]["two_sources"]
@@ -102,6 +123,8 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "packets":
         print("\n".join(write_packets()))
+    elif cmd == "population":
+        print("\n".join(write_population_packets()))
     elif cmd == "score":
         print(json.dumps(score(), indent=1))
     else:

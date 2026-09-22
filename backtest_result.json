@@ -1,0 +1,41 @@
+{
+ "run_on": "2026-09-22",
+ "method": "Frozen universe and pre-registration (backtest_universe.json); two_sources decided by independent blind Claude judges on every window clearing the proxy and conditions 3-5 (backtest_calibration_result.json, plan 6c).",
+ "funnel": {
+  "two_sources": 1977,
+  "cleared": 499,
+  "risk_sized": 264,
+  "no_blocking_conflict": 86,
+  "invalidation_level": 7
+ },
+ "symbols_run": 202,
+ "symbols_missing": 41,
+ "evidence": {
+  "n": 499,
+  "mean_excess_pct": -0.0329,
+  "t_stat": -0.055,
+  "verdict": "inconclusive",
+  "decision": "collect",
+  "sample_needed": 891
+ },
+ "replay_1000": {
+  "final_equity": 1487.32,
+  "total_return_pct": 48.7323,
+  "benchmark_return_pct": 101.2228,
+  "max_drawdown_pct": 18.3271,
+  "dividends": 55.8,
+  "trades": 267,
+  "skipped": 232,
+  "span": [
+   "2023-01-03",
+   "2026-09-22"
+  ]
+ },
+ "disclosures": [
+  "38 symbols have no Alpha Vantage earnings history (mostly delisted/acquired) and 3 tickers were invalid: a survivorship gap in the data source.",
+  "News archive density rises steeply toward 2026, so 2025-2026 dominate the judged sample (380 of 498 book trades).",
+  "The surfaced stratum (+0.97% mean excess, n=136) was chosen by the live system in 2026 and is hindsight-exposed; the survivorship-free sampled stratum is -0.56% (n=362).",
+  "An evidence line from the invalid v1 proxy was printed once before judging (see backtest_calibration_result.json).",
+  "Not modelled: sector caps, cash floor beyond settled cash, slippage past stops beyond the 0.10% cost."
+ ]
+}

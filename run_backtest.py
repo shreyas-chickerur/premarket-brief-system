@@ -40,7 +40,10 @@ def load_prices(symbol: str) -> pd.DataFrame | None:
     return df[~df.index.duplicated()]
 
 
-def run(symbols: list[str] | None = None) -> dict:
+def run(symbols: list[str] | None = None, *, judged: bool = False) -> dict:
+    """`judged=True` is plan 6c: a window that clears the proxy and conditions
+    3-5 counts only if its independent judge (data/bt/judged/verdicts/) also
+    cleared it -- a missing verdict is `judge_missing`, never a clear."""
     frozen = json.loads((HERE / "backtest_universe.json").read_text())
     uni, win, gate, reg = frozen["universe"], frozen["windows"], frozen["gate"], frozen["preregistration"]
     start, end = date.fromisoformat(win["decision_dates_from"]), date.fromisoformat(win["decision_dates_through"])
@@ -91,8 +94,15 @@ def run(symbols: list[str] | None = None) -> dict:
                                             registry=washsale.Registry())
             row.update({k: v[k] for k in ("session", "sized_at", "entry", "stop_price", "shares", "detail")})
             row["gate_failed"] = v["gate_failed"]
+            if judged and not v["gate_failed"]:
+                vf = D.ROOT / "judged" / "verdicts" / f"{sym}-{d.isoformat()}.json"
+                if not vf.exists():
+                    row["gate_failed"] = "judge_missing"
+                elif not json.loads(vf.read_text()).get("cleared"):
+                    row["gate_failed"] = "two_sources"
+                    row["judge_rejected"] = True
             log.append(row)
-            if v["gate_failed"]:
+            if row["gate_failed"]:
                 continue
             trials.append({"symbol": sym, "session": v["session"], "sized_at": v["sized_at"],
                            "entry": v["entry"], "plan": v["plan"]})
@@ -142,8 +152,9 @@ def summary(r: dict) -> str:
 
 
 if __name__ == "__main__":
-    res = run(sys.argv[1:] or None)
-    out = D.ROOT / "results.json"
+    args = [a for a in sys.argv[1:] if a != "--judged"]
+    res = run(args or None, judged="--judged" in sys.argv)
+    out = D.ROOT / ("results-judged.json" if "--judged" in sys.argv else "results.json")
     out.write_text(json.dumps(res, indent=1, default=str))
     print(summary(res))
     print(f"full results: {out}")
