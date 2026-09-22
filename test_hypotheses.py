@@ -87,3 +87,66 @@ def test_monthly_t_clusters_trades_by_entry_month():
     r = H.monthly_t(outs)
     assert r["months"] == 3
     assert r["mean_monthly_excess_pct"] == pytest.approx((3.0 + 1.0 + 5.0) / 3)
+
+
+# --------------------------------------------------------------------------
+# round 2: insiders and Congress
+# --------------------------------------------------------------------------
+
+def _ins(*rows):
+    return {"data": [dict(zip(("transaction_date", "executive", "executive_title", "acquisition_or_disposal",
+                               "shares", "share_price", "security_type"), r)) for r in rows]}
+
+
+def test_awards_and_exercise_and_sell_are_not_open_market_buys():
+    raw = _ins(("2024-01-10", "A", "CEO", "A", "1000", "0.0", "Common Stock"),          # award
+               ("2024-01-10", "B", "CFO", "A", "1000", "20.0", "Common Stock"),         # exercise...
+               ("2024-01-10", "B", "CFO", "D", "1000", "25.0", "Common Stock"),         # ...and sell
+               ("2024-01-11", "C", "Director", "A", "500", "20.0", "Common Stock"))     # real buy
+    assert [b["executive"] for b in H.open_market_buys(raw)] == ["C"]
+
+
+def test_a_preview_envelope_yields_no_insider_buys():
+    assert H.open_market_buys({"preview": True, "sample_data": "x"}) == []
+
+
+def test_an_insider_cluster_enters_only_after_the_form4_lag():
+    px = _px([10.0] * 120)
+    raw = _ins(("2024-01-10", "A", "Director", "A", "500", "20.0", "Common Stock"),
+               ("2024-01-15", "B", "CFO", "A", "500", "20.0", "Common Stock"))
+    t = H.insider_trials("X", raw, px, mode="cluster", horizon_days=63, start=date(2024, 1, 1), end=date(2024, 12, 31))
+    assert len(t) == 1
+    assert t[0]["entry_session"] == pd.Timestamp("2024-01-19")      # Mon 15th + 4 business days
+
+
+def test_a_single_insider_is_not_a_cluster():
+    px = _px([10.0] * 120)
+    raw = _ins(("2024-01-10", "A", "Director", "A", "500", "20.0", "Common Stock"),
+               ("2024-01-15", "A", "Director", "A", "500", "20.0", "Common Stock"))
+    assert H.insider_trials("X", raw, px, mode="cluster", horizon_days=63,
+                            start=date(2024, 1, 1), end=date(2024, 12, 31)) == []
+
+
+def test_large_officer_buy_needs_both_size_and_an_officer_title():
+    px = _px([10.0] * 120)
+    big_dir = _ins(("2024-01-10", "A", "Director", "A", "10000", "20.0", "Common Stock"))
+    big_ceo = _ins(("2024-01-10", "A", "President & CEO", "A", "10000", "20.0", "Common Stock"))
+    kw = dict(mode="large_officer", horizon_days=63, start=date(2024, 1, 1), end=date(2024, 12, 31))
+    assert H.insider_trials("X", big_dir, px, **kw) == []
+    assert len(H.insider_trials("X", big_ceo, px, **kw)) == 1
+
+
+def test_congress_enters_the_session_after_the_filing_not_the_trade():
+    px = _px([10.0] * 120)
+    raw = {"trades": [{"transaction_type": "BUY", "transaction_date": "2024-01-02",
+                       "filed_date": "2024-02-06", "amount_min": "15001.00"}]}
+    t = H.congress_trials("X", raw, px, horizon_days=63, start=date(2024, 1, 1), end=date(2024, 12, 31))
+    assert t[0]["entry_session"] == pd.Timestamp("2024-02-07")
+
+
+def test_congress_sales_and_small_amounts_are_filtered():
+    px = _px([10.0] * 120)
+    raw = {"trades": [{"transaction_type": "SELL", "filed_date": "2024-02-06", "amount_min": "50001"},
+                      {"transaction_type": "BUY", "filed_date": "2024-02-06", "amount_min": "1001"}]}
+    assert H.congress_trials("X", raw, px, horizon_days=63, start=date(2024, 1, 1), end=date(2024, 12, 31),
+                             min_amount=15000) == []

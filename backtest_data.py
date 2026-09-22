@@ -34,7 +34,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent / "data" / "bt"
 API = "https://www.alphavantage.co/query"
-KINDS = ("earnings", "prices", "news")
+KINDS = ("earnings", "prices", "news", "insider", "congress")
 
 
 def path_for(kind: str, symbol: str, window: str = "") -> Path:
@@ -45,6 +45,10 @@ def path_for(kind: str, symbol: str, window: str = "") -> Path:
         return ROOT / "prices" / f"{sym}.csv"
     if kind == "news":
         return ROOT / "news" / f"{sym}-{window}.json"
+    if kind in ("insider", "congress"):
+        return ROOT / kind / f"{sym}.json"
+    if kind in ("insider", "congress"):
+        return ROOT / kind / f"{sym}.json"
     return ROOT / "earnings" / f"{sym}.json"
 
 
@@ -185,9 +189,57 @@ def fetch_symbol(symbol: str, *, key: str, start: date, end: date, per_minute: i
     return done
 
 
+def fetch_activity(symbol: str, *, key: str, per_minute: int = 70) -> dict:
+    """Insider (Form 4) and congressional (STOCK Act) trading history for one
+    symbol -- the full history in one call each, skipping what is on disk."""
+    done = {}
+    for kind, fn in (("insider", "INSIDER_TRANSACTIONS"), ("congress", "CONGRESS_TRADES")):
+        out = path_for(kind, symbol)
+        if not out.exists():
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(_get({"function": fn, "symbol": symbol.upper()}, key=key, per_minute=per_minute))
+        done[kind] = str(out)
+    return done
+
+
+def fetch_activity(symbol: str, *, key: str, per_minute: int = 70) -> dict:
+    """Insider (Form 4) and congressional (STOCK Act) trading history for one
+    symbol -- the full history in one call each, skipping what is on disk."""
+    done = {}
+    for kind, fn in (("insider", "INSIDER_TRANSACTIONS"), ("congress", "CONGRESS_TRADES")):
+        out = path_for(kind, symbol)
+        if not out.exists():
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(_get({"function": fn, "symbol": symbol.upper()}, key=key, per_minute=per_minute))
+        done[kind] = str(out)
+    return done
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 4 and argv[0] == "ingest":
         print(ingest(argv[1], argv[2], argv[3], argv[4] if len(argv) > 4 else ""))
+        return 0
+    if argv and argv[0] == "fetch-activity":
+        key = os.environ.get("ALPHAVANTAGE_API_KEY")
+        if not key:
+            print("ALPHAVANTAGE_API_KEY is not set", file=sys.stderr)
+            return 2
+        for s in sorted(p.stem for p in (ROOT / "earnings").glob("*.json")):
+            try:
+                print(s, fetch_activity(s, key=key, per_minute=int(os.environ.get("AV_PER_MINUTE", "70"))), flush=True)
+            except Exception as e:
+                print(s, "FAILED", str(e).replace(key, "<key>"), file=sys.stderr, flush=True)
+        return 0
+    if argv and argv[0] == "fetch-activity":
+        key = os.environ.get("ALPHAVANTAGE_API_KEY")
+        if not key:
+            print("ALPHAVANTAGE_API_KEY is not set", file=sys.stderr)
+            return 2
+        for s in sorted(p.stem for p in (ROOT / "earnings").glob("*.json")):
+            try:
+                print(s, fetch_activity(s, key=key, per_minute=int(os.environ.get("AV_PER_MINUTE", "70"))), flush=True)
+            except Exception as e:
+                print(s, "FAILED", str(e).replace(key, "<key>"), file=sys.stderr, flush=True)
         return 0
     if argv and argv[0] == "fetch":
         key = os.environ.get("ALPHAVANTAGE_API_KEY")

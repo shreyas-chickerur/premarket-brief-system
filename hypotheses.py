@@ -229,3 +229,117 @@ def evaluate(trials: Iterable[dict], raw: dict, tr: dict, spy_tr: pd.DataFrame, 
             "sd_excess_pct": statistics.stdev(ex) if len(ex) > 1 else float("nan"),
             "win_rate_vs_spy": sum(e > 0 for e in ex) / len(ex) if ex else float("nan"),
             **monthly_t(outcomes), "trials": taken, "outcomes": outcomes}
+
+
+# --------------------------------------------------------------------------
+# round 2: insiders and Congress
+# --------------------------------------------------------------------------
+
+import re as _re
+
+FORM4_LAG_BUSINESS_DAYS = 4          # Form 4 is due in 2 business days; 2 more of margin
+_OFFICER = _re.compile(r"\b(ceo|chief executive|cfo|chief financial|president)\b", _re.IGNORECASE)
+
+
+def open_market_buys(raw: Optional[dict]) -> list[dict]:
+    """Insider purchases from an Alpha Vantage INSIDER_TRANSACTIONS payload.
+
+    The feed carries no transaction code, so an open-market buy is inferred:
+    an acquisition ("A") of common stock at a real price (awards come through
+    at 0), NOT matched by a disposal by the same person on the same date
+    (the shape of an option exercise sold straight away). A preview envelope
+    or missing payload yields nothing -- never a guess."""
+    rows = (raw or {}).get("data") if isinstance(raw, dict) and not raw.get("preview") else None
+    if not isinstance(rows, list):
+        return []
+    sold = {(r.get("executive"), r.get("transaction_date")) for r in rows
+            if r.get("acquisition_or_disposal") == "D"}
+    out = []
+    for r in rows:
+        price, shares = _num(r.get("share_price")), _num(r.get("shares"))
+        if (r.get("acquisition_or_disposal") != "A" or not price or price <= 0 or not shares
+                or "common" not in str(r.get("security_type", "")).lower()
+                or (r.get("executive"), r.get("transaction_date")) in sold):
+            continue
+        try:
+            d = date.fromisoformat(str(r["transaction_date"])[:10])
+        except (KeyError, ValueError):
+            continue
+        out.append({"date": d, "executive": r.get("executive"), "title": r.get("executive_title") or "",
+                    "value": shares * price})
+    return sorted(out, key=lambda b: b["date"])
+
+
+def _first_session_on_or_after(index: pd.DatetimeIndex, ts: pd.Timestamp) -> Optional[pd.Timestamp]:
+    later = index[index >= ts]
+    return later[0] if len(later) else None
+
+
+def _dedupe(signals: list[tuple[date, dict]], gap_days: int) -> list[tuple[date, dict]]:
+    out, last = [], None
+    for d, info in sorted(signals, key=lambda x: x[0]):
+        if last is None or (d - last).days >= gap_days:
+            out.append((d, info))
+            last = d
+    return out
+
+
+def insider_trials(symbol: str, raw: Optional[dict], px_tr: pd.DataFrame, *, mode: str,
+                   horizon_days: int, start: date, end: date, cluster_days: int = 30,
+                   min_executives: int = 2, min_value: float = 100_000, dedupe_days: int = 90) -> list[dict]:
+    """`mode="cluster"`: at least `min_executives` different insiders buying
+    within `cluster_days`. `mode="large_officer"`: one CEO/CFO/President buy
+    worth at least `min_value`. Entry: the first session on or after the
+    signal date plus FORM4_LAG_BUSINESS_DAYS -- the purchase is public by
+    then, and not before."""
+    buys, signals = open_market_buys(raw), []
+    for b in buys:
+        if mode == "cluster":
+            execs = {x["executive"] for x in buys if 0 <= (b["date"] - x["date"]).days <= cluster_days}
+            if len(execs) >= min_executives:
+                signals.append((b["date"], {"executives": len(execs)}))
+        elif mode == "large_officer":
+            if b["value"] >= min_value and _OFFICER.search(b["title"]):
+                signals.append((b["date"], {"value": round(b["value"]), "title": b["title"]}))
+        else:
+            raise ValueError(mode)
+    out = []
+    for d, info in _dedupe(signals, dedupe_days):
+        entry = _first_session_on_or_after(px_tr.index, pd.Timestamp(d) + pd.offsets.BDay(FORM4_LAG_BUSINESS_DAYS))
+        if entry is None or not (start <= entry.date() <= end):
+            continue
+        ex = exit_after(px_tr.index, entry, horizon_days)
+        if ex is not None:
+            out.append({"symbol": symbol.upper(), "entry_session": entry, "exit_session": ex,
+                        "signal": {"signal_date": d.isoformat(), **info}})
+    return out
+
+
+def congress_trials(symbol: str, raw: Optional[dict], px_tr: pd.DataFrame, *, horizon_days: int,
+                    start: date, end: date, min_amount: float = 0.0, dedupe_days: int = 30) -> list[dict]:
+    """A member of Congress disclosed a purchase. Entry: the first session
+    AFTER `filed_date` -- the trade itself can be 45 days older, and nobody
+    could act on it before the filing was public."""
+    trades = (raw or {}).get("trades") if isinstance(raw, dict) and not raw.get("preview") else None
+    signals = []
+    for t in trades or []:
+        if str(t.get("transaction_type", "")).upper() not in ("BUY", "PURCHASE", "P"):
+            continue
+        if (_num(t.get("amount_min")) or 0.0) < min_amount:
+            continue
+        try:
+            filed = date.fromisoformat(str(t.get("filed_date") or t.get("notification_date"))[:10])
+        except ValueError:
+            continue
+        signals.append((filed, {"member": t.get("politician_canonical") or t.get("politician"),
+                                "amount_min": _num(t.get("amount_min"))}))
+    out = []
+    for d, info in _dedupe(signals, dedupe_days):
+        later = px_tr.index[px_tr.index > pd.Timestamp(d)]
+        if not len(later) or not (start <= later[0].date() <= end):
+            continue
+        ex = exit_after(px_tr.index, later[0], horizon_days)
+        if ex is not None:
+            out.append({"symbol": symbol.upper(), "entry_session": later[0], "exit_session": ex,
+                        "signal": {"filed_date": d.isoformat(), **info}})
+    return out

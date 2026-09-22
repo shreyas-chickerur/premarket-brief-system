@@ -1,7 +1,7 @@
 """run_hypotheses — one frozen round of hypotheses_prereg.json.
 
-    python run_hypotheses.py discovery     # screen every hypothesis on the discovery period
-    python run_hypotheses.py holdout       # confirm ONLY the ones the screen carried
+    python run_hypotheses.py discovery <prereg.json>   # screen every hypothesis on the discovery period
+    python run_hypotheses.py holdout <prereg.json>     # confirm ONLY the ones the screen carried
 
 Writes data/bt/hypotheses/round<N>-<phase>.json. The holdout run refuses to
 look at any hypothesis the committed discovery file did not carry.
@@ -54,11 +54,31 @@ def trials_for(spec: dict, tr, earn, spy_tr, start: date, end: date) -> list[dic
     if spec["signal"] == "momentum":
         return H.momentum_trials(tr, spy_tr, top_n=spec["top_n"], start=start, end=end,
                                  horizon_days=spec["horizon_days"])
+    if spec["signal"] == "insider":
+        return [t for s in tr if (HERE / "data" / "bt" / "insider" / f"{s}.json").exists()
+                for t in H.insider_trials(s, json.loads((D.ROOT / "insider" / f"{s}.json").read_text()), tr[s],
+                                          mode=spec["mode"], horizon_days=spec["horizon_days"], start=start, end=end)]
+    if spec["signal"] == "congress":
+        return [t for s in tr if (D.ROOT / "congress" / f"{s}.json").exists()
+                for t in H.congress_trials(s, json.loads((D.ROOT / "congress" / f"{s}.json").read_text()), tr[s],
+                                           horizon_days=spec["horizon_days"], start=start, end=end,
+                                           min_amount=spec.get("min_amount", 0))]
     raise ValueError(spec["signal"])
 
 
-def run(phase: str) -> dict:
-    pre = json.loads((HERE / "hypotheses_prereg.json").read_text())
+def carried_so_far(before_round: int) -> int:
+    """Hypotheses carried to a holdout in earlier rounds -- the multiple-
+    testing count keeps growing across rounds; it never resets."""
+    n = 0
+    for r in range(1, before_round):
+        f = OUT / f"round{r}-discovery.json"
+        if f.exists():
+            n += len(json.loads(f.read_text())["carried"])
+    return n
+
+
+def run(phase: str, prereg: str) -> dict:
+    pre = json.loads((HERE / prereg).read_text())
     rnd, (a, b) = pre["round"], pre["periods"][phase]
     start, end = date.fromisoformat(a), date.fromisoformat(b)
     names = list(pre["hypotheses"])
@@ -79,10 +99,12 @@ def run(phase: str) -> dict:
         res[h] = row
     out = {"round": rnd, "phase": phase, "period": [a, b], "results": res}
     if phase == "discovery":
+        screen_t = _z(1 - 0.05 / len(pre["hypotheses"]))
+        out["screen_t"] = screen_t
         out["carried"] = [h for h, r in res.items()
-                          if r["n"] >= 100 and r["mean_excess_pct"] >= 0.50 and r["t"] >= 2.39]
+                          if r["n"] >= 100 and r["mean_excess_pct"] >= 0.50 and r["t"] >= screen_t]
     else:
-        m = max(1, len(names))
+        m = max(1, len(names) + (carried_so_far(rnd) if rnd > 1 else 0))
         crit = _z(1 - 0.05 / m)
         out["critical_t"] = crit
         out["confirmed"] = [h for h, r in res.items()
@@ -99,10 +121,10 @@ def show(out: dict) -> None:
         print(f"  {h}: n={r['n']:4d} mean={r['mean_excess_pct']:+.2f}% median={r['median_excess_pct']:+.2f}% "
               f"win={r['win_rate_vs_spy']:.0%} months={r['months']} t={r['t']:+.2f} "
               f"@0.30%={r['mean_excess_pct_at_0.30_cost']:+.2f}%  gated={r['gated']}")
-    for k in ("carried", "critical_t", "confirmed"):
+    for k in ("screen_t", "carried", "critical_t", "confirmed"):
         if k in out:
             print(f"  {k}: {out[k]}")
 
 
 if __name__ == "__main__":
-    show(run(sys.argv[1] if len(sys.argv) > 1 else "discovery"))
+    show(run(sys.argv[1], sys.argv[2]))

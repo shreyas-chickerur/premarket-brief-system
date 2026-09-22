@@ -1,0 +1,18 @@
+{
+ "round": 2,
+ "frozen_on": "2026-09-22",
+ "purpose": "Round 2 of the search (round 1: nothing confirmed). Frozen before any round-2 number exists. Sources the owner asked about: insider and congressional trading.",
+ "universe": "Same as round 1: every symbol with earnings+prices on disk; insider/congress history fetched per symbol (INSIDER_TRANSACTIONS, CONGRESS_TRADES).",
+ "account": {"sizing_equity": 1000, "rules": "as round 1"},
+ "periods": {"discovery": ["2012-01-01", "2021-12-31"], "holdout": ["2022-01-03", "2026-08-01"]},
+ "cost_pct": 0.10,
+ "hypotheses": {
+  "H7":  {"signal": "insider", "mode": "cluster", "horizon_days": 63, "idea": "2+ different insiders buying on the open market within 30 days"},
+  "H8":  {"signal": "insider", "mode": "large_officer", "horizon_days": 63, "idea": "a CEO/CFO/President open-market buy of $100k+"},
+  "H9":  {"signal": "congress", "min_amount": 15000, "horizon_days": 63, "idea": "a disclosed congressional purchase of $15k+"},
+  "H10": {"signal": "congress", "min_amount": 0, "horizon_days": 21, "idea": "any disclosed congressional purchase, 1 month"}
+ },
+ "point_in_time": "insider: entry on/after transaction date + 4 business days (Form 4 due in 2). congress: entry the session after filed_date. Buys are inferred (no transaction code in the feed): price > 0, common stock, not matched by a same-day sale by the same person.",
+ "discovery_screen": "carry only if n>=100, mean excess >= +0.50%, calendar-month t >= 2.24 (one-sided alpha 0.05/4).",
+ "holdout_confirmation": "EDGE only if calendar-month t >= z(1 - 0.05/M) where M = hypotheses carried to a holdout across ALL rounds so far (round 1 carried 1), mean excess > 0 at 0.10% and 0.30% cost, n >= 50."
+}
