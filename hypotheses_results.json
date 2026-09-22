@@ -138,5 +138,83 @@
     }
    }
   }
+ },
+ "round2": {
+  "discovery": {
+   "period": [
+    "2012-01-01",
+    "2021-12-31"
+   ],
+   "screen_t": 2.2414027276049464,
+   "carried": [],
+   "results": {
+    "H7": {
+     "candidates": 631,
+     "gated": {
+      "risk_sized": 14,
+      "no_blocking_conflict": 29,
+      "invalidation_level": 51
+     },
+     "n": 537,
+     "mean_excess_pct": 0.6090733380267779,
+     "median_excess_pct": -0.5414766931432723,
+     "sd_excess_pct": 16.446061329792624,
+     "win_rate_vs_spy": 0.48044692737430167,
+     "months": 119,
+     "mean_monthly_excess_pct": 1.2981252256037163,
+     "t": 1.381245802568848,
+     "mean_excess_pct_at_0.30_cost": 0.4090733380267779
+    },
+    "H8": {
+     "candidates": 182,
+     "gated": {
+      "risk_sized": 7,
+      "no_blocking_conflict": 10,
+      "invalidation_level": 5
+     },
+     "n": 160,
+     "mean_excess_pct": 0.4316458573446898,
+     "median_excess_pct": -1.6418187853761368,
+     "sd_excess_pct": 20.44277783212774,
+     "win_rate_vs_spy": 0.46875,
+     "months": 82,
+     "mean_monthly_excess_pct": 0.4331636342217872,
+     "t": 0.22002517811600275,
+     "mean_excess_pct_at_0.30_cost": 0.23164585734468976
+    },
+    "H9": {
+     "candidates": 107,
+     "gated": {
+      "risk_sized": 66,
+      "no_blocking_conflict": 7
+     },
+     "n": 34,
+     "mean_excess_pct": 1.2946243211336188,
+     "median_excess_pct": -0.9685977717447392,
+     "sd_excess_pct": 12.556377769741738,
+     "win_rate_vs_spy": 0.4117647058823529,
+     "months": 27,
+     "mean_monthly_excess_pct": 0.9349356062831105,
+     "t": 0.5336472250292591,
+     "mean_excess_pct_at_0.30_cost": 1.0946243211336188
+    },
+    "H10": {
+     "candidates": 245,
+     "gated": {
+      "risk_sized": 105,
+      "no_blocking_conflict": 24
+     },
+     "n": 116,
+     "mean_excess_pct": 0.6203043000173148,
+     "median_excess_pct": 0.6032026006030257,
+     "sd_excess_pct": 7.0833459524124605,
+     "win_rate_vs_spy": 0.5775862068965517,
+     "months": 52,
+     "mean_monthly_excess_pct": 0.552259915149647,
+     "t": 0.569354993207029,
+     "mean_excess_pct_at_0.30_cost": 0.42030430001731495
+    }
+   }
+  }
  }
 }
