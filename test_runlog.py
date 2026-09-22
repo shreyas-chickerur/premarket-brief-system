@@ -20,6 +20,21 @@ def base_log(**kw):
     return R.RunLog("run-test", now=datetime(2026, 9, 1, 11, 20, tzinfo=timezone.utc), **kw)
 
 
+# -------------------------------------------------------------------- mode
+
+def test_run_log_mode_defaults_to_dry_run_not_live():
+    """The fail-safe direction matters: mode is a recorded label, not a
+    place_equity_order gate, so an omitted or mistyped mode= must land on
+    the safe reading. Caught 22 Sep 2026 when a real run was constructed
+    with mode="live" by mistake while the guard held throughout."""
+    assert base_log().mode == "dry_run"
+
+
+def test_run_log_mode_is_still_overridable_explicitly():
+    assert base_log(mode="live").mode == "live"
+    assert base_log(mode="verification").mode == "verification"
+
+
 # ---------------------------------------------------------------- stages
 
 def test_stage_records_success_and_timing():

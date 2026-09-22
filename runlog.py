@@ -475,7 +475,17 @@ def circuit_breaker_check(equity: float, circuit_breaker_usd: float,
 
 class RunLog:
     def __init__(self, run_id: str, *, now: Optional[datetime] = None,
-                 mode: str = "live"):
+                 mode: str = "dry_run"):
+        # Default is "dry_run", not "live": this label does not itself
+        # gate place_equity_order (that's the DAILY_PROCEDURE.md guard's
+        # job) -- it only travels into the manifest and the email banner,
+        # where an omitted or mistyped mode= must fail toward the reading
+        # that says "nothing was traded," not toward "this was live," on
+        # a system where the DRY RUN guard is the only thing standing
+        # between a computed order and a real one. Caught 22 Sep 2026: a
+        # run was constructed with mode="live" by mistake while the guard
+        # held throughout (no order was placed) -- correct behavior,
+        # wrong permanent label. See DAILY_PROCEDURE.md step 0.
         self.schema = SCHEMA_VERSION
         self.run_id = run_id
         self.mode = mode                       # live | dry_run | verification

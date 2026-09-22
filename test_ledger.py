@@ -1527,6 +1527,38 @@ def test_bioguides_needing_discovery_check_rechecks_after_a_week():
     assert out == ["C001123"]
 
 
+def test_bioguides_needing_discovery_check_caps_the_due_list():
+    """22 Sep 2026: an unbounded due list is fetched or skipped as one block
+    alongside the rest of Stage 1 -- a skip does not shrink it, so a backlog
+    never drains. The cap makes forward progress unconditional."""
+    ids = [f"X{i:03d}" for i in range(10)]
+    out = L.bioguides_needing_discovery_check(ids, {}, today=date(2026, 9, 5), max_per_run=3)
+    assert out == ["X000", "X001", "X002"]
+
+
+def test_bioguides_needing_discovery_check_prioritises_oldest_and_never_checked():
+    cache = {
+        "A": {"symbols": [], "checked_through": date(2026, 8, 1)},   # oldest
+        "B": {"symbols": [], "checked_through": date(2026, 8, 20)},
+        # C never checked -- ranks with the oldest, via date.min
+    }
+    out = L.bioguides_needing_discovery_check(["B", "C", "A"], cache,
+                                              today=date(2026, 9, 5), max_per_run=2)
+    assert out == ["C", "A"]
+
+
+def test_bioguides_needing_discovery_check_max_per_run_none_is_uncapped():
+    ids = [f"X{i:03d}" for i in range(10)]
+    out = L.bioguides_needing_discovery_check(ids, {}, today=date(2026, 9, 5), max_per_run=None)
+    assert len(out) == 10
+
+
+def test_bioguides_needing_discovery_check_default_cap_is_five():
+    ids = [f"X{i:03d}" for i in range(10)]
+    out = L.bioguides_needing_discovery_check(ids, {}, today=date(2026, 9, 5))
+    assert len(out) == L.CONGRESS_DISCOVERY_MAX_PER_RUN == 5
+
+
 # ---------------------------------------------------------------- state bundle
 # 11 September 2026: collapses the ~20-file Stage 0 read path into one file.
 # The central promise under test is that `unpack_state_bundle` reconstructs

@@ -45,7 +45,8 @@ __all__ = [
     "SplitsCacheEntry", "fold_splits_cache", "symbols_needing_split_check",
     "SECTOR_CACHE_HORIZON_DAYS", "sector_cache_filename", "SECTOR_CACHE_RE",
     "fold_sector_cache", "symbols_needing_sector_check",
-    "CONGRESS_DISCOVERY_HORIZON_DAYS", "congress_discovery_cache_filename",
+    "CONGRESS_DISCOVERY_HORIZON_DAYS", "CONGRESS_DISCOVERY_MAX_PER_RUN",
+    "congress_discovery_cache_filename",
     "CONGRESS_DISCOVERY_CACHE_RE", "fold_congress_discovery_cache",
     "bioguides_needing_discovery_check",
     "STATE_BUNDLE_SCHEMA_VERSION", "STATE_BUNDLE_RE",
@@ -1404,6 +1405,21 @@ def symbols_needing_sector_check(symbols: Sequence[str],
 # fills/splits caches' cadence.
 
 CONGRESS_DISCOVERY_HORIZON_DAYS = 7
+
+# 22 September 2026: `bioguides_needing_discovery_check` used to return every
+# due bioguide_id with no bound. CONGRESS_TRADES is one call per member with
+# no bulk pull, so on a day Stage 1's budget is tight (the ordinary case --
+# see `research.researched_set`'s own ceiling) the whole due list is either
+# fetched or skipped as one block alongside the rest of Stage 1's per-symbol
+# calls. Skipped, the list does not shrink; due members stay due, so the
+# backlog is self-perpetuating rather than self-correcting -- observed
+# 21-22 September 2026 at 15 backlogged bioguide_ids with no run yet clearing
+# any of them. A per-run cap makes forward progress unconditional: some
+# fraction of the backlog clears every run regardless of budget elsewhere,
+# oldest/never-checked first, so the list drains in ceil(backlog/cap) runs
+# instead of waiting on a day nothing else needs the budget.
+CONGRESS_DISCOVERY_MAX_PER_RUN = 5
+
 CONGRESS_DISCOVERY_CACHE_RE = re.compile(
     r"^congress-discovery-cache-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.json$")
 
@@ -1460,17 +1476,30 @@ def fold_congress_discovery_cache(files: Iterable[dict]
 def bioguides_needing_discovery_check(bioguide_ids: Sequence[str],
                                       cache: dict[str, dict], *,
                                       horizon_days: int = CONGRESS_DISCOVERY_HORIZON_DAYS,
-                                      today: Optional[date] = None) -> list[str]:
+                                      today: Optional[date] = None,
+                                      max_per_run: Optional[int] = CONGRESS_DISCOVERY_MAX_PER_RUN
+                                      ) -> list[str]:
     """Which tracked bioguide_ids need a fresh CONGRESS_TRADES(bioguide_id=)
-    pull this run. Mirrors `symbols_needing_split_check` exactly."""
+    pull this run, oldest/never-checked first, capped at `max_per_run` (see
+    `CONGRESS_DISCOVERY_MAX_PER_RUN`'s comment -- CONGRESS_TRADES is one call
+    per member with no bulk pull, so an unbounded due-list is fetched or
+    skipped as a block alongside the rest of Stage 1, and a skip does not
+    shrink it). `max_per_run=None` restores the uncapped behavior (every due
+    member every run) for tests or a deliberate one-off catch-up. Otherwise
+    mirrors `symbols_needing_split_check`: never-checked (`entry is None`)
+    sorts first via `date.min`, then longest-overdue, tied-broken on
+    bioguide_id for a deterministic order run to run."""
     today = today or date.today()
     boundary = today - timedelta(days=horizon_days)
-    out = set()
+    due = []
     for bid in bioguide_ids:
         entry = cache.get(bid)
-        if entry is None or entry["checked_through"] < boundary:
-            out.add(bid)
-    return sorted(out)
+        checked_through = entry["checked_through"] if entry is not None else date.min
+        if entry is None or checked_through < boundary:
+            due.append((checked_through, bid))
+    due.sort()
+    out = [bid for _, bid in due]
+    return out[:max_per_run] if max_per_run is not None else out
 
 
 # --------------------------------------------------------------------------
