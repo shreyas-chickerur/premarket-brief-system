@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import pandas as pd
 import statistics
 import sys
 from datetime import date
@@ -43,7 +44,28 @@ def load_all():
     return raw, tr, earn, B.total_return_frame(RB.load_prices("SPY"))
 
 
-def trials_for(spec: dict, tr, earn, spy_tr, start: date, end: date) -> list[dict]:
+def load_price_universe(symbols: list[str], *, must_start_by: str = "2012-02-03"):
+    """A price-only universe from a frozen symbol list. A series that does
+    not reach back to `must_start_by` is excluded -- a ticker since reused by
+    a different company, or one with no history -- and reported."""
+    raw, tr, excluded = {}, {}, {}
+    for s in symbols:
+        px = RB.load_prices(s)
+        if px is None or px.empty:
+            excluded[s] = "no price data"
+            continue
+        if px.index[0] > pd.Timestamp(must_start_by):
+            excluded[s] = f"series starts {px.index[0].date()}"
+            continue
+        raw[s], tr[s] = px, B.total_return_frame(px)
+    return raw, tr, excluded
+
+
+def trials_for(spec: dict, tr, earn, spy_tr, start: date, end: date, raw=None) -> list[dict]:
+    if spec["signal"] == "ranked2":
+        return H.ranked_trials(tr, {k: v["close"] for k, v in raw.items()}, spy_tr, rank=spec["rank"],
+                               top_n=spec["top_n"], start=start, end=end, horizon_days=spec["horizon_days"],
+                               freq=spec["freq"])
     if "momentum_min_percentile" in spec:
         base = trials_for({k: v for k, v in spec.items() if k != "momentum_min_percentile"}, tr, earn, spy_tr, start, end)
         return H.with_momentum_filter(base, tr, min_percentile=spec["momentum_min_percentile"])
@@ -92,11 +114,16 @@ def run(phase: str, prereg: str) -> dict:
     if phase == "holdout":
         disc = json.loads((OUT / f"round{rnd}-discovery.json").read_text())
         names = disc["carried"]
-    raw, tr, earn, spy_tr = load_all()
+    excluded = {}
+    if isinstance(pre.get("universe"), dict) and "symbols" in pre["universe"]:
+        raw, tr, excluded = load_price_universe(pre["universe"]["symbols"])
+        earn, spy_tr = {}, B.total_return_frame(RB.load_prices("SPY"))
+    else:
+        raw, tr, earn, spy_tr = load_all()
     res = {}
     for h in names:
         spec = pre["hypotheses"][h]
-        trials = trials_for(spec, tr, earn, spy_tr, start, end)
+        trials = trials_for(spec, tr, earn, spy_tr, start, end, raw=raw)
         ev = H.evaluate(trials, raw, tr, spy_tr, account_equity=pre["account"]["sizing_equity"], cost_pct=pre["cost_pct"])
         hi_cost = [o.excess_pct - (0.30 - pre["cost_pct"]) for o in ev["outcomes"]]
         row = {k: ev[k] for k in ("candidates", "gated", "n", "mean_excess_pct", "median_excess_pct",
@@ -104,7 +131,8 @@ def run(phase: str, prereg: str) -> dict:
         row["mean_excess_pct_at_0.30_cost"] = statistics.mean(hi_cost) if hi_cost else float("nan")
         row["_trials"] = ev["trials"]
         res[h] = row
-    out = {"round": rnd, "phase": phase, "period": [a, b], "results": res}
+    out = {"round": rnd, "phase": phase, "period": [a, b], "results": res,
+           "universe_used": len(tr), "excluded": excluded}
     if phase == "discovery":
         screen_t = _z(1 - 0.05 / len(pre["hypotheses"]))
         out["screen_t"] = screen_t

@@ -219,6 +219,24 @@ def main(argv: list[str]) -> int:
     if len(argv) >= 4 and argv[0] == "ingest":
         print(ingest(argv[1], argv[2], argv[3], argv[4] if len(argv) > 4 else ""))
         return 0
+    if argv and argv[0] == "fetch-prices":
+        key = os.environ.get("ALPHAVANTAGE_API_KEY")
+        if not key or len(argv) < 2:
+            print("usage: fetch-prices <prereg.json> (ALPHAVANTAGE_API_KEY set)", file=sys.stderr)
+            return 2
+        for s in json.loads(Path(argv[1]).read_text())["universe"]["symbols"]:
+            out = path_for("prices", s)
+            if out.exists():
+                continue
+            try:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(_get({"function": "TIME_SERIES_DAILY_ADJUSTED", "symbol": s, "outputsize": "full",
+                                     "datatype": "csv"}, key=key,
+                                    per_minute=int(os.environ.get("AV_PER_MINUTE", "70"))))
+                print(s, "ok", flush=True)
+            except Exception as e:
+                print(s, "FAILED", str(e).replace(key, "<key>")[:120], file=sys.stderr, flush=True)
+        return 0
     if argv and argv[0] == "fetch-activity":
         key = os.environ.get("ALPHAVANTAGE_API_KEY")
         if not key:
@@ -229,6 +247,24 @@ def main(argv: list[str]) -> int:
                 print(s, fetch_activity(s, key=key, per_minute=int(os.environ.get("AV_PER_MINUTE", "70"))), flush=True)
             except Exception as e:
                 print(s, "FAILED", str(e).replace(key, "<key>"), file=sys.stderr, flush=True)
+        return 0
+    if argv and argv[0] == "fetch-prices":
+        key = os.environ.get("ALPHAVANTAGE_API_KEY")
+        if not key or len(argv) < 2:
+            print("usage: fetch-prices <prereg.json> (ALPHAVANTAGE_API_KEY set)", file=sys.stderr)
+            return 2
+        for s in json.loads(Path(argv[1]).read_text())["universe"]["symbols"]:
+            out = path_for("prices", s)
+            if out.exists():
+                continue
+            try:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(_get({"function": "TIME_SERIES_DAILY_ADJUSTED", "symbol": s, "outputsize": "full",
+                                     "datatype": "csv"}, key=key,
+                                    per_minute=int(os.environ.get("AV_PER_MINUTE", "70"))))
+                print(s, "ok", flush=True)
+            except Exception as e:
+                print(s, "FAILED", str(e).replace(key, "<key>")[:120], file=sys.stderr, flush=True)
         return 0
     if argv and argv[0] == "fetch-activity":
         key = os.environ.get("ALPHAVANTAGE_API_KEY")
