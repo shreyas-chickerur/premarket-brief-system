@@ -1,5 +1,14 @@
 # Pre-Market Brief System
 
+> **Retired (23 September 2026). Succeeded by
+> [alpaca-trade-strat](https://github.com/shreyas-chickerur/alpaca-trade-strat).** Its tested
+> research code, evidence and lessons were carried over there (`lab/`,
+> `docs/EVIDENCE.md`, `docs/LESSONS.md`). The backtest, the blind-judge calibration and
+> the four rounds of pre-registered signal tests (18 hypotheses, none confirmed on held-out
+> data) are on the
+> [`backtest-phase0`](https://github.com/shreyas-chickerur/premarket-brief-system/tree/backtest-phase0)
+> branch. The system never placed a live order; it ran in dry run throughout.
+
 Measurement and health layers for a daily pre-market research and trading brief
 running on a broker's agentic trading account.
 
