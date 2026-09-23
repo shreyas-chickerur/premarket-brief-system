@@ -1,0 +1,433 @@
+{
+ "round1": {
+  "discovery": {
+   "period": [
+    "2012-01-01",
+    "2021-12-31"
+   ],
+   "carried": [
+    "H3"
+   ],
+   "results": {
+    "H1": {
+     "candidates": 2381,
+     "gated": {
+      "no_blocking_conflict": 111,
+      "risk_sized": 258,
+      "invalidation_level": 52
+     },
+     "n": 1960,
+     "mean_excess_pct": 0.8206804782324251,
+     "median_excess_pct": -0.1261099295608691,
+     "sd_excess_pct": 12.66860114084238,
+     "win_rate_vs_spy": 0.4923469387755102,
+     "months": 119,
+     "mean_monthly_excess_pct": 0.7305924758973833,
+     "t": 2.0623302287867724,
+     "mean_excess_pct_at_0.30_cost": 0.6206804782324251
+    },
+    "H2": {
+     "candidates": 2381,
+     "gated": {
+      "no_blocking_conflict": 111,
+      "risk_sized": 258,
+      "invalidation_level": 52
+     },
+     "n": 1960,
+     "mean_excess_pct": 1.294950199402497,
+     "median_excess_pct": 0.07616770257328218,
+     "sd_excess_pct": 20.11510073483822,
+     "win_rate_vs_spy": 0.5025510204081632,
+     "months": 119,
+     "mean_monthly_excess_pct": 0.9775333028820101,
+     "t": 1.5916827334522496,
+     "mean_excess_pct_at_0.30_cost": 1.094950199402497
+    },
+    "H3": {
+     "candidates": 1075,
+     "gated": {
+      "risk_sized": 125,
+      "no_blocking_conflict": 48,
+      "invalidation_level": 4
+     },
+     "n": 898,
+     "mean_excess_pct": 2.3022935698709057,
+     "median_excess_pct": 0.37462263681214425,
+     "sd_excess_pct": 18.291376032234194,
+     "win_rate_vs_spy": 0.5211581291759465,
+     "months": 110,
+     "mean_monthly_excess_pct": 1.5719142799723025,
+     "t": 2.924668023824408,
+     "mean_excess_pct_at_0.30_cost": 2.102293569870906
+    },
+    "H4": {
+     "candidates": 1021,
+     "gated": {
+      "risk_sized": 109,
+      "no_blocking_conflict": 57,
+      "invalidation_level": 4
+     },
+     "n": 851,
+     "mean_excess_pct": 2.1302466617752,
+     "median_excess_pct": 0.06736986356145067,
+     "sd_excess_pct": 20.073560847713754,
+     "win_rate_vs_spy": 0.5064629847238543,
+     "months": 118,
+     "mean_monthly_excess_pct": 2.076241118130582,
+     "t": 2.105462523220956,
+     "mean_excess_pct_at_0.30_cost": 1.9302466617752
+    },
+    "H5": {
+     "candidates": 5541,
+     "gated": {
+      "no_blocking_conflict": 377,
+      "risk_sized": 453,
+      "invalidation_level": 5
+     },
+     "n": 4706,
+     "mean_excess_pct": -0.1597490119723972,
+     "median_excess_pct": -0.14720794275996366,
+     "sd_excess_pct": 8.037497112209437,
+     "win_rate_vs_spy": 0.4887377815554611,
+     "months": 120,
+     "mean_monthly_excess_pct": -0.129911286914628,
+     "t": -0.5516212417911006,
+     "mean_excess_pct_at_0.30_cost": -0.3597490119723971
+    },
+    "H6": {
+     "candidates": 1200,
+     "gated": {
+      "risk_sized": 139,
+      "no_blocking_conflict": 130
+     },
+     "n": 931,
+     "mean_excess_pct": 1.2567169730962524,
+     "median_excess_pct": 0.5067793793386178,
+     "sd_excess_pct": 14.125956751046589,
+     "win_rate_vs_spy": 0.5241675617615468,
+     "months": 120,
+     "mean_monthly_excess_pct": 1.4399542190326202,
+     "t": 2.3371799996095097,
+     "mean_excess_pct_at_0.30_cost": 1.0567169730962525
+    }
+   }
+  },
+  "holdout": {
+   "period": [
+    "2022-01-03",
+    "2026-08-01"
+   ],
+   "critical_t": 1.6448536269514715,
+   "confirmed": [],
+   "results": {
+    "H3": {
+     "candidates": 714,
+     "gated": {
+      "no_blocking_conflict": 45,
+      "risk_sized": 120
+     },
+     "n": 549,
+     "mean_excess_pct": 1.2654714168393228,
+     "median_excess_pct": -0.6612352792617514,
+     "sd_excess_pct": 19.27563014791278,
+     "win_rate_vs_spy": 0.47358834244080145,
+     "months": 53,
+     "mean_monthly_excess_pct": 0.3217196521639868,
+     "t": 0.2907757173479471,
+     "mean_excess_pct_at_0.30_cost": 1.0654714168393231
+    }
+   }
+  }
+ },
+ "round2": {
+  "discovery": {
+   "period": [
+    "2012-01-01",
+    "2021-12-31"
+   ],
+   "screen_t": 2.2414027276049464,
+   "carried": [],
+   "results": {
+    "H7": {
+     "candidates": 631,
+     "gated": {
+      "risk_sized": 14,
+      "no_blocking_conflict": 29,
+      "invalidation_level": 51
+     },
+     "n": 537,
+     "mean_excess_pct": 0.6090733380267779,
+     "median_excess_pct": -0.5414766931432723,
+     "sd_excess_pct": 16.446061329792624,
+     "win_rate_vs_spy": 0.48044692737430167,
+     "months": 119,
+     "mean_monthly_excess_pct": 1.2981252256037163,
+     "t": 1.381245802568848,
+     "mean_excess_pct_at_0.30_cost": 0.4090733380267779
+    },
+    "H8": {
+     "candidates": 182,
+     "gated": {
+      "risk_sized": 7,
+      "no_blocking_conflict": 10,
+      "invalidation_level": 5
+     },
+     "n": 160,
+     "mean_excess_pct": 0.4316458573446898,
+     "median_excess_pct": -1.6418187853761368,
+     "sd_excess_pct": 20.44277783212774,
+     "win_rate_vs_spy": 0.46875,
+     "months": 82,
+     "mean_monthly_excess_pct": 0.4331636342217872,
+     "t": 0.22002517811600275,
+     "mean_excess_pct_at_0.30_cost": 0.23164585734468976
+    },
+    "H9": {
+     "candidates": 107,
+     "gated": {
+      "risk_sized": 66,
+      "no_blocking_conflict": 7
+     },
+     "n": 34,
+     "mean_excess_pct": 1.2946243211336188,
+     "median_excess_pct": -0.9685977717447392,
+     "sd_excess_pct": 12.556377769741738,
+     "win_rate_vs_spy": 0.4117647058823529,
+     "months": 27,
+     "mean_monthly_excess_pct": 0.9349356062831105,
+     "t": 0.5336472250292591,
+     "mean_excess_pct_at_0.30_cost": 1.0946243211336188
+    },
+    "H10": {
+     "candidates": 245,
+     "gated": {
+      "risk_sized": 105,
+      "no_blocking_conflict": 24
+     },
+     "n": 116,
+     "mean_excess_pct": 0.6203043000173148,
+     "median_excess_pct": 0.6032026006030257,
+     "sd_excess_pct": 7.0833459524124605,
+     "win_rate_vs_spy": 0.5775862068965517,
+     "months": 52,
+     "mean_monthly_excess_pct": 0.552259915149647,
+     "t": 0.569354993207029,
+     "mean_excess_pct_at_0.30_cost": 0.42030430001731495
+    }
+   }
+  }
+ },
+ "round3": {
+  "discovery": {
+   "period": [
+    "2012-01-01",
+    "2021-12-31"
+   ],
+   "screen_t": 2.3263478740408408,
+   "carried": [
+    "H11"
+   ],
+   "results": {
+    "H11": {
+     "candidates": 1200,
+     "gated": {
+      "risk_sized": 139,
+      "no_blocking_conflict": 130
+     },
+     "n": 931,
+     "mean_excess_pct": 3.460386232864857,
+     "median_excess_pct": 0.3722504133689798,
+     "sd_excess_pct": 26.25311942549233,
+     "win_rate_vs_spy": 0.5069817400644469,
+     "months": 120,
+     "mean_monthly_excess_pct": 3.6771939708269303,
+     "t": 3.010023227746717,
+     "mean_excess_pct_at_0.30_cost": 3.2603862328648567
+    },
+    "H12": {
+     "candidates": 1080,
+     "gated": {
+      "risk_sized": 120,
+      "no_blocking_conflict": 123
+     },
+     "n": 837,
+     "mean_excess_pct": 1.1659628649349896,
+     "median_excess_pct": 0.395457105394892,
+     "sd_excess_pct": 14.206968447087503,
+     "win_rate_vs_spy": 0.5197132616487455,
+     "months": 108,
+     "mean_monthly_excess_pct": 1.3105346500022221,
+     "t": 1.9894498255730804,
+     "mean_excess_pct_at_0.30_cost": 0.9659628649349898
+    },
+    "H13": {
+     "candidates": 1200,
+     "gated": {
+      "risk_sized": 143,
+      "no_blocking_conflict": 22
+     },
+     "n": 1035,
+     "mean_excess_pct": -0.24256621791055308,
+     "median_excess_pct": -0.21812502841697104,
+     "sd_excess_pct": 4.5149067646503545,
+     "win_rate_vs_spy": 0.4753623188405797,
+     "months": 120,
+     "mean_monthly_excess_pct": -0.2549176614234693,
+     "t": -1.413928343683362,
+     "mean_excess_pct_at_0.30_cost": -0.4425662179105531
+    },
+    "H14": {
+     "candidates": 372,
+     "gated": {
+      "risk_sized": 60,
+      "no_blocking_conflict": 15
+     },
+     "n": 297,
+     "mean_excess_pct": 1.7156323154197737,
+     "median_excess_pct": 0.25433292579553124,
+     "sd_excess_pct": 15.860166991672799,
+     "win_rate_vs_spy": 0.5050505050505051,
+     "months": 90,
+     "mean_monthly_excess_pct": 0.8110788791066176,
+     "t": 0.9622229547960018,
+     "mean_excess_pct_at_0.30_cost": 1.515632315419774
+    },
+    "H15": {
+     "candidates": 257,
+     "gated": {
+      "risk_sized": 7,
+      "no_blocking_conflict": 3
+     },
+     "n": 247,
+     "mean_excess_pct": 1.4179393131041849,
+     "median_excess_pct": -0.7857551923202476,
+     "sd_excess_pct": 16.26084392409834,
+     "win_rate_vs_spy": 0.46963562753036436,
+     "months": 107,
+     "mean_monthly_excess_pct": 1.0385554069620038,
+     "t": 0.8571503983376981,
+     "mean_excess_pct_at_0.30_cost": 1.217939313104185
+    }
+   }
+  },
+  "holdout": {
+   "period": [
+    "2022-01-03",
+    "2026-08-01"
+   ],
+   "critical_t": 1.9599639845400536,
+   "confirmed": [],
+   "results": {
+    "H11": {
+     "candidates": 550,
+     "gated": {
+      "risk_sized": 78,
+      "no_blocking_conflict": 87
+     },
+     "n": 385,
+     "mean_excess_pct": -0.5883436268414162,
+     "median_excess_pct": -2.9789278145634035,
+     "sd_excess_pct": 31.985252187806648,
+     "win_rate_vs_spy": 0.44155844155844154,
+     "months": 55,
+     "mean_monthly_excess_pct": -0.31407880991728093,
+     "t": -0.20799645576697717,
+     "mean_excess_pct_at_0.30_cost": -0.7883436268414163
+    }
+   },
+   "supplementary_newey_west_lag2_t": {
+    "discovery": 2.38,
+    "holdout": -0.17
+   }
+  }
+ },
+ "round4": {
+  "discovery": {
+   "period": [
+    "2013-01-01",
+    "2021-12-31"
+   ],
+   "screen_t": 2.128045234184984,
+   "carried": [],
+   "universe_used": 280,
+   "excluded": {
+    "AMTD": "series starts 2019-08-05",
+    "APC": "series starts 2026-02-12",
+    "ARX": "series starts 2025-07-24",
+    "BALT": "series starts 2021-07-01",
+    "CBAT": "series starts 2026-06-30",
+    "CYPS": "series starts 2022-09-02",
+    "DOW": "series starts 2019-03-20",
+    "FMFC": "series starts 2025-06-25",
+    "FRANQ": "series starts 2021-05-06",
+    "GRO": "series starts 2024-11-27",
+    "INAPQ": "series starts 2020-05-01",
+    "LSE": "series starts 2024-12-19",
+    "MFI": "series starts 2024-04-22",
+    "MOBI": "series starts 2026-05-08",
+    "MRLN": "series starts 2026-03-16",
+    "NSR": "series starts 2021-06-03",
+    "NXH": "series starts 2026-08-14",
+    "ROC": "series starts 2026-02-20",
+    "VII": "series starts 2026-07-20",
+    "WX": "series starts 2026-06-03"
+   },
+   "results": {
+    "H16": {
+     "candidates": 1080,
+     "gated": {
+      "no_blocking_conflict": 81,
+      "risk_sized": 69
+     },
+     "n": 930,
+     "mean_excess_pct": -0.5122484356424222,
+     "median_excess_pct": -1.0822253568907647,
+     "sd_excess_pct": 12.939436744761581,
+     "win_rate_vs_spy": 0.44516129032258067,
+     "months": 108,
+     "mean_monthly_excess_pct": -0.5697198176813605,
+     "t": -1.0629391246286786,
+     "mean_excess_pct_at_0.30_cost": -0.7122484356424221
+    },
+    "H17": {
+     "candidates": 4699,
+     "gated": {
+      "no_blocking_conflict": 348,
+      "risk_sized": 126
+     },
+     "n": 4225,
+     "mean_excess_pct": -0.1612833561986356,
+     "median_excess_pct": -0.3171402302510117,
+     "sd_excess_pct": 8.501285201418497,
+     "win_rate_vs_spy": 0.47337278106508873,
+     "months": 108,
+     "mean_monthly_excess_pct": -0.1497751084363024,
+     "t": -0.8002087043288163,
+     "mean_excess_pct_at_0.30_cost": -0.36128335619863555
+    },
+    "H18": {
+     "candidates": 1078,
+     "gated": {
+      "no_blocking_conflict": 125,
+      "risk_sized": 71
+     },
+     "n": 882,
+     "mean_excess_pct": -0.5422539290248425,
+     "median_excess_pct": -0.7786995353323832,
+     "sd_excess_pct": 7.549837066000564,
+     "win_rate_vs_spy": 0.4308390022675737,
+     "months": 108,
+     "mean_monthly_excess_pct": -0.4359633701508848,
+     "t": -1.2734048662087343,
+     "mean_excess_pct_at_0.30_cost": -0.7422539290248426
+    }
+   }
+  }
+ },
+ "summary_after_round4": {
+  "hypotheses_tested": 18,
+  "carried_to_holdout": 2,
+  "confirmed": 0,
+  "finding": "Momentum: +1.26%/trade (t=2.34) on the survivorship-biased 2022-snapshot universe in 2012-2021, -0.51% (t=-1.06) on the 2012-snapshot universe (47% later delisted) over nearly the same years. The discovery-period 'edges' of rounds 1 and 3 are consistent with survivorship bias, not signal."
+ }
+}

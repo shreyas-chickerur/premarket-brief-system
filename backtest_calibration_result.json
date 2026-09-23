@@ -1,0 +1,18 @@
+{
+ "recorded_on": "2026-09-22",
+ "proxy_v1": {
+  "n": 40,
+  "agreement": 0.725,
+  "false_clear_rate": 0.3142857142857143,
+  "false_reject_rate": 0.0,
+  "passes": false
+ },
+ "variants_tried_on_the_same_40": "min_relevance 0.5/0.7/0.9, primary-ticker-only, primary+relevance, primary+<=3 tickers. Best: relevance>=0.9, agreement 0.85 but false_clear 0.20 -- fails. Judges reject on meaning (self-published releases, one story under different headlines, passing mentions scored as relevant), which title/score rules cannot see.",
+ "decision": "Plan section 6c. The proxy is kept only as a cheap NECESSARY filter (0 of 5 proxy rejections were overturned); every window that clears the proxy AND conditions 3-5 is judged directly by a context-isolated Claude judge with calibrate.RULE, blind to prices, outcomes and the proxy. A window counts as cleared only on a judge 'cleared'.",
+ "population_to_judge": 824,
+ "disclosures": [
+  "The proxy's false-reject rate (0/5) rests on only 5 proxy rejections; windows the proxy rejects are not judged.",
+  "An evidence line computed with the invalid v1 proxy (n=824, mean excess -0.14%, inconclusive) was printed once while counting this population. It is not a result and changes nothing above; the judged verdict is computed afresh.",
+  "News-archive density rises steeply toward 2026 (2023: 600 of 775 windows fail the proxy; 2026: 39 of 526), so the judged population over-represents 2025-2026."
+ ]
+}

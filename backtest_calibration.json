@@ -1,0 +1,10 @@
+{
+ "frozen_on": "2026-09-22",
+ "purpose": "Plan section 6b decision rule, fixed BEFORE any judge verdict or calibration result exists. The proxy is trusted for the backtest population only if it passes; otherwise it is revised and re-validated on a FRESH sample (new seed), or the population is judged directly (plan 6c).",
+ "n": 40,
+ "seed": 20260923,
+ "min_judged": 30,
+ "min_agreement": 0.85,
+ "max_false_clear_rate": 0.10,
+ "judges": "One context-isolated Claude session per packet batch, given calibrate.RULE and the packet only: no prices, no outcomes, no proxy verdict."
+}

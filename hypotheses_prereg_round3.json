@@ -1,0 +1,19 @@
+{
+ "round": 3,
+ "frozen_on": "2026-09-22",
+ "purpose": "Round 3 (rounds 1-2: nothing confirmed). Frozen before any round-3 number exists.",
+ "informed_by_earlier_rounds": "YES, disclosed: H11/H12 revisit momentum (round-1 H6 narrowly missed its screen) and H14/H15 combine round-1 H3 and round-2 H7 with a momentum filter. Informed hypotheses are exactly how a search overfits; they are counted in full and must still pass an untouched holdout.",
+ "universe": "as rounds 1-2",
+ "account": {"sizing_equity": 1000, "rules": "as round 1"},
+ "periods": {"discovery": ["2012-01-01", "2021-12-31"], "holdout": ["2022-01-03", "2026-08-01"]},
+ "cost_pct": 0.10,
+ "hypotheses": {
+  "H11": {"signal": "ranked", "rank": "momentum", "top_n": 10, "horizon_days": 63, "idea": "12-1 momentum, quarterly holding"},
+  "H12": {"signal": "ranked", "rank": "momentum", "top_n": 10, "horizon_days": 21, "require_uptrend": true, "idea": "12-1 momentum only while SPY is above its 200-day average"},
+  "H13": {"signal": "ranked", "rank": "low_vol", "top_n": 10, "horizon_days": 21, "idea": "low-volatility anomaly, monthly"},
+  "H14": {"signal": "pead", "min_surprise_pct": 5, "min_reaction_excess_pct": 2, "horizon_days": 42, "momentum_min_percentile": 0.7, "idea": "confirmed beat in a stock already in the top 30% on momentum"},
+  "H15": {"signal": "insider", "mode": "cluster", "horizon_days": 63, "momentum_min_percentile": 0.5, "idea": "insider cluster buy in a stock with above-median momentum"}
+ },
+ "discovery_screen": "carry only if n>=100, mean excess >= +0.50%, calendar-month t >= z(1-0.05/5) = 2.33.",
+ "holdout_confirmation": "EDGE only if calendar-month t >= z(1 - 0.05/M), M = hypotheses carried to a holdout across ALL rounds; mean excess > 0 at 0.10% and 0.30% cost; n >= 50."
+}

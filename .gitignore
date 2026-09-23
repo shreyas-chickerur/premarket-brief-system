@@ -17,3 +17,10 @@ data/
 
 # Rendered email drafts.
 *.html
+
+# graphify knowledge-graph output (local, regenerable)
+graphify-out/
+
+# Local secrets (API keys). Never commit.
+.env
+.env.*
