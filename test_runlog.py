@@ -654,6 +654,47 @@ def test_optimizer_spots_total_inactivity():
     assert any(f["kind"] == "throughput" for f in found)
 
 
+def test_optimizer_still_reports_inactivity_when_every_idea_failed_a_gate():
+    """The finding this one guards is the whole point of `throughput`: runs
+    where ideas reached the gate and the gate turned every one of them away.
+    A rejected buy is NOT a cleared buy, however actionable its action."""
+    dec = [{"action": "buy", "executed": False, "gate_failed": "two_sources"},
+           {"action": "hold", "executed": False, "gate_failed": None}]
+    found = R.find_optimizations([{**h, "decisions": dec} for h in _hist(12)])
+    f = next(f for f in found if f["kind"] == "throughput")
+    assert "12 of 12" in f["finding"]
+
+
+def test_optimizer_does_not_call_a_dry_run_gate_clearance_inactivity():
+    """23 September 2026, watchdog Stage 5B. Under the DRY RUN guard
+    `executed` can never be true -- `place_equity_order` is forbidden -- so
+    counting idleness by `executed` alone made this finding fire every single
+    run from 14 September on, including the days BB cleared all five gate
+    conditions and its order was computed and withheld by the guard alone.
+    An idea the gate let through is not evidence the gate is unreachable."""
+    dec = [{"symbol": "BB", "action": "buy", "executed": False, "gate_failed": None},
+           {"symbol": "SGOV", "action": "hold", "executed": False, "gate_failed": None}]
+    found = R.find_optimizations([{**h, "decisions": dec} for h in _hist(12)])
+    assert not any(f["kind"] == "throughput" for f in found)
+
+
+def test_optimizer_counts_a_real_execution_as_activity():
+    """The pre-existing signal must survive: a live run that actually traded
+    was never idle, and still is not."""
+    dec = [{"action": "sell", "executed": True, "gate_failed": None}]
+    found = R.find_optimizations([{**h, "decisions": dec} for h in _hist(12)])
+    assert not any(f["kind"] == "throughput" for f in found)
+
+
+def test_optimizer_does_not_treat_an_exit_suggestion_as_a_gate_clearance():
+    """A `trim` raised as a cap-breach remedy records `gate_failed: null`
+    because it never went through the gate at all (22 September, VTI). It
+    must not be mistaken for an idea the gate let through."""
+    dec = [{"symbol": "VTI", "action": "trim", "executed": False, "gate_failed": None}]
+    found = R.find_optimizations([{**h, "decisions": dec} for h in _hist(12)])
+    assert any(f["kind"] == "throughput" for f in found)
+
+
 def test_optimizer_spots_a_dominant_slow_stage():
     stages = [{"name": "web_research", "duration_ms": 90_000},
               {"name": "gather", "duration_ms": 5_000}]

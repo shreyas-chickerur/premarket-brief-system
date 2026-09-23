@@ -1946,3 +1946,44 @@ unchanged and to check `coverage_issues()` before rejecting anything at
 system misreporting itself, which is worse than the gate being strict.
 Unverified: whether AV `NEWS_SENTIMENT` also delivered for BB that day; the
 manifest only says one distinct source survived.
+
+## Stage 23 -- the throughput finding measured the DRY RUN guard, not the gate, 23 September 2026
+
+`runlog.find_optimizations`'s `throughput` finding counted a run idle whenever
+no decision carried `executed: true`, and proposed "verify the gate is
+calibrated, not merely unreachable". Under the standing DRY RUN guard that
+count is fixed by construction: the guard forbids `place_equity_order`, so
+`executed` can never be true, and the finding has fired on every run with a
+recorded optimization block -- 14, 15, 16, 18, 21, 22 and 23 September, sample
+growing 16, 17, 18, 19, 20, 21, 22, 23 in lockstep with the run count. It fired
+on 22 and 23 September too, the two days BB cleared all five gate conditions
+and its order was computed and withheld by the guard alone
+(`gate_funnel.cleared_gate: 1` both days, and 23 September's own
+`dry_run_no_orders_placed` check records "the one qualifying order was computed
+and reported only"). A finding that cannot be falsified while a guard is on is
+noise, and this one was drowning out the days the gate really did turn
+everything away -- the only thing it was ever meant to catch.
+
+The count is now "nothing cleared the gate": a decision whose action is `buy`
+and which records no `gate_failed` is an idea the gate let through, whether or
+not the order was then placed. Whether it was placed is the guard's business,
+not the gate's. `executed` still counts on its own, so a live run that traded is
+never read as idle either. `sell` and `trim` deliberately do NOT count: they are
+exits and cap-breach remedies that reach a decision without passing the gate at
+all -- the 22 September VTI trim records `gate_failed: null` for exactly that
+reason ("not a gated idea: this is a cap-breach remedy, not a catalyst thesis")
+-- so counting them would make the finding quieter than the truth.
+
+Nothing about the guard changed. This is a diagnostic reporting the guard's
+effect as a gate problem, and only the diagnostic moved.
+
+Not acted on, same review pass: the recurring `performance` finding ("stage
+'preflight' is 59% of runtime, 921046ms average", present on the same seven
+days). Its average is taken over a 30-run window that straddles the state
+bundle landing -- `stage0_read_cost` was 1,731,461ms on 18 September against
+356,060ms on 22 September and 309,143ms on 23 September -- so the number is
+dominated by runs whose cause has already been fixed, and it should fall on its
+own as the window rolls. Whether `find_optimizations` should use a median
+rather than a mean here, as `_regressions`' own `duration_stable` check already
+does, is a real question, but it changes what a diagnostic reports on evidence
+this run could not gather, and one review pass takes one change.

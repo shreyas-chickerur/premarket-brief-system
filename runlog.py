@@ -1061,6 +1061,34 @@ def heartbeat_payload(log: "RunLog", *, now: Optional[datetime] = None) -> dict:
     }
 
 
+#: Actions that mean an idea actually got through the five-condition entry
+#: gate. `hold`, `reject`, `skip` and `none` never did; `sell` and `trim`
+#: are exits and cap-breach remedies, which `DAILY_PROCEDURE.md` reaches
+#: without the gate at all (the 22 September VTI trim recorded
+#: `gate_failed: null` precisely because it was "not a gated idea, this is
+#: a cap-breach remedy"), so counting those would make the throughput
+#: finding quieter than the truth.
+_GATE_CLEARING_ACTIONS = frozenset({"buy"})
+
+
+def _produced_something(run: dict) -> bool:
+    """Did this run get an idea through the gate, or actually trade?
+
+    Deliberately not keyed on `executed` alone: under the standing DRY RUN
+    guard an order that clears every gate condition is computed and then
+    withheld, which says nothing at all about whether the gate is
+    reachable. A real execution still counts on its own, so a live run that
+    traded is never read as idle.
+    """
+    for d in run.get("decisions", []):
+        if d.get("executed"):
+            return True
+        if (str(d.get("action", "")).lower() in _GATE_CLEARING_ACTIONS
+                and not d.get("gate_failed")):
+            return True
+    return False
+
+
 def find_optimizations(history: Sequence[dict]) -> list[dict]:
     """Look for things worth changing. Proposals only — nothing self-modifies.
 
@@ -1111,11 +1139,29 @@ def find_optimizations(history: Sequence[dict]) -> list[dict]:
                                     "just hard to satisfy mechanically"})
 
     # Are we producing anything at all?
-    idle = sum(1 for h in recent
-               if not any(d.get("executed") for d in h.get("decisions", [])))
+    #
+    # 23 September 2026 (watchdog Stage 5B). This used to count a run idle
+    # whenever no decision carried `executed: true`. Under the standing DRY
+    # RUN guard that is true BY CONSTRUCTION -- the guard forbids
+    # `place_equity_order`, so `executed` can never be true -- and the
+    # finding therefore fired on every run from 14 September onward, with
+    # the proposal "verify the gate is calibrated, not merely unreachable",
+    # on days the gate demonstrably was reachable: on 22 and 23 September BB
+    # cleared all five conditions and the order was computed and withheld by
+    # the guard alone (`gate_funnel.cleared_gate: 1`). A finding that cannot
+    # be falsified while a guard is on is noise, and it would drown out the
+    # days the gate really did reject everything -- which is the only thing
+    # this finding was ever meant to catch.
+    #
+    # Whether a cleared order was then PLACED is the guard's business, not
+    # the gate's, so the count is now "nothing cleared the gate". This
+    # deliberately does not touch the guard, which stays exactly as it is;
+    # it only stops a diagnostic reporting the guard's effect as a gate
+    # problem.
+    idle = sum(1 for h in recent if not _produced_something(h))
     if n >= 10 and idle / n > 0.85:
         out.append({"kind": "throughput", "confidence": "observational", "sample": n,
-                    "finding": f"no action taken on {idle} of {n} runs",
+                    "finding": f"nothing cleared the gate on {idle} of {n} runs",
                     "proposal": "verify the gate is calibrated, not merely unreachable"})
 
     # Slowest stage, if it dominates.
