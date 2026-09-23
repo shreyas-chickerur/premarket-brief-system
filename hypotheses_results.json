@@ -340,5 +340,94 @@
     "holdout": -0.17
    }
   }
+ },
+ "round4": {
+  "discovery": {
+   "period": [
+    "2013-01-01",
+    "2021-12-31"
+   ],
+   "screen_t": 2.128045234184984,
+   "carried": [],
+   "universe_used": 280,
+   "excluded": {
+    "AMTD": "series starts 2019-08-05",
+    "APC": "series starts 2026-02-12",
+    "ARX": "series starts 2025-07-24",
+    "BALT": "series starts 2021-07-01",
+    "CBAT": "series starts 2026-06-30",
+    "CYPS": "series starts 2022-09-02",
+    "DOW": "series starts 2019-03-20",
+    "FMFC": "series starts 2025-06-25",
+    "FRANQ": "series starts 2021-05-06",
+    "GRO": "series starts 2024-11-27",
+    "INAPQ": "series starts 2020-05-01",
+    "LSE": "series starts 2024-12-19",
+    "MFI": "series starts 2024-04-22",
+    "MOBI": "series starts 2026-05-08",
+    "MRLN": "series starts 2026-03-16",
+    "NSR": "series starts 2021-06-03",
+    "NXH": "series starts 2026-08-14",
+    "ROC": "series starts 2026-02-20",
+    "VII": "series starts 2026-07-20",
+    "WX": "series starts 2026-06-03"
+   },
+   "results": {
+    "H16": {
+     "candidates": 1080,
+     "gated": {
+      "no_blocking_conflict": 81,
+      "risk_sized": 69
+     },
+     "n": 930,
+     "mean_excess_pct": -0.5122484356424222,
+     "median_excess_pct": -1.0822253568907647,
+     "sd_excess_pct": 12.939436744761581,
+     "win_rate_vs_spy": 0.44516129032258067,
+     "months": 108,
+     "mean_monthly_excess_pct": -0.5697198176813605,
+     "t": -1.0629391246286786,
+     "mean_excess_pct_at_0.30_cost": -0.7122484356424221
+    },
+    "H17": {
+     "candidates": 4699,
+     "gated": {
+      "no_blocking_conflict": 348,
+      "risk_sized": 126
+     },
+     "n": 4225,
+     "mean_excess_pct": -0.1612833561986356,
+     "median_excess_pct": -0.3171402302510117,
+     "sd_excess_pct": 8.501285201418497,
+     "win_rate_vs_spy": 0.47337278106508873,
+     "months": 108,
+     "mean_monthly_excess_pct": -0.1497751084363024,
+     "t": -0.8002087043288163,
+     "mean_excess_pct_at_0.30_cost": -0.36128335619863555
+    },
+    "H18": {
+     "candidates": 1078,
+     "gated": {
+      "no_blocking_conflict": 125,
+      "risk_sized": 71
+     },
+     "n": 882,
+     "mean_excess_pct": -0.5422539290248425,
+     "median_excess_pct": -0.7786995353323832,
+     "sd_excess_pct": 7.549837066000564,
+     "win_rate_vs_spy": 0.4308390022675737,
+     "months": 108,
+     "mean_monthly_excess_pct": -0.4359633701508848,
+     "t": -1.2734048662087343,
+     "mean_excess_pct_at_0.30_cost": -0.7422539290248426
+    }
+   }
+  }
+ },
+ "summary_after_round4": {
+  "hypotheses_tested": 18,
+  "carried_to_holdout": 2,
+  "confirmed": 0,
+  "finding": "Momentum: +1.26%/trade (t=2.34) on the survivorship-biased 2022-snapshot universe in 2012-2021, -0.51% (t=-1.06) on the 2012-snapshot universe (47% later delisted) over nearly the same years. The discovery-period 'edges' of rounds 1 and 3 are consistent with survivorship bias, not signal."
  }
 }
